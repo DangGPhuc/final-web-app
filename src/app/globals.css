@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+:root {
+  /* Background & Surface */
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+
+  /* Brand & Semantic */
+  --primary: #10b981;
+  --primary-dark: #059669;
+  --primary-light: #d1fae5;
+  --secondary: #0ea5e9;
+  --secondary-light: #e0f2fe;
+  --accent: #f59e0b;
+  --accent-light: #fef3c7;
+
+  /* State colors */
+  --income: #10b981;
+  --income-light: #d1fae5;
+  --expense: #f43f5e;
+  --expense-light: #ffe4e6;
+  --transfer: #0ea5e9;
+  --transfer-light: #e0f2fe;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+
+  /* Text */
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --text-tertiary: #94a3b8;
+  --text-inverse: #ffffff;
+
+  /* Border & Divider */
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --divider: #f1f5f9;
+
+  /* Shadow (soft, mobile-app-like) */
+  --shadow-sm: 0 1px 2px 0 rgb(15 23 42 / 0.04);
+  --shadow: 0 2px 8px -1px rgb(15 23 42 / 0.08), 0 1px 3px -1px rgb(15 23 42 / 0.04);
+  --shadow-md: 0 4px 16px -4px rgb(15 23 42 / 0.1), 0 2px 6px -2px rgb(15 23 42 / 0.05);
+  --shadow-lg: 0 10px 30px -6px rgb(15 23 42 / 0.12), 0 4px 10px -4px rgb(15 23 42 / 0.05);
+
+  /* Radius */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
+  --radius-full: 9999px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background-color: var(--background);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Utility classes for design tokens */
+@layer utilities {
+  .bg-app {
+    background-color: var(--background);
+  }
+  .bg-surface {
+    background-color: var(--surface);
+  }
+  .text-primary {
+    color: var(--text-primary);
+  }
+  .text-secondary {
+    color: var(--text-secondary);
+  }
+  .text-tertiary {
+    color: var(--text-tertiary);
+  }
+}
+
+/* Scrollbar minimal */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Safe area helpers for mobile notch */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
