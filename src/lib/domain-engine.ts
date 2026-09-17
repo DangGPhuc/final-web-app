@@ -668,6 +668,19 @@ export function applyPayBill(
     return { ok: false, error: 'Không tìm thấy hóa đơn' };
   }
 
+  // Enforce invariant: bill cannot be paid again if already PAID
+  if (bill.status === 'PAID') {
+    return { ok: false, error: 'Hóa đơn đã được thanh toán, không thể thanh toán lại' };
+  }
+
+  // Enforce invariant: cannot pay if a linked transaction already exists
+  const existingLinkedTx = state.transactions.find(
+    (t) => t.origin === 'BILL_PAYMENT' && t.originId === billId
+  );
+  if (existingLinkedTx) {
+    return { ok: false, error: 'Hóa đơn đã có giao dịch thanh toán liên kết, không thể thanh toán lại' };
+  }
+
   if (typeof bill.amount !== 'number' || isNaN(bill.amount) || !isFinite(bill.amount) || bill.amount <= 0) {
     return { ok: false, error: 'Số tiền hóa đơn không hợp lệ' };
   }
@@ -739,7 +752,9 @@ export function applyPayBill(
 }
 
 /**
- * Undo / reset bill payment:
+ * Undo / reset bill payment safely:
+ * - Validates reversibility before mutating state (no silent clamping)
+ * - If paid via credit card and subsequent repayment makes exact reversal impossible, rejects undo
  * - Reverses the linked payment transaction effect on wallet
  * - Removes the linked payment transaction
  * - Marks bill UNPAID
@@ -753,18 +768,53 @@ export function applyUnpayBill(
     return { ok: false, error: 'Không tìm thấy hóa đơn' };
   }
 
+  if (bill.status !== 'PAID') {
+    return { ok: false, error: 'Hóa đơn chưa được thanh toán, không thể hoàn tác' };
+  }
+
   // Find linked transaction
   const linkedTx = state.transactions.find((t) => t.origin === 'BILL_PAYMENT' && t.originId === billId);
+  if (!linkedTx) {
+    return { ok: false, error: 'Không tìm thấy giao dịch thanh toán liên kết của hóa đơn' };
+  }
 
-  let updatedWallets = state.wallets;
-  if (linkedTx) {
-    updatedWallets = state.wallets.map((w) => {
-      if (w.id !== linkedTx.walletId) return w;
-      if (w.type === 'CREDIT') {
-        return { ...w, balance: Math.max(0, w.balance - linkedTx.amount) };
+  const targetWallet = state.wallets.find((w) => w.id === linkedTx.walletId);
+  if (!targetWallet) {
+    return { ok: false, error: 'Không tìm thấy ví thanh toán liên kết để hoàn tác' };
+  }
+
+  // Reversibility check: for CREDIT wallet, reversing bill payment reduces debt.
+  // If current debt is lower than bill amount, exact reversal is impossible without resulting in negative debt.
+  if (targetWallet.type === 'CREDIT' && targetWallet.balance < linkedTx.amount) {
+    return {
+      ok: false,
+      error: 'Không thể hoàn tác thanh toán hóa đơn vì dư nợ thẻ tín dụng hiện tại nhỏ hơn số tiền hóa đơn cần hoàn tác (đã có giao dịch trả nợ hoặc thay đổi số dư sau đó).',
+    };
+  }
+
+  // Simulate wallet updates without silent clamping
+  const simulatedWallets = state.wallets.map((w) => {
+    if (w.id !== linkedTx.walletId) return { ...w };
+    if (w.type === 'CREDIT') {
+      return { ...w, balance: w.balance - linkedTx.amount };
+    }
+    return { ...w, balance: w.balance + linkedTx.amount };
+  });
+
+  // Validate all simulated balances
+  for (const w of simulatedWallets) {
+    if (w.type === 'CREDIT') {
+      if (w.balance < 0) {
+        return { ok: false, error: `Hoàn tác thanh toán khiến dư nợ thẻ "${w.name}" bị âm` };
       }
-      return { ...w, balance: w.balance + linkedTx.amount };
-    });
+      if (w.creditLimit !== undefined && w.creditLimit > 0 && w.balance > w.creditLimit) {
+        return { ok: false, error: `Hoàn tác thanh toán khiến dư nợ thẻ "${w.name}" vượt hạn mức` };
+      }
+    } else {
+      if (w.balance < 0) {
+        return { ok: false, error: `Số dư ví "${w.name}" không hợp lệ sau khi hoàn tác` };
+      }
+    }
   }
 
   const updatedBills = state.bills.map((b) =>
@@ -777,15 +827,13 @@ export function applyUnpayBill(
       : b
   );
 
-  const updatedTransactions = linkedTx
-    ? state.transactions.filter((t) => t.id !== linkedTx.id)
-    : state.transactions;
+  const updatedTransactions = state.transactions.filter((t) => t.id !== linkedTx.id);
 
   return {
     ok: true,
     state: {
       ...state,
-      wallets: updatedWallets,
+      wallets: simulatedWallets,
       bills: updatedBills,
       transactions: updatedTransactions,
     },

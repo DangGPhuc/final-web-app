@@ -738,4 +738,148 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
       expect(delOrphanWallet.state.wallets.some((w) => w.id === 'wal-orphan')).toBe(false);
     }
   });
+
+  // =========================================================================
+  // CASE K — Double Bill Payment
+  // =========================================================================
+  it('CASE K — Double Bill Payment: paying a bill twice without undo is rejected', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-bank',
+          name: 'Ngân hàng',
+          type: 'BANK',
+          balance: 10000000,
+          initialBalance: 10000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          createdAt: '2026-01-01',
+        },
+      ],
+      bills: [
+        {
+          id: 'bill-water',
+          name: 'Tiền nước sinh hoạt',
+          amount: 200000,
+          categoryId: 'cat-bills',
+          dueDay: 10,
+          frequency: 'MONTHLY',
+          status: 'UNPAID',
+        },
+      ],
+      transactions: [],
+    });
+
+    // 1. Pay bill once
+    const pay1 = applyPayBill(state, 'bill-water', 'wal-bank', '2026-09-10T10:00:00');
+    expect(pay1.ok).toBe(true);
+    if (!pay1.ok) return;
+
+    expect(pay1.state.wallets[0].balance).toBe(9800000);
+    expect(pay1.state.bills[0].status).toBe('PAID');
+    expect(pay1.state.transactions.length).toBe(1);
+
+    // 2. Attempt to pay same bill again without undo
+    const pay2 = applyPayBill(pay1.state, 'bill-water', 'wal-bank', '2026-09-10T11:00:00');
+    expect(pay2.ok).toBe(false);
+    if (!pay2.ok) {
+      expect(pay2.error).toMatch(/đã được thanh toán|đã có giao dịch/);
+    }
+
+    // Verify wallet/debt changed only once and only one BILL_PAYMENT transaction exists
+    const bankWallet = pay1.state.wallets.find((w) => w.id === 'wal-bank');
+    expect(bankWallet?.balance).toBe(9800000);
+    const billPayments = pay1.state.transactions.filter(
+      (t) => t.origin === 'BILL_PAYMENT' && t.originId === 'bill-water'
+    );
+    expect(billPayments.length).toBe(1);
+  });
+
+  // =========================================================================
+  // CASE L — Unsafe Bill Undo
+  // =========================================================================
+  it('CASE L — Unsafe Bill Undo: credit bill undo rejected when exact reversal is impossible', () => {
+    // Credit debt before bill: 0
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-credit',
+          name: 'Thẻ tín dụng',
+          type: 'CREDIT',
+          balance: 0,
+          initialBalance: 0,
+          creditLimit: 10000000,
+          currency: 'VND',
+          color: '#8b5cf6',
+          icon: 'CreditCard',
+          createdAt: '2026-01-01',
+        },
+        {
+          id: 'wal-bank',
+          name: 'Ngân hàng',
+          type: 'BANK',
+          balance: 5000000,
+          initialBalance: 5000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          createdAt: '2026-01-01',
+        },
+      ],
+      bills: [
+        {
+          id: 'bill-phone',
+          name: 'Cước viễn thông',
+          amount: 1000000,
+          categoryId: 'cat-bills',
+          dueDay: 15,
+          frequency: 'MONTHLY',
+          status: 'UNPAID',
+        },
+      ],
+      transactions: [],
+    });
+
+    // 1. Pay bill with CREDIT (+1,000,000 debt)
+    const payRes = applyPayBill(state, 'bill-phone', 'wal-credit', '2026-09-10T10:00:00');
+    expect(payRes.ok).toBe(true);
+    if (!payRes.ok) return;
+
+    let creditWallet = payRes.state.wallets.find((w) => w.id === 'wal-credit');
+    expect(creditWallet?.balance).toBe(1000000); // 1,000,000 debt
+
+    // 2. Later repay credit card: -800,000 debt via transfer from bank
+    const repayRes = applyAddTransaction(payRes.state, {
+      type: 'TRANSFER',
+      amount: 800000,
+      fee: 0,
+      walletId: 'wal-bank',
+      toWalletId: 'wal-credit',
+      date: '2026-09-11T10:00:00',
+      note: 'Trả nợ thẻ',
+      tags: [],
+    });
+    expect(repayRes.ok).toBe(true);
+    if (!repayRes.ok) return;
+
+    creditWallet = repayRes.state.wallets.find((w) => w.id === 'wal-credit');
+    expect(creditWallet?.balance).toBe(200000); // Current debt: 200,000
+
+    // 3. Attempt to undo original bill payment of 1,000,000
+    const undoRes = applyUnpayBill(repayRes.state, 'bill-phone');
+    expect(undoRes.ok).toBe(false);
+    if (!undoRes.ok) {
+      expect(undoRes.error).toContain('dư nợ thẻ');
+    }
+
+    // Wallets unchanged, transactions unchanged, bill remains PAID
+    const stateAfterFailedUndo = repayRes.state;
+    const finalCredit = stateAfterFailedUndo.wallets.find((w) => w.id === 'wal-credit');
+    const finalBill = stateAfterFailedUndo.bills.find((b) => b.id === 'bill-phone');
+
+    expect(finalCredit?.balance).toBe(200000);
+    expect(finalBill?.status).toBe('PAID');
+    expect(stateAfterFailedUndo.transactions.some((t) => t.originId === 'bill-phone')).toBe(true);
+  });
 });
