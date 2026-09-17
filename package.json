@@ -8,7 +8,7 @@
     "start": "next start",
     "test": "vitest run",
     "typecheck": "next typegen && tsc --noEmit",
-    "test:backend": "vitest run tests/backend-security.test.ts tests/backend-db.test.ts"
+    "test:backend": "vitest run tests/backend-security.test.ts tests/backend-db.test.ts tests/route-integration.test.ts"
   },
   "dependencies": {
     "@types/canvas-confetti": "^1.9.0",

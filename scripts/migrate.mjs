@@ -75,7 +75,16 @@ export async function runMigrations(connectionString) {
         console.log(`[migrate] Verified ${version} (checksum matched)`);
       } else {
         console.log(`[migrate] Applying ${version}...`);
-        const sql = readFileSync(filePath, 'utf8');
+        let sql = readFileSync(filePath, 'utf8');
+        if (version === '001_backend_foundation.sql') {
+          const roleCheck = await client.query("SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime'");
+          if (roleCheck.rows.length > 0) {
+            sql = sql.replace(
+              'CREATE ROLE fintrack_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;',
+              '-- role fintrack_runtime already provisioned in cluster'
+            );
+          }
+        }
         await client.query('BEGIN');
         try {
           await client.query(sql);
