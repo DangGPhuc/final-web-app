@@ -290,6 +290,7 @@ export const INITIAL_TRANSACTIONS: Transaction[] = [
     walletName: 'Vietcombank Nhận lương',
     toWalletId: 'wal-tcb',
     toWalletName: 'Techcombank Chi tiêu',
+    transferKind: 'WALLET_TRANSFER',
     fee: 0,
     date: '2026-09-01T10:00:00',
     note: 'Chuyển tiền vào tài khoản chi tiêu sinh hoạt tháng 9',

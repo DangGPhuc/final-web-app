@@ -1,4 +1,4 @@
-import { Wallet, WalletType, Transaction, TransactionType, RecurringBill, BillStatus, SavingsGoal, FinancialSummary, TransactionOrigin, TransferKind, Budget, IncomeBudgetPlanner } from '@/types';
+import { Wallet, WalletType, Transaction, TransactionType, RecurringBill, BillStatus, SavingsGoal, FinancialSummary, TransactionOrigin, TransferKind, Budget, IncomeBudgetPlanner, Category } from '@/types';
 import { getCurrentYearMonth, isDateInLocalYearMonth, getLocalDateKey } from './utils';
 
 export interface AppDomainState {
@@ -1451,7 +1451,8 @@ export function applyAddBudget(
     alertThreshold80?: boolean;
     alertThreshold100?: boolean;
     [key: string]: unknown;
-  }
+  },
+  categories?: Category[]
 ): { ok: true; budgets: Budget[]; newBudget: Budget } | { ok: false; error: string } {
   if (!input || typeof input.categoryId !== 'string' || !input.categoryId.trim()) {
     return { ok: false, error: 'Danh mục ngân sách không được để trống' };
@@ -1467,6 +1468,18 @@ export function applyAddBudget(
   }
 
   const categoryId = input.categoryId.trim();
+
+  // §5: categoryId must exist and be an EXPENSE category
+  if (categories && categories.length > 0) {
+    const cat = categories.find((c) => c.id === categoryId);
+    if (!cat) {
+      return { ok: false, error: `Danh mục "${categoryId}" không tồn tại trong hệ thống` };
+    }
+    if (cat.type !== 'EXPENSE') {
+      return { ok: false, error: `Chỉ có thể tạo ngân sách cho danh mục chi tiêu (EXPENSE). Danh mục "${cat.name}" là loại ${cat.type}` };
+    }
+  }
+
   const duplicate = budgets.some((b) => b.categoryId === categoryId && b.month === input.month);
   if (duplicate) {
     return { ok: false, error: `Ngân sách cho danh mục "${input.categoryName.trim()}" trong tháng ${input.month} đã tồn tại` };
@@ -1500,7 +1513,8 @@ export function applyAddBudget(
 export function applyEditBudget(
   budgets: Budget[],
   budgetId: string,
-  updates: Partial<Budget>
+  updates: Partial<Budget>,
+  categories?: Category[]
 ): { ok: true; budgets: Budget[]; updatedBudget: Budget } | { ok: false; error: string } {
   const budget = budgets.find((b) => b.id === budgetId);
   if (!budget) {
@@ -1530,6 +1544,18 @@ export function applyEditBudget(
   }
 
   const targetCategoryId = updates.categoryId !== undefined ? updates.categoryId.trim() : budget.categoryId;
+
+  // §5: if categoryId is changing, validate new category exists and is EXPENSE
+  if (targetCategoryId !== budget.categoryId && categories && categories.length > 0) {
+    const cat = categories.find((c) => c.id === targetCategoryId);
+    if (!cat) {
+      return { ok: false, error: `Danh mục "${targetCategoryId}" không tồn tại trong hệ thống` };
+    }
+    if (cat.type !== 'EXPENSE') {
+      return { ok: false, error: `Chỉ có thể tạo ngân sách cho danh mục chi tiêu (EXPENSE). Danh mục "${cat.name}" là loại ${cat.type}` };
+    }
+  }
+
   if (targetCategoryId !== budget.categoryId) {
     const duplicate = budgets.some((b) => b.id !== budgetId && b.categoryId === targetCategoryId && b.month === budget.month);
     if (duplicate) {
