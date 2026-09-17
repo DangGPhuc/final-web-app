@@ -12,8 +12,8 @@ RESTORE_URL="${DATABASE_RESTORE_URL:-postgres://postgres:ci-only-disposable-pass
 BACKUP_FILE="/tmp/fintrack_logical_backup.sql"
 
 echo "=== [1/7] Initializing source database & applying migrations (001 -> 002 -> 003) ==="
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS fintrack_restore;"
-psql "$BASE_URL" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS fintrack CASCADE; DROP ROLE IF EXISTS fintrack_runtime; DROP ROLE IF EXISTS fintrack_app_login;"
+psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS fintrack_restore;" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;"
+psql "$BASE_URL" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS fintrack CASCADE; DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime') THEN DROP OWNED BY fintrack_runtime; DROP ROLE fintrack_runtime; END IF; IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_app_login') THEN DROP OWNED BY fintrack_app_login; DROP ROLE fintrack_app_login; END IF; END \$\$;"
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/001_backend_foundation.sql
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/002_backend_security_hardening.sql
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/003_backend_deployment_closure.sql
