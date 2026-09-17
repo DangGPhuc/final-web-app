@@ -121,14 +121,31 @@ export const WalletsView: React.FC = () => {
       return;
     }
 
-    const feeNum = Number(transferFee) || 0;
     const fromW = wallets.find((w) => w.id === fromWalletId);
-    if (!fromW) {
-      alert('Ví nguồn không tồn tại');
+    const toW = wallets.find((w) => w.id === toWalletId);
+    if (!fromW || !toW) {
+      alert('Không tìm thấy thông tin ví');
       return;
     }
+
+    if (fromW.type === 'CREDIT') {
+      alert('Không hỗ trợ rút tiền mặt hoặc chuyển tiền từ thẻ tín dụng (Cash advance)');
+      return;
+    }
+
+    const feeNum = Number(transferFee);
+    if (isNaN(feeNum) || !isFinite(feeNum) || feeNum < 0) {
+      alert('Phí chuyển khoản không hợp lệ (phải là số >= 0)');
+      return;
+    }
+
     if (fromW.balance < amountNum + feeNum) {
       alert('Số dư ví nguồn không đủ để thực hiện chuyển khoản');
+      return;
+    }
+
+    if (toW.type === 'CREDIT' && amountNum > toW.balance) {
+      alert('Số tiền thanh toán vượt quá dư nợ hiện tại của thẻ tín dụng');
       return;
     }
 
@@ -209,11 +226,13 @@ export const WalletsView: React.FC = () => {
         </div>
 
         <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm">
-          <span className="text-xs font-semibold text-slate-400 uppercase">Tiền gửi tiết kiệm</span>
+          <span className="text-xs font-semibold text-slate-400 uppercase">Tiết kiệm & Mục tiêu</span>
           <p className="text-2xl font-black text-blue-600 dark:text-blue-400 mt-1">
             {formatCurrency(financialSummary.totalSavings)}
           </p>
-          <span className="text-[11px] text-slate-400">Đang sinh lãi tại các ngân hàng</span>
+          <span className="text-[11px] text-slate-400">
+            Sổ TK: {formatCurrency(financialSummary.walletSavings)} • Hũ: {formatCurrency(financialSummary.goalSavings)}
+          </span>
         </div>
 
         <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm">
