@@ -76,6 +76,14 @@ const securityHeaders = [
   },
 ];
 
+// In production, add HSTS (max-age=31536000). Do NOT add includeSubDomains unless explicitly controlled.
+if (!isDev) {
+  securityHeaders.push({
+    key: 'Strict-Transport-Security',
+    value: 'max-age=31536000',
+  });
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,

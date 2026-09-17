@@ -2,43 +2,44 @@
  * API Security & Demo Guards for FinTrack Pro v2
  *
  * Implements:
- * 1. Production gating for mock mutation APIs (ENABLE_DEMO_API policy).
- *    In production, mock POST/mutation endpoints return HTTP 501 Not Implemented
- *    unless ENABLE_DEMO_API=true is explicitly set.
+ * 1. Production shutdown for legacy mock APIs.
+ *    In NODE_ENV=production, all legacy demo routes return HTTP 404 Not Found.
+ *    ENABLE_DEMO_API=true cannot re-enable them in production.
  * 2. Strict request body UTF-8 byte size validation before JSON parsing.
  */
 import { NextResponse } from 'next/server';
 
 export function isDemoApiEnabled(): boolean {
-  if (process.env.ENABLE_DEMO_API === 'true') {
-    return true;
+  // In production, legacy demo APIs are strictly disabled under ALL conditions.
+  // ENABLE_DEMO_API=true cannot override this in production.
+  if (process.env.NODE_ENV === 'production') {
+    return false;
   }
-  // In development/test environments, demo API defaults to enabled unless explicitly disabled
-  if (process.env.NODE_ENV !== 'production' && process.env.ENABLE_DEMO_API !== 'false') {
-    return true;
-  }
-  // Production default is disabled
-  return false;
+  // In development/test environments, demo API defaults to enabled unless explicitly set to false
+  return process.env.ENABLE_DEMO_API !== 'false';
 }
 
-export function checkDemoMutationAllowed(): NextResponse | null {
+export function checkLegacyDemoRouteDisabled(): NextResponse | null {
   if (!isDemoApiEnabled()) {
     return NextResponse.json(
       {
         success: false,
-        error: 'Demo mutation API is disabled in production. Database backend persistence is required.',
-        _code: 'DEMO_MUTATION_DISABLED',
+        error: 'Legacy demo endpoint is disabled in production.',
+        _code: 'LEGACY_DEMO_DISABLED',
       },
       {
-        status: 501,
+        status: 404,
         headers: {
-          'X-Demo-Only': 'true',
-          'X-Persistence': 'none',
+          'Cache-Control': 'no-store',
         },
       }
     );
   }
   return null;
+}
+
+export function checkDemoMutationAllowed(): NextResponse | null {
+  return checkLegacyDemoRouteDisabled();
 }
 
 export interface BoundedJsonResult<T> {
@@ -72,7 +73,10 @@ export async function readBoundedJsonBody<T = Record<string, unknown>>(
   let rawText = '';
   let bytes = 0;
   let timedOut = false;
-  const timeout = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => {}); }, 5000);
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    void reader.cancel().catch(() => {});
+  }, 5000);
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -98,14 +102,10 @@ export async function readBoundedJsonBody<T = Record<string, unknown>>(
     return { ok: false, error: 'Request body cannot be empty', status: 400 };
   }
 
-  // 4. Safely parse JSON
   try {
-    const data = JSON.parse(rawText) as T;
-    if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-      return { ok: false, error: 'Body must be a JSON object', status: 400 };
-    }
-    return { ok: true, data };
+    const parsed = JSON.parse(rawText) as T;
+    return { ok: true, data: parsed };
   } catch {
-    return { ok: false, error: 'Invalid JSON body', status: 400 };
+    return { ok: false, error: 'Invalid JSON payload', status: 400 };
   }
 }

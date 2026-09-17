@@ -13,13 +13,17 @@
 import { NextResponse } from 'next/server';
 import { INITIAL_TRANSACTIONS } from '@/lib/mock-data';
 import { isDateInLocalYearMonth } from '@/lib/utils';
-import { checkDemoMutationAllowed, readBoundedJsonBody } from '@/lib/api-guard';
+import { checkLegacyDemoRouteDisabled, readBoundedJsonBody } from '@/lib/api-guard';
 
 const DEMO_HEADERS = { 'X-Demo-Only': 'true', 'X-Persistence': 'none' };
 
 const VALID_TX_TYPES = ['EXPENSE', 'INCOME', 'TRANSFER'] as const;
 
 export async function GET(req: Request) {
+  const disabled = checkLegacyDemoRouteDisabled();
+  if (disabled) {
+    return disabled;
+  }
   const { searchParams } = new URL(req.url);
   const type = searchParams.get('type');
   const month = searchParams.get('month');
@@ -49,10 +53,9 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  // Production guard: mock mutation endpoints return 501 in production unless ENABLE_DEMO_API=true
-  const mutationBlocked = checkDemoMutationAllowed();
-  if (mutationBlocked) {
-    return mutationBlocked;
+  const disabled = checkLegacyDemoRouteDisabled();
+  if (disabled) {
+    return disabled;
   }
 
   // Reject oversized bodies and measure real UTF-8 bytes before JSON parsing

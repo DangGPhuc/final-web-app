@@ -1,8 +1,7 @@
 # FinTrack Pro - Web App Quản Lý Chi Tiêu & Mô Phỏng Tài Chính Thông Minh
 
-> Backend foundation V2: xem [review, API contract và hướng dẫn](docs/backend/FOUNDATION_REVIEW_VI.md).
-> UI hiện vẫn dùng localStorage; `/api/*` cũ là demo. Backend PostgreSQL mới ở
-> `/api/v2/wallets` và `/api/v2/transfers`, tắt mặc định, chưa có luồng login production.
+> **Security Hardening (Iteration v2)**: Xem chi tiết kỹ thuật tại [FOUNDATION_REVIEW_VI.md](docs/backend/FOUNDATION_REVIEW_VI.md) và [Security Baseline](docs/security/security-baseline.md).
+> **Trạng thái lưu trữ**: UI hiện vẫn dùng client-side `localStorage`. Backend PostgreSQL mới tại `/api/v2/*` đã được hardening (session-derived RLS, quota ví, bounded rate-limiting, session revocation), tắt mặc định. Các route `/api/*` demo cũ bị tắt hoàn toàn ở production. Frontend cutover sang PostgreSQL sẽ được thực hiện ở iteration tiếp theo.
 
 Dự án Web App Quản lý Chi tiêu toàn diện kèm tính năng đột phá **What-If Financial Simulator** (Mô phỏng tài chính phản ứng thời gian thực & Benchmark tối ưu hiệu năng).
 

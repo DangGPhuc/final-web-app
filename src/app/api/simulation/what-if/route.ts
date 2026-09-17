@@ -8,11 +8,16 @@
  */
 import { NextResponse } from 'next/server';
 import { INITIAL_TRANSACTIONS, INITIAL_WALLETS, INITIAL_PLANNER } from '@/lib/mock-data';
-import { readBoundedJsonBody } from '@/lib/api-guard';
+import { checkLegacyDemoRouteDisabled, readBoundedJsonBody } from '@/lib/api-guard';
 
 const DEMO_HEADERS = { 'X-Demo-Only': 'true', 'X-Persistence': 'none' };
 
 export async function POST(req: Request) {
+  const disabled = checkLegacyDemoRouteDisabled();
+  if (disabled) {
+    return disabled;
+  }
+
   const parsed = await readBoundedJsonBody<Record<string, unknown>>(req, 10_000);
   if (!parsed.ok) {
     return NextResponse.json(

@@ -1,10 +1,20 @@
 # Security Baseline — FinTrack Pro v2
 
-> **Disclaimer**: This document maps PLANNED and IMPLEMENTED controls.
-> FinTrack Pro v2 is NOT claimed to be "OWASP compliant."
+> **Disclaimer**: This document maps PLANNED, PARTIAL, and IMPLEMENTED controls.
+> FinTrack Pro v2 is **NOT** claimed to be "OWASP compliant."
 > Formal compliance requires independent verification.
 >
 > Status values: **IMPLEMENTED** | **PARTIAL** | **PLANNED** | **NOT APPLICABLE**
+
+---
+
+## Current Architecture Boundary Notice
+
+> [!IMPORTANT]
+> **Frontend Persistence Status**: The frontend user interface currently operates exclusively with client-side state (`AppContext`) and browser `localStorage`.
+> User financial data entered in the current frontend is **NOT** persisted to PostgreSQL yet.
+> The backend foundation under `/api/v2/*` provides a hardened, multi-tenant PostgreSQL layer (wallets, transfers, sessions, audit, rate limiting) with session-derived RLS. Frontend cutover to this backend is scheduled for the subsequent iteration.
+> No silent mixing of client localStorage and database state is permitted.
 
 ---
 
@@ -14,139 +24,103 @@
 
 | Control | Status | Evidence / Notes |
 |---|---|---|
-| Every user-owned resource includes `user_id` | PLANNED | No backend yet; designed in `docs/architecture/data-storage.md` |
-| Queries enforce `WHERE id = ? AND user_id = ?` | PLANNED | Future PostgreSQL phase |
-| Row Level Security (RLS) on Supabase/PG | PLANNED | Future backend phase |
-| No direct object references to other users' data | PLANNED | Client-side only currently |
-| Service-role key never exposed to browser | PLANNED | No key exists yet |
-| Authorization model documented | PARTIAL | See `docs/architecture/data-storage.md` §Ownership |
+| Every user-owned resource includes `user_id` | IMPLEMENTED | Foundation DB tables (`wallets`, `transfers`, `idempotency`, `audit_events`, `rate_limits`) have `user_id uuid NOT NULL REFERENCES fintrack.users`. |
+| Queries enforce `WHERE user_id = ?` | IMPLEMENTED | Server repository queries enforce `WHERE user_id = $1` on all data operations. |
+| Row Level Security (RLS) on PostgreSQL | IMPLEMENTED | Foundation tables only. `ENABLE` + `FORCE ROW LEVEL SECURITY`. RLS derives user identity strictly from `fintrack.current_session_user_id()` matching `app.session_hash`. `app.user_id` has ZERO authorization effect. |
+| BOLA / IDOR Prevention | IMPLEMENTED | Both source and destination wallets locked and verified to belong to caller's session; foreign wallets return 404. Composite FK `(user_id, wallet_id)` prevents cross-tenant relations even via raw SQL. |
+| Service-role key never exposed | IMPLEMENTED | Web app runs as least-privileged `fintrack_runtime` (no DDL, no TRUNCATE, no DELETE, no bypass RLS). Maintenance scripts run out-of-band via operator credentials. |
+| Authorization model documented | IMPLEMENTED | Documented in `docs/architecture/data-storage.md` and `docs/backend/FOUNDATION_REVIEW_VI.md`. |
+| Frontend backend persistence | PLANNED | Frontend cutover from localStorage to `/api/v2` planned for next iteration. |
 
 ### A02 — Security Misconfiguration
 
 | Control | Status | Evidence / Notes |
 |---|---|---|
-| Security response headers | IMPLEMENTED | `next.config.mjs` — CSP (environment-sensitive, `unsafe-eval` removed in production, `object-src 'none'`), X-Content-Type-Options, Referrer-Policy, Permissions-Policy |
-| Frame protection (clickjacking) | IMPLEMENTED | CSP `frame-ancestors 'none'` + legacy defense-in-depth `X-Frame-Options: DENY` |
-| Demo-only API headers (`X-Demo-Only`, `X-Persistence`) | IMPLEMENTED | All API routes |
-| Production mock mutation gating | IMPLEMENTED | `src/lib/api-guard.ts` enforces `ENABLE_DEMO_API=true`; returns HTTP 501 in production |
-| Stack traces not exposed to users | IMPLEMENTED | `safeErrorMessage()` in `src/lib/error.ts` |
-| No secrets in source code | IMPLEMENTED | Secrets audit passed; `.env.example` created |
-| HSTS | PLANNED | Requires HTTPS deployment; add at reverse proxy |
-| Nonce-based CSP | PLANNED | Requires Next.js nonce integration (future) |
-| No default credentials | NOT APPLICABLE | No authentication yet |
+| Security response headers | IMPLEMENTED | `next.config.mjs` — CSP (environment-sensitive, `unsafe-eval` removed in production, `object-src 'none'`), X-Content-Type-Options, Referrer-Policy, Permissions-Policy. |
+| Frame protection (clickjacking) | IMPLEMENTED | CSP `frame-ancestors 'none'` + legacy defense-in-depth `X-Frame-Options: DENY`. |
+| Production HSTS | IMPLEMENTED | `next.config.mjs` sends `Strict-Transport-Security: max-age=31536000` in production (`!isDev`). `includeSubDomains` omitted to avoid unwarranted claims over unmanaged subdomains. |
+| Legacy demo API production shutdown | IMPLEMENTED | In `NODE_ENV=production`, all legacy `/api/*` demo endpoints return HTTP 404. `ENABLE_DEMO_API=true` is ignored in production. Demo routes accessible only in development/test. |
+| Stack traces not exposed to users | IMPLEMENTED | `safeErrorMessage()` in `src/lib/error.ts`, sanitized API errors in `src/server/http.ts`. |
+| No secrets in source code | IMPLEMENTED | `.env.example` with placeholders; CI and CodeQL scanning enabled. |
+| Nonce-based CSP | PLANNED | Requires Next.js nonce integration (future phase). |
 
 ### A03 — Software Supply Chain Failures
 
 | Control | Status | Evidence / Notes |
 |---|---|---|
-| `package-lock.json` committed | IMPLEMENTED | Pinned dependency tree |
-| `npm ci` for reproducible installs | IMPLEMENTED | See `docs/security/dependency-policy.md` |
-| Automated dependency scanning | PLANNED | Recommend Dependabot / `npm audit` in CI |
-| Spreadsheet dependency migration | IMPLEMENTED | `xlsx` completely removed; migrated to `exceljs` with dynamic import |
-| Major version reviews required | PLANNED | Policy documented |
+| `package-lock.json` committed | IMPLEMENTED | Pinned dependency tree committed and verified in CI. |
+| `npm ci` for reproducible installs | IMPLEMENTED | Enforced across all workflows. |
+| Spreadsheet dependency migration | IMPLEMENTED | `xlsx` completely removed; migrated to `exceljs` with dynamic import. |
+| Automated dependency scanning | IMPLEMENTED | Dependabot configured in `.github/dependabot.yml` for `npm` and `github-actions`. CI runs both `npm audit --omit=dev --audit-level=high` and full `npm audit --audit-level=high`. |
+| Pinned Actions and Container Images | IMPLEMENTED | GitHub Actions pinned to verified full 40-character commit SHAs. PostgreSQL CI service pinned to immutable image digest. |
+| Static Application Security Testing | IMPLEMENTED | GitHub CodeQL workflow configured in `.github/workflows/codeql.yml` for JavaScript/TypeScript. |
+| Secret Scanning Guidance | IMPLEMENTED | Documented in §Secret Scanning Guidance below (native GitHub Secret Scanning with Push Protection or `gitleaks` pre-commit hooks). |
 
 ### A04 — Cryptographic Failures
 
 | Control | Status | Evidence / Notes |
 |---|---|---|
-| No sensitive data in localStorage in plain text (future) | PLANNED | Current: demo data only; future: no PII without encryption |
-| HTTPS required for production | PLANNED | Local dev only currently |
-| No weak hash algorithms | NOT APPLICABLE | No hashing implemented yet |
-| Secrets not in version control | IMPLEMENTED | `.env.example` with placeholders; no real secrets found in audit |
-| TLS for database connections | PLANNED | PostgreSQL requirement documented |
+| High-entropy session secrets | IMPLEMENTED | 32-byte cryptographically secure session tokens, SHA-256 hashed before storage; database never stores raw tokens. |
+| Session revocation & cookie clearing | IMPLEMENTED | `POST /api/v2/session/logout` revokes current session in DB and clears `__Host-fintrack_session` cookie (`Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, no Domain). |
+| Safe corrupt storage preservation | IMPLEMENTED | `loadStorageSnapshot()` verifies backup write success, keeps original key untouched, provides raw unparsed download. |
+| TLS for database connections | IMPLEMENTED | `src/server/database.ts` requires TLS verification (`rejectUnauthorized: true`, optional `DATABASE_CA`) in production. |
+| Object storage for receipts | PLANNED | S3/GCS private encrypted bucket storage planned for receipt images. |
 
 ### A05 — Injection
 
 | Control | Status | Evidence / Notes |
 |---|---|---|
-| No SQL queries (client-side only) | NOT APPLICABLE | No database yet |
-| Parameterized queries planned | PLANNED | Required for future PostgreSQL |
-| No `eval()` or `new Function()` in source | IMPLEMENTED | Audit confirmed — none found |
-| No `dangerouslySetInnerHTML` | IMPLEMENTED | Audit confirmed — none found |
-| CSV/Spreadsheet formula injection | IMPLEMENTED | `sanitizeCsvCell()` in `src/lib/utils.ts` |
-| Receipt image validation at UI & storage | IMPLEMENTED | UI accepts JPEG/PNG/WebP (1MB max); storage rejects SVG, HTML, javascript:, HTTP URLs |
-| Strict calendar datetime validation | IMPLEMENTED | `localDateTimeInputToISO` rejects invalid dates (Feb 31) without fallback to now |
-| API inputs explicitly validated & bounded | IMPLEMENTED | `readBoundedJsonBody` checks actual UTF-8 byte length (<= 50KB) before parsing |
-| Import payload validated end-to-end | IMPLEMENTED | `validateAndNormalizeAppSnapshot()` enforces schema, bounds, and referential integrity |
+| Parameterized SQL queries | IMPLEMENTED | All database interactions in `src/server/repository.ts` use parameterized queries (`$1, $2, ...`). Zero string interpolation in SQL. |
+| RLS Defense-in-Depth | IMPLEMENTED | RLS derived from session hash (`fintrack.current_session_user_id()`). Even if SQL injection occurred, an attacker setting `app.user_id` cannot bypass tenant isolation. |
+| CSV / Spreadsheet Formula Injection | IMPLEMENTED | `sanitizeCsvCell()` in `src/lib/utils.ts` neutralizes `=`, `+`, `-`, `@`, `\t`, `\r` prefixes. |
+| Receipt image validation at UI & storage | IMPLEMENTED | MIME allowlist (`image/jpeg`, `image/png`, `image/webp`), 1MB local cap, SVG/HTML/javascript: URLs strictly rejected. |
+| Strict request body byte streaming | IMPLEMENTED | `readBoundedJsonBody` checks Content-Length and enforces byte budget during stream consumption before buffering or JSON parsing. |
 
 ### A06 — Insecure Design
 
 | Control | Status | Evidence / Notes |
 |---|---|---|
-| Domain operations are pure functions with explicit invariants | IMPLEMENTED | `src/lib/domain-engine.ts` |
-| Pre-save validation gate | IMPLEMENTED | State validated via `validateAndNormalizeAppSnapshot()` before persisting; invalid state sets `SAVE_ERROR` |
-| Safe corrupt storage recovery | IMPLEMENTED | `loadStorageSnapshot()` verifies backup write success, keeps original key untouched, provides raw unparsed download |
-| Storage round-trip invariant (domain → serialize → validate → deserialize) | IMPLEMENTED | Tests JJ–LL |
-| Authorization model designed before backend | PARTIAL | Documented; not yet enforced |
-| Secrets management designed | PARTIAL | Policy documented; no backend yet |
+| Concurrency-safe financial operations | IMPLEMENTED | Wallet balance transfers acquire row locks in stable UUID order (`FOR UPDATE`) before balance evaluation; atomic transfer ledger and audit commitment. |
+| Idempotency guarantees | IMPLEMENTED | Transaction-scoped advisory locks on `user_id:key` with 7-day retention policy and normalized SHA-256 payload fingerprinting. |
+| Wallet resource quota | IMPLEMENTED | Max 100 wallets per user enforced with advisory lock serialization (`${user}:wallet-create`) and stable `WALLET_LIMIT_REACHED` error. |
+| Bounded rate-limiting storage | IMPLEMENTED | `(user_id, scope)` primary key with in-place hit/bucket counter; storage remains strictly bounded regardless of request frequency across time buckets. Scopes: `global` (60/min), `wallet:create` (10/min), `transfer:create` (20/min). |
 
 ### A07 — Authentication Failures
 
 | Control | Status | Evidence | Notes |
 |---|---|---|---|
-| Authentication | PLANNED | No backend yet | Planned with JWT / Supabase Auth |
-| Session management | PLANNED | No sessions yet | |
-| Password policy | PLANNED | | |
-| MFA support | PLANNED | | |
-| Brute force protection | PLANNED | | |
+| Session verification | IMPLEMENTED | `src/server/session.ts` | Validates `__Host-fintrack_session`, checks expiry and revocation. |
+| Session revocation / logout | IMPLEMENTED | `POST /api/v2/session/logout` | Revokes current session and conflicts with active mutation row-locks (`FOR SHARE`). |
+| Public user login / registration | PLANNED | Identity issuance / OAuth | Full passwordless/OAuth login planned for next iteration. |
+| Password policy & MFA | PLANNED | Authentication provider | Delegated to OAuth / Supabase Auth in future phase. |
 
 ### A08 — Software or Data Integrity Failures
 
 | Control | Status | Evidence / Notes |
 |---|---|---|
-| Storage schema versioning | IMPLEMENTED | `SCHEMA_VERSION = 1` in `src/lib/storage-schema.ts` |
-| Unknown future schema version rejected | IMPLEMENTED | `validateAndNormalizeAppSnapshot()` |
-| Legacy (unversioned) snapshot migration | IMPLEMENTED | v0 → v1 migration path |
-| Category & System transaction integrity | IMPLEMENTED | Strict category type matching (EXPENSE/INCOME), GOAL origin/ID lock, Bill-Payment bidirectional link |
-| Import validates before replacing state | IMPLEMENTED | Atomic swap only after full validation |
-| Corrupt import leaves current state untouched | IMPLEMENTED | `AppContext.importDatabaseJSON` |
-| Domain ↔ storage round-trip invariant | IMPLEMENTED | Tests JJ–LL |
-| Subresource Integrity (SRI) for CDN resources | NOT APPLICABLE | No external CDN resources |
+| Database migration discipline | IMPLEMENTED | Sequential immutable migrations (`001_backend_foundation.sql`, `002_backend_security_hardening.sql`). CI validates clean install and 001 → 002 upgrade path. |
+| Logical Backup & Restore Drill | PARTIAL | Automated logical restore drill against clean database in CI (`scripts/backup-restore-drill.sh`) verifying schema, balances, and RLS. Managed Point-in-Time Recovery (PITR) remains PLANNED for production infrastructure. |
+| Client storage schema versioning | IMPLEMENTED | `SCHEMA_VERSION = 1` in `src/lib/storage-schema.ts`. Unknown future versions rejected. |
 
-### A09 — Security Logging and Alerting Failures
+### A09 — Security Logging and Monitoring Failures
 
 | Control | Status | Evidence / Notes |
 |---|---|---|
-| Security audit logging design | PARTIAL | `docs/security/audit-logging.md` — designed, not yet implemented |
-| No sensitive data in logs | IMPLEMENTED | `console.error` calls use `safeErrorMessage()` — no stack traces, no payloads |
-| Storage errors visible to user | IMPLEMENTED | `storageStatus` / `storageError` in AppContext with verified recovery copy tracking |
-| Future: centralized log aggregation | PLANNED | |
-
-### A10 — Mishandling of Exceptional Conditions
-
-| Control | Status | Evidence / Notes |
-|---|---|---|
-| Centralized error model | IMPLEMENTED | `src/lib/error.ts` — `AppErrorCode`, `domainError()`, `safeErrorMessage()` |
-| Stack traces not surfaced to users | IMPLEMENTED | `safeErrorMessage()` strips stack |
-| JSON parse errors handled safely | IMPLEMENTED | All JSON.parse calls wrapped in try/catch |
-| Storage save failures reported to user | IMPLEMENTED | `SAVE_ERROR` status, `retrySave()` |
-| Oversized import rejected before parse | IMPLEMENTED | UTF-8 byte length verified against `MAX_IMPORT_BYTES = 5 MB` |
-| API error responses sanitized | IMPLEMENTED | No stack traces in API responses |
+| Structured security logging | IMPLEMENTED | `src/server/logger.ts` emits sanitized JSON logs for 401, 403, 429, BOLA denials, quotas, and session revocations with `requestId` and `timestamp`. Never logs secrets, cookies, SQL, or notes. |
+| Audit event correlation | IMPLEMENTED | Database `audit_events` records `request_id uuid` matching HTTP `X-Request-Id` response header for end-to-end trace correlation. |
+| Out-of-band session maintenance | IMPLEMENTED | `scripts/session-maintenance.mjs` purges sessions expired/revoked > 30 days using operator credentials (forbidden for `fintrack_runtime`). |
 
 ---
 
-## OWASP API Security Top 10:2023 Mapping
+## Secret Scanning Guidance
 
-| Category | Status | Notes |
-|---|---|---|
-| API1 — Broken Object Level Authorization | PLANNED | No backend yet; ownership model documented |
-| API2 — Broken Authentication | PLANNED | No authentication yet |
-| API3 — Broken Object Property Level Authorization | IMPLEMENTED | POST routes return explicit allowlist only (no arbitrary echo) |
-| API4 — Unrestricted Resource & Rate Limiting | PARTIAL | UTF-8 body byte boundary checks (<= 50KB); no rate limiting yet |
-| API5 — Broken Function Level Authorization | PLANNED | No roles yet; all routes are public demo |
-| API6 — Unrestricted Access to Sensitive Business Flows | PARTIAL | Domain engine enforces financial invariants; no auth gating yet |
-| API7 — Server Side Request Forgery (SSRF) | NOT APPLICABLE | No user-controlled URL fetching |
-| API8 — Security Misconfiguration | IMPLEMENTED | Demo-only headers, input validation on all POST routes, production gating with 501 |
-| API9 — Improper Inventory Management | PARTIAL | All routes documented; no versioning strategy yet |
-| API10 — Unsafe Consumption of APIs | NOT APPLICABLE | No third-party API consumption currently |
-
----
-
-## Remaining Known Risks
-
-1. **No authentication** — all local data is unprotected if device is shared
-2. **localStorage not encrypted** — financial data stored in plaintext in browser storage
-3. **CSP uses `unsafe-inline`** — required by Next.js hydration in production; nonce-based CSP is a future improvement (`unsafe-eval` is excluded in production)
-4. **No rate limiting** — API routes have no throttle; low risk for demo/client-side
-5. **No server-side receipt validation** — client-side & storage schema validation only; full backend S3/GCS bucket pipeline is future work
-6. **No audit logging implemented** — designed only
+For repositories hosted on GitHub:
+1. **GitHub Secret Scanning & Push Protection**: Enable under *Settings > Code security and analysis > Secret scanning*. This prevents secret leaks before git push succeeds.
+2. **Local Pre-commit Hook (Open Source / Free Plans)**: If GitHub Secret Scanning is unavailable on the plan, configure `gitleaks` or `git-secrets`:
+   ```bash
+   # Install gitleaks
+   brew install gitleaks # or curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/...
+   # Run scan
+   gitleaks detect --source . --verbose
+   ```
+3. **CI Gate**: Run secret scanning in GitHub Actions on every pull request.

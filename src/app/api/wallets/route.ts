@@ -6,12 +6,16 @@
  */
 import { NextResponse } from 'next/server';
 import { INITIAL_WALLETS } from '@/lib/mock-data';
-import { checkDemoMutationAllowed, readBoundedJsonBody } from '@/lib/api-guard';
+import { checkLegacyDemoRouteDisabled, checkDemoMutationAllowed, readBoundedJsonBody } from '@/lib/api-guard';
 
 const DEMO_HEADERS = { 'X-Demo-Only': 'true', 'X-Persistence': 'none' };
 const VALID_WALLET_TYPES = ['CASH', 'BANK', 'CREDIT', 'SAVINGS'] as const;
 
 export async function GET() {
+  const disabled = checkLegacyDemoRouteDisabled();
+  if (disabled) {
+    return disabled;
+  }
   return NextResponse.json(
     { success: true, data: INITIAL_WALLETS, _demo: true },
     { headers: DEMO_HEADERS }
@@ -19,10 +23,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  // Production guard: mock mutation endpoints return 501 in production unless ENABLE_DEMO_API=true
-  const mutationBlocked = checkDemoMutationAllowed();
-  if (mutationBlocked) {
-    return mutationBlocked;
+  const disabled = checkLegacyDemoRouteDisabled();
+  if (disabled) {
+    return disabled;
   }
 
   const parsed = await readBoundedJsonBody<Record<string, unknown>>(req, 10_000);
