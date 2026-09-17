@@ -84,10 +84,13 @@ export const ReportsView: React.FC = () => {
     () => filteredTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0),
     [filteredTxs]
   );
-  const totalExpense = useMemo(
-    () => filteredTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0),
-    [filteredTxs]
-  );
+  const totalExpense = useMemo(() => {
+    const expenseTxs = filteredTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
+    const transferFees = filteredTxs
+      .filter((t) => t.type === 'TRANSFER' && typeof t.fee === 'number' && isFinite(t.fee) && t.fee > 0)
+      .reduce((s, t) => s + (t.fee || 0), 0);
+    return expenseTxs + transferFees;
+  }, [filteredTxs]);
   const netSavings = totalIncome - totalExpense;
   const savingsRate = totalIncome > 0 ? Math.max(0, Math.round((netSavings / totalIncome) * 100)) : 0;
 
@@ -102,6 +105,15 @@ export const ReportsView: React.FC = () => {
       catMap[name].total += t.amount;
       catMap[name].count += 1;
     });
+
+    // Add transfer fees if any
+    const transferFeeTxs = filteredTxs.filter(
+      (t) => t.type === 'TRANSFER' && typeof t.fee === 'number' && isFinite(t.fee) && t.fee > 0
+    );
+    if (transferFeeTxs.length > 0) {
+      const feeTotal = transferFeeTxs.reduce((s, t) => s + (t.fee || 0), 0);
+      catMap['Phí chuyển khoản'] = { total: feeTotal, count: transferFeeTxs.length };
+    }
 
     const colors = ['#f97316', '#ec4899', '#8b5cf6', '#0ea5e9', '#eab308', '#10b981', '#64748b', '#ef4444'];
     return Object.keys(catMap)
@@ -132,7 +144,11 @@ export const ReportsView: React.FC = () => {
     return months.map((m) => {
       const monthTxs = transactions.filter((t) => t.date.startsWith(m));
       const inc = monthTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0);
-      const exp = monthTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
+      const expTxs = monthTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
+      const expFees = monthTxs
+        .filter((t) => t.type === 'TRANSFER' && typeof t.fee === 'number' && isFinite(t.fee) && t.fee > 0)
+        .reduce((s, t) => s + (t.fee || 0), 0);
+      const exp = expTxs + expFees;
       return {
         month: `T${parseInt(m.slice(5), 10)}`,
         Thu: inc,

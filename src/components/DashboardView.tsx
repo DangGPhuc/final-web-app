@@ -55,7 +55,11 @@ export const DashboardView: React.FC = () => {
     return months.map((m) => {
       const monthTxs = transactions.filter((t) => t.date.startsWith(m));
       const inc = monthTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0);
-      const exp = monthTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
+      const expTxs = monthTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
+      const expFees = monthTxs
+        .filter((t) => t.type === 'TRANSFER' && typeof t.fee === 'number' && isFinite(t.fee) && t.fee > 0)
+        .reduce((s, t) => s + (t.fee || 0), 0);
+      const exp = expTxs + expFees;
       return {
         month: `T${parseInt(m.slice(5), 10)}`,
         Thu: inc,
@@ -65,12 +69,17 @@ export const DashboardView: React.FC = () => {
   }, [transactions, currentMonth]);
 
   const currentMonthExpenses = transactions.filter(
-    (t) => t.type === 'EXPENSE' && t.date.startsWith(currentMonth)
+    (t) => t.date.startsWith(currentMonth) && (t.type === 'EXPENSE' || (t.type === 'TRANSFER' && typeof t.fee === 'number' && t.fee > 0))
   );
   const categoryExpensesMap: { [catName: string]: number } = {};
   currentMonthExpenses.forEach((t) => {
-    const cat = t.categoryName || 'Khác';
-    categoryExpensesMap[cat] = (categoryExpensesMap[cat] || 0) + t.amount;
+    if (t.type === 'EXPENSE') {
+      const cat = t.categoryName || 'Khác';
+      categoryExpensesMap[cat] = (categoryExpensesMap[cat] || 0) + t.amount;
+    } else if (t.type === 'TRANSFER' && typeof t.fee === 'number' && t.fee > 0) {
+      const cat = 'Phí chuyển khoản';
+      categoryExpensesMap[cat] = (categoryExpensesMap[cat] || 0) + t.fee;
+    }
   });
 
   const pieChartData = Object.keys(categoryExpensesMap).map((catName, index) => ({
