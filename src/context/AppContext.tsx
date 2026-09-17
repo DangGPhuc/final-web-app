@@ -37,6 +37,7 @@ import {
   applyUnpayBill,
   applyDeleteWallet,
   applyEditWallet,
+  applyAddWallet,
   validateTransferFee,
 } from '@/lib/domain-engine';
 import { getCurrentYearMonth } from '@/lib/utils';
@@ -197,15 +198,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Wallets
   const addWallet = (wallet: Omit<Wallet, 'id' | 'createdAt'>) => {
-    const bal = typeof wallet.balance === 'number' && isFinite(wallet.balance) ? wallet.balance : 0;
-    const newWallet: Wallet = {
-      ...wallet,
-      balance: bal,
-      initialBalance: bal,
-      id: `wal-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-    };
-    setWallets((prev) => [...prev, newWallet]);
+    const res = applyAddWallet(
+      { transactions, wallets, goals, budgets, bills, recurringTransactions },
+      wallet
+    );
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setWallets(res.state.wallets);
   };
 
   const editWallet = (id: string, updated: Partial<Wallet>) => {

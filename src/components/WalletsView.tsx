@@ -60,6 +60,19 @@ export const WalletsView: React.FC = () => {
   const creditWallets = wallets.filter((w) => w.type === 'CREDIT');
   const savingsWallets = wallets.filter((w) => w.type === 'SAVINGS');
 
+  const handleStartEdit = (w: Wallet) => {
+    setEditingWallet(w);
+    setWalletName(w.name);
+    setWalletType(w.type);
+    setWalletBalance(String(w.balance));
+    setWalletBankName(w.bankName || 'Vietcombank');
+    setWalletAccountNumber(w.accountNumber || '');
+    setWalletCreditLimit(w.creditLimit !== undefined ? String(w.creditLimit) : '');
+    setWalletInterestRate(w.interestRate !== undefined ? String(w.interestRate) : '');
+    setWalletColor(w.color || '#0ea5e9');
+    setWalletModalOpen(true);
+  };
+
   const handleSaveWallet = (e: React.FormEvent) => {
     e.preventDefault();
     if (!walletName.trim()) {
@@ -80,7 +93,6 @@ export const WalletsView: React.FC = () => {
     if (editingWallet) {
       editWallet(editingWallet.id, {
         name: walletName,
-        type: walletType,
         bankName: walletType !== 'CASH' ? walletBankName : undefined,
         accountNumber: walletAccountNumber,
         creditLimit: walletType === 'CREDIT' ? limit : undefined,
@@ -255,7 +267,7 @@ export const WalletsView: React.FC = () => {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {cashWallets.map((w) => (
-              <WalletCard key={w.id} wallet={w} onEdit={() => setEditingWallet(w)} onDelete={() => deleteWallet(w.id)} />
+              <WalletCard key={w.id} wallet={w} onEdit={() => handleStartEdit(w)} onDelete={() => deleteWallet(w.id)} />
             ))}
           </div>
         </div>
@@ -270,7 +282,7 @@ export const WalletsView: React.FC = () => {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {bankWallets.map((w) => (
-              <WalletCard key={w.id} wallet={w} onEdit={() => setEditingWallet(w)} onDelete={() => deleteWallet(w.id)} />
+              <WalletCard key={w.id} wallet={w} onEdit={() => handleStartEdit(w)} onDelete={() => deleteWallet(w.id)} />
             ))}
           </div>
         </div>
@@ -285,7 +297,7 @@ export const WalletsView: React.FC = () => {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {creditWallets.map((w) => (
-              <WalletCard key={w.id} wallet={w} onEdit={() => setEditingWallet(w)} onDelete={() => deleteWallet(w.id)} />
+              <WalletCard key={w.id} wallet={w} onEdit={() => handleStartEdit(w)} onDelete={() => deleteWallet(w.id)} />
             ))}
           </div>
         </div>
@@ -300,7 +312,7 @@ export const WalletsView: React.FC = () => {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {savingsWallets.map((w) => (
-              <WalletCard key={w.id} wallet={w} onEdit={() => setEditingWallet(w)} onDelete={() => deleteWallet(w.id)} />
+              <WalletCard key={w.id} wallet={w} onEdit={() => handleStartEdit(w)} onDelete={() => deleteWallet(w.id)} />
             ))}
           </div>
         </div>
@@ -328,6 +340,11 @@ export const WalletsView: React.FC = () => {
               <div>
                 <label className="block text-xs font-semibold text-slate-500 mb-1">
                   Loại nguồn tiền
+                  {editingWallet && (
+                    <span className="ml-1.5 text-[10px] font-normal text-amber-600 dark:text-amber-400">
+                      (Không thể thay đổi loại ví sau khi tạo)
+                    </span>
+                  )}
                 </label>
                 <div className="grid grid-cols-2 gap-2">
                   {[
@@ -339,12 +356,17 @@ export const WalletsView: React.FC = () => {
                     <button
                       key={t.type}
                       type="button"
+                      disabled={!!editingWallet}
                       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                      onClick={() => setWalletType(t.type as any)}
+                      onClick={() => !editingWallet && setWalletType(t.type as any)}
                       className={`py-2 px-3 text-xs font-bold rounded-xl border transition-all ${
-                        walletType === t.type
-                          ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                          : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                        editingWallet
+                          ? walletType === t.type
+                            ? 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-600 cursor-not-allowed opacity-90'
+                            : 'bg-slate-50 dark:bg-slate-800/40 text-slate-400 dark:text-slate-500 border-slate-200 dark:border-slate-800 cursor-not-allowed opacity-40'
+                          : walletType === t.type
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                            : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                       }`}
                     >
                       {t.label}

@@ -14,6 +14,7 @@ import {
   applyDeleteBill,
   applyDeleteWallet,
   applyEditWallet,
+  applyAddWallet,
   validateTransferFee,
   AppDomainState,
 } from '../src/lib/domain-engine';
@@ -1414,6 +1415,174 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     expect(deleteAfterUnpay.ok).toBe(true);
     if (deleteAfterUnpay.ok) {
       expect(deleteAfterUnpay.state.bills.some((b) => b.id === 'bill-u')).toBe(false);
+    }
+  });
+
+  // =========================================================================
+  // CASE V — Wallet Type Is Immutable
+  // =========================================================================
+  it('CASE V — Wallet Type Is Immutable: BANK -> CREDIT attempt is rejected and balance/semantics unchanged', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-bank-v',
+          name: 'Ngân hàng V',
+          type: 'BANK',
+          balance: 20000000,
+          initialBalance: 20000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          createdAt: '2026-01-01',
+        },
+      ],
+    });
+
+    // Attempt: BANK -> CREDIT
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const editRes = applyEditWallet(state, 'wal-bank-v', { type: 'CREDIT' as any });
+    expect(editRes.ok).toBe(false);
+    if (!editRes.ok) {
+      expect(editRes.error).toMatch(/bất biến/i);
+    }
+
+    // Balance and financial semantics unchanged
+    const wallet = state.wallets.find((w) => w.id === 'wal-bank-v');
+    expect(wallet?.type).toBe('BANK');
+    expect(wallet?.balance).toBe(20000000);
+  });
+
+  // =========================================================================
+  // CASE W — Credit Limit Cannot Be Lower Than Debt
+  // =========================================================================
+  it('CASE W — Credit Limit Cannot Be Lower Than Debt: credit debt 10M, limit 5M attempt is rejected', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-credit-w',
+          name: 'Thẻ Tín Dụng W',
+          type: 'CREDIT',
+          balance: 10000000, // Current debt = 10M
+          initialBalance: 10000000,
+          creditLimit: 15000000,
+          currency: 'VND',
+          color: '#8b5cf6',
+          icon: 'CreditCard',
+          createdAt: '2026-01-01',
+        },
+      ],
+    });
+
+    // Attempt: creditLimit = 5M (lower than 10M debt)
+    const editRes = applyEditWallet(state, 'wal-credit-w', { creditLimit: 5000000 });
+    expect(editRes.ok).toBe(false);
+    if (!editRes.ok) {
+      expect(editRes.error).toMatch(/nhỏ hơn dư nợ/i);
+    }
+
+    // Wallet unchanged
+    const wallet = state.wallets.find((w) => w.id === 'wal-credit-w');
+    expect(wallet?.creditLimit).toBe(15000000);
+    expect(wallet?.balance).toBe(10000000);
+  });
+
+  // =========================================================================
+  // CASE X — Invalid New Wallet State
+  // =========================================================================
+  it('CASE X — Invalid New Wallet State: rejects negative, infinity, invalid limits/interest', () => {
+    const state = createMockState({ wallets: [] });
+
+    // 1. Negative asset balance
+    const resNegativeAsset = applyAddWallet(state, {
+      name: 'Tiền mặt âm',
+      type: 'CASH',
+      balance: -100000,
+      initialBalance: -100000,
+      currency: 'VND',
+      color: '#10b981',
+      icon: 'Banknote',
+    });
+    expect(resNegativeAsset.ok).toBe(false);
+
+    // 2. Infinity balance
+    const resInfinity = applyAddWallet(state, {
+      name: 'Ví vô hạn',
+      type: 'BANK',
+      balance: Infinity,
+      initialBalance: Infinity,
+      currency: 'VND',
+      color: '#0ea5e9',
+      icon: 'Building2',
+    });
+    expect(resInfinity.ok).toBe(false);
+
+    // 3. Negative credit debt
+    const resNegativeDebt = applyAddWallet(state, {
+      name: 'Thẻ nợ âm',
+      type: 'CREDIT',
+      balance: -500000,
+      initialBalance: -500000,
+      creditLimit: 10000000,
+      currency: 'VND',
+      color: '#8b5cf6',
+      icon: 'CreditCard',
+    });
+    expect(resNegativeDebt.ok).toBe(false);
+
+    // 4. Credit debt > creditLimit
+    const resDebtOverLimit = applyAddWallet(state, {
+      name: 'Thẻ nợ vượt hạn mức',
+      type: 'CREDIT',
+      balance: 15000000,
+      initialBalance: 15000000,
+      creditLimit: 10000000,
+      currency: 'VND',
+      color: '#8b5cf6',
+      icon: 'CreditCard',
+    });
+    expect(resDebtOverLimit.ok).toBe(false);
+
+    // 5. Invalid / zero CREDIT limit
+    const resZeroLimit = applyAddWallet(state, {
+      name: 'Thẻ hạn mức 0',
+      type: 'CREDIT',
+      balance: 0,
+      initialBalance: 0,
+      creditLimit: 0,
+      currency: 'VND',
+      color: '#8b5cf6',
+      icon: 'CreditCard',
+    });
+    expect(resZeroLimit.ok).toBe(false);
+
+    // 6. Negative SAVINGS interest rate
+    const resNegativeInterest = applyAddWallet(state, {
+      name: 'Sổ lãi âm',
+      type: 'SAVINGS',
+      balance: 5000000,
+      initialBalance: 5000000,
+      interestRate: -3.5,
+      currency: 'VND',
+      color: '#f59e0b',
+      icon: 'PiggyBank',
+    });
+    expect(resNegativeInterest.ok).toBe(false);
+
+    // 7. Valid wallet creation succeeds
+    const resValid = applyAddWallet(state, {
+      name: 'Ví hợp lệ',
+      type: 'BANK',
+      balance: 5000000,
+      initialBalance: 5000000,
+      currency: 'VND',
+      color: '#0ea5e9',
+      icon: 'Building2',
+    });
+    expect(resValid.ok).toBe(true);
+    if (resValid.ok) {
+      expect(resValid.state.wallets).toHaveLength(1);
+      expect(resValid.newWallet.balance).toBe(5000000);
+      expect(resValid.newWallet.initialBalance).toBe(5000000);
     }
   });
 });

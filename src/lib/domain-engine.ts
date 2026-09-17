@@ -1086,6 +1086,87 @@ export function applyUnpayBill(
 }
 
 /**
+ * Add a new wallet with strict domain validation:
+ * - name: non-empty after trim
+ * - balance: finite >= 0
+ * - initialBalance: derived from validated balance
+ * - Wallet type: must be a valid WalletType ('CASH' | 'BANK' | 'CREDIT' | 'SAVINGS')
+ * - For CREDIT: balance represents current debt, creditLimit: finite > 0, balance <= creditLimit
+ * - For SAVINGS: interestRate, when supplied: finite >= 0
+ * - For CASH/BANK/SAVINGS: negative asset balances are NOT supported
+ */
+export function applyAddWallet(
+  state: AppDomainState,
+  walletInput: Omit<Wallet, 'id' | 'createdAt'>
+): DomainResult<{ state: AppDomainState; newWallet: Wallet }> {
+  if (!walletInput.name || typeof walletInput.name !== 'string' || !walletInput.name.trim()) {
+    return { ok: false, error: 'Tên ví không được để trống' };
+  }
+
+  const validTypes: WalletType[] = ['CASH', 'BANK', 'CREDIT', 'SAVINGS'];
+  if (!validTypes.includes(walletInput.type)) {
+    return { ok: false, error: 'Loại nguồn tiền không hợp lệ' };
+  }
+
+  if (
+    typeof walletInput.balance !== 'number' ||
+    !Number.isFinite(walletInput.balance) ||
+    walletInput.balance < 0
+  ) {
+    return {
+      ok: false,
+      error: 'Số dư hoặc dư nợ ví phải là số hữu hạn không âm (>= 0)',
+    };
+  }
+
+  if (walletInput.type === 'CREDIT') {
+    if (
+      walletInput.creditLimit === undefined ||
+      typeof walletInput.creditLimit !== 'number' ||
+      !Number.isFinite(walletInput.creditLimit) ||
+      walletInput.creditLimit <= 0
+    ) {
+      return { ok: false, error: 'Hạn mức thẻ tín dụng phải là số hữu hạn lớn hơn 0' };
+    }
+    if (walletInput.balance > walletInput.creditLimit) {
+      return {
+        ok: false,
+        error: `Dư nợ ban đầu (${walletInput.balance.toLocaleString('vi-VN')} đ) không được vượt quá hạn mức thẻ (${walletInput.creditLimit.toLocaleString('vi-VN')} đ)`,
+      };
+    }
+  }
+
+  if (walletInput.type === 'SAVINGS' && walletInput.interestRate !== undefined) {
+    if (
+      typeof walletInput.interestRate !== 'number' ||
+      !Number.isFinite(walletInput.interestRate) ||
+      walletInput.interestRate < 0
+    ) {
+      return { ok: false, error: 'Lãi suất tiết kiệm phải là số hữu hạn không âm (>= 0)' };
+    }
+  }
+
+  const id = `wal-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const newWallet: Wallet = {
+    ...walletInput,
+    id,
+    name: walletInput.name.trim(),
+    balance: walletInput.balance,
+    initialBalance: walletInput.balance,
+    createdAt: new Date().toISOString(),
+  };
+
+  return {
+    ok: true,
+    state: {
+      ...state,
+      wallets: [...state.wallets, newWallet],
+    },
+    newWallet,
+  };
+}
+
+/**
  * Delete wallet referential integrity check:
  * Inspect references from transactions, bills, and goal history.
  * Block deletion if referenced.
@@ -1136,8 +1217,10 @@ export function applyDeleteWallet(state: AppDomainState, walletId: string): Doma
 /**
  * Edit an existing wallet's metadata safely:
  * - Allows updates to metadata: name, bankName, accountNumber, color, icon, creditLimit, interestRate, isExcludedFromTotal
+ * - Invariant: Once created, Wallet.type is immutable.
  * - Invariant: Existing wallet balance cannot be arbitrarily changed through normal wallet editing.
- *   Balances are strictly managed through transactions/ledger entries.
+ * - Invariant: For CREDIT, creditLimit must be finite > 0 and >= current debt (wallet.balance).
+ * - Invariant: For SAVINGS, interestRate must be finite >= 0.
  */
 export function applyEditWallet(
   state: AppDomainState,
@@ -1149,22 +1232,68 @@ export function applyEditWallet(
     return { ok: false, error: 'Không tìm thấy ví cần chỉnh sửa' };
   }
 
-  // Strictly preserve existing balance and initialBalance
+  // Once created: Wallet.type is immutable.
+  if (updates.type !== undefined && updates.type !== wallet.type) {
+    return { ok: false, error: 'Loại ví là bất biến, không thể thay đổi sau khi tạo' };
+  }
+
+  if (updates.name !== undefined) {
+    if (typeof updates.name !== 'string' || !updates.name.trim()) {
+      return { ok: false, error: 'Tên ví không được để trống' };
+    }
+  }
+
+  // For CREDIT: creditLimit validation
+  if (wallet.type === 'CREDIT') {
+    if (updates.creditLimit !== undefined) {
+      if (
+        typeof updates.creditLimit !== 'number' ||
+        !Number.isFinite(updates.creditLimit) ||
+        updates.creditLimit <= 0
+      ) {
+        return { ok: false, error: 'Hạn mức thẻ tín dụng phải là số hữu hạn lớn hơn 0' };
+      }
+      if (updates.creditLimit < wallet.balance) {
+        return {
+          ok: false,
+          error: `Hạn mức tín dụng (${updates.creditLimit.toLocaleString('vi-VN')} đ) không được nhỏ hơn dư nợ hiện tại (${wallet.balance.toLocaleString('vi-VN')} đ)`,
+        };
+      }
+    }
+  }
+
+  // For SAVINGS: interestRate validation
+  if (wallet.type === 'SAVINGS') {
+    if (updates.interestRate !== undefined) {
+      if (
+        typeof updates.interestRate !== 'number' ||
+        !Number.isFinite(updates.interestRate) ||
+        updates.interestRate < 0
+      ) {
+        return { ok: false, error: 'Lãi suất tiết kiệm phải là số hữu hạn không âm (>= 0)' };
+      }
+    }
+  }
+
+  // Strictly preserve balance, initialBalance, id, createdAt, and type
   const {
     balance: _ignoredBalance,
     initialBalance: _ignoredInitialBalance,
     id: _ignoredId,
     createdAt: _ignoredCreatedAt,
-    type: updatedType,
+    type: _ignoredType,
     ...metadataUpdates
   } = updates;
 
   const updatedWallet: Wallet = {
     ...wallet,
     ...metadataUpdates,
-    type: updatedType || wallet.type,
+    type: wallet.type, // Strictly immutable
     balance: wallet.balance, // Strictly preserved
     initialBalance: wallet.initialBalance, // Strictly preserved
+    name: metadataUpdates.name ? metadataUpdates.name.trim() : wallet.name,
+    creditLimit: wallet.type === 'CREDIT' ? (metadataUpdates.creditLimit ?? wallet.creditLimit) : undefined,
+    interestRate: wallet.type === 'SAVINGS' ? (metadataUpdates.interestRate ?? wallet.interestRate) : undefined,
   };
 
   return {
