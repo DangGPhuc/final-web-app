@@ -117,32 +117,45 @@ export const ReportsView: React.FC = () => {
 
   // Bar chart: Income vs Expense over time
   const monthlyComparisonData = useMemo(() => {
-    const months = ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09'];
+    const [currYearStr, currMonthStr] = activeYm.split('-');
+    const currYear = parseInt(currYearStr, 10);
+    const currMonthNum = parseInt(currMonthStr, 10);
+
+    const months: string[] = [];
+    for (let i = 4; i >= 0; i--) {
+      const d = new Date(currYear, currMonthNum - 1 - i, 1);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      months.push(`${y}-${m}`);
+    }
+
     return months.map((m) => {
       const monthTxs = transactions.filter((t) => t.date.startsWith(m));
       const inc = monthTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0);
       const exp = monthTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
       return {
-        month: `T${m.slice(5)}`,
-        Thu: inc || (m === '2026-05' ? 28000000 : m === '2026-06' ? 31000000 : m === '2026-07' ? 32000000 : 0),
-        Chi: exp || (m === '2026-05' ? 12000000 : m === '2026-06' ? 13500000 : m === '2026-07' ? 14500000 : 0),
+        month: `T${parseInt(m.slice(5), 10)}`,
+        Thu: inc,
+        Chi: exp,
       };
     });
-  }, [transactions]);
+  }, [transactions, activeYm]);
 
   // Cash flow trend line/area
   const cashflowTrendData = useMemo(() => {
-    let runningBalance = 160000000; // Base net worth
+    const totalNetDelta = monthlyComparisonData.reduce((sum, d) => sum + (d.Thu - d.Chi), 0);
+    let runningBalance = (financialSummary?.totalAssets ?? 0) - totalNetDelta;
+
     return monthlyComparisonData.map((d) => {
       const diff = d.Thu - d.Chi;
       runningBalance += diff;
       return {
         month: d.month,
         'Dòng tiền thuần': diff,
-        'Tổng tích lũy': runningBalance,
+        'Tổng tích lũy': Math.round(runningBalance),
       };
     });
-  }, [monthlyComparisonData]);
+  }, [monthlyComparisonData, financialSummary]);
 
   const handlePrint = () => {
     window.print();
