@@ -151,12 +151,18 @@ export const BudgetsView: React.FC = () => {
     e.preventDefault();
     if (!selectedGoal) return;
     const amountNum = Number(depositAmount);
-    if (!amountNum || amountNum <= 0) {
-      alert('Vui lòng nhập số tiền hợp lệ');
+    if (!amountNum || amountNum <= 0 || !isFinite(amountNum)) {
+      alert('Vui lòng nhập số tiền hợp lệ (> 0)');
       return;
     }
 
     if (isDepositMode) {
+      const wallet = wallets.find((w) => w.id === depositWalletId);
+      if (wallet && wallet.balance < amountNum) {
+        alert('Số dư ví không đủ để nạp vào mục tiêu tích lũy');
+        return;
+      }
+
       depositToGoal(selectedGoal.id, amountNum, depositWalletId, depositNote);
       // If goal reaches 100%, trigger celebration!
       if (selectedGoal.currentAmount + amountNum >= selectedGoal.targetAmount) {
@@ -171,6 +177,11 @@ export const BudgetsView: React.FC = () => {
         }
       }
     } else {
+      if (selectedGoal.currentAmount < amountNum) {
+        alert('Số tiền rút vượt quá số dư hiện có trong mục tiêu tích lũy');
+        return;
+      }
+
       withdrawFromGoal(selectedGoal.id, amountNum, depositWalletId, depositNote);
     }
 

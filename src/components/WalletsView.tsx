@@ -112,8 +112,8 @@ export const WalletsView: React.FC = () => {
   const handleConfirmTransfer = (e: React.FormEvent) => {
     e.preventDefault();
     const amountNum = Number(transferAmount);
-    if (!amountNum || amountNum <= 0) {
-      alert('Vui lòng nhập số tiền chuyển hợp lệ');
+    if (!amountNum || amountNum <= 0 || !isFinite(amountNum)) {
+      alert('Vui lòng nhập số tiền chuyển hợp lệ (> 0)');
       return;
     }
     if (fromWalletId === toWalletId) {
@@ -121,7 +121,18 @@ export const WalletsView: React.FC = () => {
       return;
     }
 
-    transferFunds(fromWalletId, toWalletId, amountNum, Number(transferFee) || 0, transferNote);
+    const feeNum = Number(transferFee) || 0;
+    const fromW = wallets.find((w) => w.id === fromWalletId);
+    if (!fromW) {
+      alert('Ví nguồn không tồn tại');
+      return;
+    }
+    if (fromW.balance < amountNum + feeNum) {
+      alert('Số dư ví nguồn không đủ để thực hiện chuyển khoản');
+      return;
+    }
+
+    transferFunds(fromWalletId, toWalletId, amountNum, feeNum, transferNote);
     setTransferModalOpen(false);
     setTransferAmount('');
     setTransferFee('0');

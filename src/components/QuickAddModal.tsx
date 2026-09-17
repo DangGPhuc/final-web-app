@@ -74,7 +74,7 @@ export const QuickAddModal: React.FC = () => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const numAmount = Number(amount);
-    if (!numAmount || numAmount <= 0) {
+    if (!numAmount || numAmount <= 0 || !isFinite(numAmount)) {
       alert('Vui lòng nhập số tiền hợp lệ (> 0)');
       return;
     }
@@ -84,12 +84,25 @@ export const QuickAddModal: React.FC = () => {
       return;
     }
 
-    if (type === 'TRANSFER' && (!toWalletId || toWalletId === walletId)) {
-      alert('Vui lòng chọn ví nhận khác ví chuyển');
+    const selectedWallet = wallets.find((w) => w.id === walletId);
+    if (!selectedWallet) {
+      alert('Ví nguồn không tồn tại');
       return;
     }
 
-    const selectedWallet = wallets.find((w) => w.id === walletId);
+    const numFee = typeof fee === 'string' && Number(fee) > 0 ? Number(fee) : 0;
+
+    if (type === 'TRANSFER') {
+      if (!toWalletId || toWalletId === walletId) {
+        alert('Vui lòng chọn ví nhận khác ví chuyển');
+        return;
+      }
+      if (selectedWallet.balance < numAmount + numFee) {
+        alert('Số dư ví nguồn không đủ để thực hiện chuyển khoản');
+        return;
+      }
+    }
+
     const selectedToWallet = wallets.find((w) => w.id === toWalletId);
     const selectedCategory = categories.find((c) => c.id === categoryId);
 
