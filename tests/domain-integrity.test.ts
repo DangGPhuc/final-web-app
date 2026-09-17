@@ -1639,6 +1639,8 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
       toWalletId: 'wal-bank-2',
       date: '2026-03-01T10:00:00.000Z',
       fee: 0,
+      note: 'Chuyển khoản',
+      tags: [],
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       transferKind: 'CREDIT_PAYMENT' as any, // Untrusted UI input
     });

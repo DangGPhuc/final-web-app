@@ -199,7 +199,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Wallets
   const addWallet = (wallet: Omit<Wallet, 'id' | 'createdAt'>) => {
     const res = applyAddWallet(
-      { transactions, wallets, goals, budgets, bills, recurringTransactions },
+      { transactions, wallets, goals, bills },
       wallet
     );
     if (!res.ok) {

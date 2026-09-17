@@ -1,4 +1,4 @@
-import { Wallet, Transaction, RecurringBill, SavingsGoal, FinancialSummary, TransactionOrigin, TransferKind } from '@/types';
+import { Wallet, WalletType, Transaction, TransactionType, RecurringBill, BillStatus, SavingsGoal, FinancialSummary, TransactionOrigin, TransferKind } from '@/types';
 import { getCurrentYearMonth } from './utils';
 
 export interface AppDomainState {
@@ -833,7 +833,7 @@ export function validateBillData(data: Partial<RecurringBill>): { valid: boolean
  */
 export function applyAddBill(
   state: AppDomainState,
-  billInput: Omit<RecurringBill, 'id'>
+  billInput: Omit<RecurringBill, 'id' | 'status'> & { status?: BillStatus }
 ): DomainResult<{ state: AppDomainState; newBill: RecurringBill }> {
   if (!billInput.name || !billInput.name.trim()) {
     return { ok: false, error: 'Tên hóa đơn không được để trống' };
