@@ -97,14 +97,15 @@ export const BudgetsView: React.FC = () => {
     }
     const cat = categories.find((c) => c.id === budgetCategoryId);
 
+    let res;
     if (editingBudget) {
-      editBudget(editingBudget.id, {
+      res = editBudget(editingBudget.id, {
         categoryId: budgetCategoryId,
         categoryName: cat?.name || 'Khác',
         amount: amountNum,
       });
     } else {
-      addBudget({
+      res = addBudget({
         categoryId: budgetCategoryId,
         categoryName: cat?.name || 'Khác',
         amount: amountNum,
@@ -113,6 +114,11 @@ export const BudgetsView: React.FC = () => {
         alertThreshold100: true,
       });
     }
+
+    if (res && !res.ok) {
+      return;
+    }
+
     setBudgetModalOpen(false);
     setEditingBudget(null);
   };
@@ -128,15 +134,16 @@ export const BudgetsView: React.FC = () => {
 
     const defaultDeadline = `${new Date().getFullYear()}-12-31`;
 
+    let res;
     if (editingGoal) {
-      editGoal(editingGoal.id, {
+      res = editGoal(editingGoal.id, {
         name: goalName,
         targetAmount: targetNum,
         deadline: goalDeadline || defaultDeadline,
         color: goalColor,
       });
     } else {
-      addGoal({
+      res = addGoal({
         name: goalName,
         targetAmount: targetNum,
         currentAmount: 0,
@@ -145,6 +152,11 @@ export const BudgetsView: React.FC = () => {
         icon: 'PiggyBank',
       });
     }
+
+    if (res && !res.ok) {
+      return;
+    }
+
     setGoalModalOpen(false);
     setEditingGoal(null);
   };
@@ -166,7 +178,11 @@ export const BudgetsView: React.FC = () => {
         return;
       }
 
-      depositToGoal(selectedGoal.id, amountNum, depositWalletId, depositNote);
+      const res = depositToGoal(selectedGoal.id, amountNum, depositWalletId, depositNote);
+      if (res && !res.ok) {
+        return;
+      }
+
       // If goal reaches 100%, trigger celebration!
       if (selectedGoal.currentAmount + amountNum >= selectedGoal.targetAmount) {
         try {
@@ -185,7 +201,10 @@ export const BudgetsView: React.FC = () => {
         return;
       }
 
-      withdrawFromGoal(selectedGoal.id, amountNum, depositWalletId, depositNote);
+      const res = withdrawFromGoal(selectedGoal.id, amountNum, depositWalletId, depositNote);
+      if (res && !res.ok) {
+        return;
+      }
     }
 
     setDepositModalOpen(false);

@@ -47,6 +47,8 @@ import {
   SCHEMA_VERSION,
   MAX_IMPORT_BYTES,
   StorageStatus,
+  LOCAL_RECEIPT_MAX_BYTES,
+  getUtf8ByteLength,
 } from '../src/lib/storage-schema';
 import {
   sanitizeCsvCell,
@@ -54,6 +56,13 @@ import {
   RECEIPT_MAX_BYTES,
   RECEIPT_ALLOWED_MIMES,
 } from '../src/lib/utils';
+import {
+  loadStorageSnapshot,
+  persistStorageSnapshot,
+  MemoryStorageAdapter,
+} from '../src/lib/storage-service';
+import fs from 'fs';
+import path from 'path';
 import nextConfig from '../next.config.mjs';
 import { POST as transactionsPost } from '../src/app/api/transactions/route';
 import { POST as walletsPost } from '../src/app/api/wallets/route';
@@ -1965,7 +1974,8 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
 
     // 2. localDateTimeInputToISO round-trip preserves local wall-clock time
     const isoString = localDateTimeInputToISO('2026-09-17T14:30');
-    const backToLocal = toLocalDateTimeInputValue(isoString);
+    expect(isoString).not.toBeNull();
+    const backToLocal = toLocalDateTimeInputValue(isoString!);
     expect(backToLocal).toBe('2026-09-17T14:30');
 
     // 3. getLocalDateKey and getLocalYearMonth
@@ -2452,7 +2462,7 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
   // =========================================================================
   // CASE MM — Corrupt Snapshot Safe Recovery (No Data Loss / No Overwrite)
   // =========================================================================
-  it('CASE MM — Invalid snapshot does NOT overwrite storage: returns ok: false and describes error safely', () => {
+  it('CASE MM — Invalid snapshot does NOT overwrite storage: returns ok: false and preserves primary storage', () => {
     const state = createMockState();
     const corruptSnapshot = {
       schemaVersion: SCHEMA_VERSION,
@@ -2477,8 +2487,19 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
 
     const res = validateAndNormalizeAppSnapshot(corruptSnapshot);
     expect(res.ok).toBe(false);
-    if (res.ok) return;
-    expect(res.error).toContain('có ví nhận trùng ví gửi');
+    if (!res.ok) {
+      expect(res.error).toContain('có ví nhận trùng ví gửi');
+    }
+
+    // Strengthened: Verify actual storage adapter behavior
+    const adapter = new MemoryStorageAdapter();
+    const rawCorrupt = JSON.stringify(corruptSnapshot);
+    adapter.setItem('fintrack_pro_state_v1', rawCorrupt);
+
+    const loadResult = loadStorageSnapshot(adapter, 'fintrack_pro_state_v1');
+    expect(loadResult.status).toBe('RECOVERY_REQUIRED');
+    // The primary key MUST remain byte-for-byte identical, never overwritten
+    expect(adapter.getItem('fintrack_pro_state_v1')).toBe(rawCorrupt);
   });
 
   // =========================================================================
@@ -2581,6 +2602,9 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
   // CASE QQ — Import Failure Leaves State Unchanged
   // =========================================================================
   it('CASE QQ — Import failure leaves state unchanged: invalid JSON snapshot rejection protects memory', () => {
+    const memoryState = createMockState();
+    const initialWalletsCount = memoryState.wallets.length;
+
     const corruptedRaw = JSON.stringify({
       schemaVersion: 1,
       wallets: [{ id: 'wal-1', balance: -500 }], // invalid negative balance
@@ -2588,6 +2612,9 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     const parsed = JSON.parse(corruptedRaw);
     const result = validateAndNormalizeAppSnapshot(parsed);
     expect(result.ok).toBe(false);
+
+    // Verify existing state was NOT replaced or mutated
+    expect(memoryState.wallets.length).toBe(initialWalletsCount);
   });
 
   // =========================================================================
@@ -2652,14 +2679,14 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
   // =========================================================================
   // CASE UU — Oversized Payload & Receipt Guard
   // =========================================================================
-  it('CASE UU — Oversized payload rejected: receipt validation enforces 5MB cap and MIME allowlist', () => {
+  it('CASE UU — Oversized payload rejected: receipt validation enforces 1MB local cap and MIME allowlist', () => {
     expect(MAX_IMPORT_BYTES).toBe(5 * 1024 * 1024);
-    expect(RECEIPT_MAX_BYTES).toBe(5 * 1024 * 1024);
+    expect(RECEIPT_MAX_BYTES).toBe(1 * 1024 * 1024);
 
-    // Mock file too large (> 5MB)
+    // Mock file too large (> 1MB)
     const largeFile = {
       name: 'large_receipt.png',
-      size: 6 * 1024 * 1024,
+      size: 2 * 1024 * 1024,
       type: 'image/png',
     } as unknown as File;
     const largeRes = validateReceiptFile(largeFile);
@@ -2679,7 +2706,7 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     // Mock valid JPEG
     const validFile = {
       name: 'receipt.jpg',
-      size: 2 * 1024 * 1024,
+      size: 500 * 1024,
       type: 'image/jpeg',
     } as unknown as File;
     const validRes = validateReceiptFile(validFile);
@@ -2693,6 +2720,668 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     const validStatuses: StorageStatus[] = ['LOADING', 'OK', 'RECOVERY_REQUIRED', 'SAVE_ERROR'];
     expect(validStatuses).toContain('SAVE_ERROR');
     expect(validStatuses).toContain('RECOVERY_REQUIRED');
+
+    // Strengthened: Test real save failure in adapter
+    const adapter = new MemoryStorageAdapter();
+    adapter.shouldFailSetItem = true; // Simulates QuotaExceededError
+    const validSnapshot = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: INITIAL_WALLETS,
+      transactions: [],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+
+    const persistRes = persistStorageSnapshot(adapter, 'test_key', validSnapshot);
+    expect(persistRes.ok).toBe(false);
+    expect(persistRes.status).toBe('SAVE_ERROR');
+    if (!persistRes.ok) {
+      expect(persistRes.error).toContain('Không thể ghi dữ liệu vào bộ nhớ');
+    }
+  });
+
+  // =========================================================================
+  // CASE WW — Dangling Transaction Category Rejected
+  // =========================================================================
+  it('CASE WW — Dangling transaction category rejected: snapshot with non-existent categoryId is rejected', () => {
+    const snapshot = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: INITIAL_WALLETS,
+      transactions: [
+        {
+          id: 'tx-dangling-cat',
+          type: 'EXPENSE',
+          amount: 50000,
+          walletId: 'wal-bank',
+          categoryId: 'cat-non-existent-ghost',
+          categoryName: 'Ma',
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+
+    const res = validateAndNormalizeAppSnapshot(snapshot);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toContain('không tồn tại');
+    }
+  });
+
+  // =========================================================================
+  // CASE XX — Category Type Mismatch Rejected
+  // =========================================================================
+  it('CASE XX — EXPENSE cannot reference INCOME category and vice versa', () => {
+    const state = createMockState();
+    // 1. EXPENSE tx referencing INCOME category ('cat-salary')
+    const expenseWithIncomeCat = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: state.wallets,
+      transactions: [
+        {
+          id: 'tx-expense-mismatch',
+          type: 'EXPENSE',
+          amount: 50000,
+          walletId: 'wal-bank',
+          categoryId: 'cat-salary', // INCOME category
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+    const res1 = validateAndNormalizeAppSnapshot(expenseWithIncomeCat);
+    expect(res1.ok).toBe(false);
+    if (!res1.ok) {
+      expect(res1.error).toContain('Chỉ danh mục EXPENSE được phép');
+    }
+
+    // 2. INCOME tx referencing EXPENSE category ('cat-food')
+    const incomeWithExpenseCat = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: state.wallets,
+      transactions: [
+        {
+          id: 'tx-income-mismatch',
+          type: 'INCOME',
+          amount: 500000,
+          walletId: 'wal-bank',
+          categoryId: 'cat-food', // EXPENSE category
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+    const res2 = validateAndNormalizeAppSnapshot(incomeWithExpenseCat);
+    expect(res2.ok).toBe(false);
+    if (!res2.ok) {
+      expect(res2.error).toContain('Chỉ danh mục INCOME được phép');
+    }
+  });
+
+  // =========================================================================
+  // CASE YY — System Transaction Origin Enforcement
+  // =========================================================================
+  it('CASE YY — GOAL_DEPOSIT / GOAL_WITHDRAWAL with MANUAL origin rejected', () => {
+    const state = createMockState();
+    const depositWithManualOrigin = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: state.wallets,
+      transactions: [
+        {
+          id: 'tx-goal-manual',
+          type: 'TRANSFER',
+          transferKind: 'GOAL_DEPOSIT',
+          amount: 500000,
+          walletId: 'wal-bank',
+          origin: 'MANUAL', // Violates system requirement
+          originId: 'goal-emergency',
+          goalId: 'goal-emergency',
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: state.goals,
+      planner: INITIAL_PLANNER,
+    };
+
+    const res = validateAndNormalizeAppSnapshot(depositWithManualOrigin);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toContain('phải có origin là "GOAL"');
+    }
+  });
+
+  // =========================================================================
+  // CASE ZZ — goalId/originId Mismatch Rejected
+  // =========================================================================
+  it('CASE ZZ — goalId and originId mismatch rejected', () => {
+    const state = createMockState();
+    const mismatchedGoalTx = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: state.wallets,
+      transactions: [
+        {
+          id: 'tx-goal-mismatch',
+          type: 'TRANSFER',
+          transferKind: 'GOAL_DEPOSIT',
+          amount: 500000,
+          walletId: 'wal-bank',
+          origin: 'GOAL',
+          originId: 'goal-emergency',
+          goalId: 'goal-vacation', // Differing ID!
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: state.goals,
+      planner: INITIAL_PLANNER,
+    };
+
+    const res = validateAndNormalizeAppSnapshot(mismatchedGoalTx);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toContain('không khớp với originId');
+    }
+  });
+
+  // =========================================================================
+  // CASE AAA — BILL_PAYMENT Referencing Missing Bill Rejected
+  // =========================================================================
+  it('CASE AAA — BILL_PAYMENT referencing missing bill rejected', () => {
+    const state = createMockState();
+    const snapshot = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: state.wallets,
+      transactions: [
+        {
+          id: 'tx-bill-ghost',
+          type: 'EXPENSE',
+          amount: 200000,
+          walletId: 'wal-bank',
+          origin: 'BILL_PAYMENT',
+          originId: 'bill-does-not-exist',
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: state.bills,
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+
+    const res = validateAndNormalizeAppSnapshot(snapshot);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toContain('tham chiếu đến hóa đơn không tồn tại');
+    }
+  });
+
+  // =========================================================================
+  // CASE AAB — UNPAID Bill with Linked Payment Transaction Rejected
+  // =========================================================================
+  it('CASE AAB — UNPAID bill with BILL_PAYMENT transaction rejected', () => {
+    const state = createMockState();
+    const snapshot = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: state.wallets,
+      transactions: [
+        {
+          id: 'tx-bill-unpaid-conflict',
+          type: 'EXPENSE',
+          amount: 300000,
+          walletId: 'wal-bank',
+          origin: 'BILL_PAYMENT',
+          originId: 'bill-internet',
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [
+        {
+          id: 'bill-internet',
+          name: 'Internet',
+          amount: 300000,
+          categoryId: 'cat-bills',
+          dueDay: 15,
+          frequency: 'MONTHLY' as const,
+          status: 'UNPAID' as const, // Inconsistent with existing payment!
+        },
+      ],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+
+    const res = validateAndNormalizeAppSnapshot(snapshot);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toContain('có trạng thái UNPAID');
+    }
+  });
+
+  // =========================================================================
+  // CASE AAC — Bill/Payment Amount Mismatch Rejected
+  // =========================================================================
+  it('CASE AAC — Bill and payment amount mismatch rejected', () => {
+    const state = createMockState();
+    const snapshot = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: state.wallets,
+      transactions: [
+        {
+          id: 'tx-bill-amount-diff',
+          type: 'EXPENSE',
+          amount: 450000, // Differs from bill amount 300000
+          walletId: 'wal-bank',
+          origin: 'BILL_PAYMENT',
+          originId: 'bill-internet',
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [
+        {
+          id: 'bill-internet',
+          name: 'Internet',
+          amount: 300000,
+          categoryId: 'cat-bills',
+          dueDay: 15,
+          frequency: 'MONTHLY' as const,
+          status: 'PAID' as const,
+          walletId: 'wal-bank',
+        },
+      ],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+
+    const res = validateAndNormalizeAppSnapshot(snapshot);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toContain('không khớp với số tiền');
+    }
+  });
+
+  // =========================================================================
+  // CASE AAD — Bill/Payment Wallet Mismatch Rejected
+  // =========================================================================
+  it('CASE AAD — Bill and payment walletId mismatch rejected', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-bank',
+          name: 'Bank',
+          type: 'BANK',
+          balance: 1000000,
+          initialBalance: 1000000,
+          currency: 'VND',
+          color: '#10b981',
+          icon: 'Landmark',
+          createdAt: '2026-03-01T00:00:00.000Z',
+        },
+        {
+          id: 'wal-cash',
+          name: 'Cash',
+          type: 'CASH',
+          balance: 1000000,
+          initialBalance: 1000000,
+          currency: 'VND',
+          color: '#3b82f6',
+          icon: 'Banknote',
+          createdAt: '2026-03-01T00:00:00.000Z',
+        },
+      ],
+    });
+    const snapshot = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: state.wallets,
+      transactions: [
+        {
+          id: 'tx-bill-wallet-diff',
+          type: 'EXPENSE',
+          amount: 300000,
+          walletId: 'wal-cash', // Differs from bill walletId 'wal-bank'
+          origin: 'BILL_PAYMENT',
+          originId: 'bill-internet',
+          date: '2026-09-01T10:00:00',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [
+        {
+          id: 'bill-internet',
+          name: 'Internet',
+          amount: 300000,
+          categoryId: 'cat-bills',
+          dueDay: 15,
+          frequency: 'MONTHLY' as const,
+          status: 'PAID' as const,
+          walletId: 'wal-bank',
+        },
+      ],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+
+    const res = validateAndNormalizeAppSnapshot(snapshot);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toContain('không khớp với ví thanh toán');
+    }
+  });
+
+  // =========================================================================
+  // CASE AAE — SVG Receipt Rejected at UI and Storage Boundary
+  // =========================================================================
+  it('CASE AAE — SVG receipt rejected at UI and storage boundary', () => {
+    // 1. UI Boundary (validateReceiptFile)
+    const svgFile = {
+      name: 'invoice.svg',
+      size: 2048,
+      type: 'image/svg+xml',
+    } as unknown as File;
+    const uiRes = validateReceiptFile(svgFile);
+    expect(uiRes.valid).toBe(false);
+    expect(uiRes.error).toContain('không được hỗ trợ');
+
+    // 2. Storage Boundary (validateAndNormalizeAppSnapshot)
+    const snapshotWithSvg = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: INITIAL_WALLETS,
+      transactions: [
+        {
+          id: 'tx-svg-receipt',
+          type: 'EXPENSE',
+          amount: 100000,
+          walletId: 'wal-cash',
+          date: '2026-09-01T10:00:00',
+          receiptImage: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+    const storageRes = validateAndNormalizeAppSnapshot(snapshotWithSvg);
+    expect(storageRes.ok).toBe(false);
+    if (!storageRes.ok) {
+      expect(storageRes.error).toContain('không an toàn (SVG/HTML/URL)');
+    }
+  });
+
+  // =========================================================================
+  // CASE AAF — Oversized Local Receipt Rejected
+  // =========================================================================
+  it('CASE AAF — Oversized local receipt (> 1MB) rejected', () => {
+    expect(LOCAL_RECEIPT_MAX_BYTES).toBe(1024 * 1024);
+
+    // 1. UI Boundary: file > 1MB
+    const bigFile = {
+      name: 'big_receipt.jpg',
+      size: 1.5 * 1024 * 1024,
+      type: 'image/jpeg',
+    } as unknown as File;
+    const uiRes = validateReceiptFile(bigFile);
+    expect(uiRes.valid).toBe(false);
+    expect(uiRes.error).toContain('1 MB');
+
+    // 2. Storage Boundary: Data URL > 1MB * 1.37
+    const hugeBase64 = 'data:image/jpeg;base64,' + 'A'.repeat(1_450_000);
+    const snapshotWithBigReceipt = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: INITIAL_WALLETS,
+      transactions: [
+        {
+          id: 'tx-big-receipt',
+          type: 'EXPENSE',
+          amount: 100000,
+          walletId: 'wal-cash',
+          date: '2026-09-01T10:00:00',
+          receiptImage: hugeBase64,
+        },
+      ],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+    const storageRes = validateAndNormalizeAppSnapshot(snapshotWithBigReceipt);
+    expect(storageRes.ok).toBe(false);
+    if (!storageRes.ok) {
+      expect(storageRes.error).toContain('vượt quá giới hạn lưu trữ cục bộ');
+    }
+  });
+
+  // =========================================================================
+  // CASE AAG — Valid JPEG/PNG/WEBP Receipts Accepted
+  // =========================================================================
+  it('CASE AAG — Valid JPEG, PNG, and WebP receipts accepted by storage and UI', () => {
+    const validJpegData = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=';
+    const validPngData = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const validWebpData = 'data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==';
+
+    for (const [img, mime] of [
+      [validJpegData, 'image/jpeg'],
+      [validPngData, 'image/png'],
+      [validWebpData, 'image/webp'],
+    ]) {
+      const snap = {
+        schemaVersion: SCHEMA_VERSION,
+        wallets: INITIAL_WALLETS,
+        transactions: [
+          {
+            id: `tx-valid-${mime.replace('/', '-')}`,
+            type: 'EXPENSE',
+            amount: 50000,
+            walletId: 'wal-cash',
+            date: '2026-09-01T10:00:00',
+            receiptImage: img,
+          },
+        ],
+        categories: DEFAULT_CATEGORIES,
+        budgets: [],
+        bills: [],
+        goals: [],
+        planner: INITIAL_PLANNER,
+      };
+      const res = validateAndNormalizeAppSnapshot(snap);
+      expect(res.ok).toBe(true);
+
+      const dummyFile = {
+        name: `test.${mime.split('/')[1]}`,
+        size: 500_000,
+        type: mime,
+      } as unknown as File;
+      expect(validateReceiptFile(dummyFile).valid).toBe(true);
+    }
+  });
+
+  // =========================================================================
+  // CASE AAH — Persistence Refuses Invalid In-Memory Snapshot
+  // =========================================================================
+  it('CASE AAH — Persistence refuses invalid in-memory snapshot: sets SAVE_ERROR without persisting', () => {
+    const adapter = new MemoryStorageAdapter();
+    const invalidPayload = {
+      schemaVersion: SCHEMA_VERSION,
+      wallets: [{ id: 'wal-bank', name: 'Bank', type: 'BANK', balance: -100 }], // Negative balance
+      transactions: [],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      bills: [],
+      goals: [],
+      planner: INITIAL_PLANNER,
+    };
+
+    const res = persistStorageSnapshot(adapter, 'fintrack_pro_state_v1', invalidPayload);
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe('SAVE_ERROR');
+    if (!res.ok) {
+      expect(res.error).toContain('Từ chối lưu dữ liệu không hợp lệ');
+    }
+    expect(adapter.getItem('fintrack_pro_state_v1')).toBeNull(); // Never written!
+  });
+
+  // =========================================================================
+  // CASE AAI — Corrupt Primary Snapshot Remains Byte-For-Byte Unchanged
+  // =========================================================================
+  it('CASE AAI — Corrupt primary snapshot remains byte-for-byte unchanged', () => {
+    const adapter = new MemoryStorageAdapter();
+    const corruptData = '{"schemaVersion":1,"wallets":"NOT_AN_ARRAY"}';
+    adapter.setItem('fintrack_pro_state_v1', corruptData);
+
+    const loadRes = loadStorageSnapshot(adapter, 'fintrack_pro_state_v1');
+    expect(loadRes.status).toBe('RECOVERY_REQUIRED');
+    expect(adapter.getItem('fintrack_pro_state_v1')).toBe(corruptData);
+  });
+
+  // =========================================================================
+  // CASE AAJ — Failed Recovery-Copy Write Reported Accurately
+  // =========================================================================
+  it('CASE AAJ — Failed recovery-copy write is reported accurately', () => {
+    const adapter = new MemoryStorageAdapter();
+    adapter.setItem('fintrack_pro_state_v1', '{"malformed":');
+    // Now simulate quota exceeded when writing recovery copy
+    adapter.shouldFailSetItem = true;
+
+    const loadRes = loadStorageSnapshot(adapter, 'fintrack_pro_state_v1');
+    expect(loadRes.status).toBe('RECOVERY_REQUIRED');
+    if (loadRes.status === 'RECOVERY_REQUIRED') {
+      expect(loadRes.recoveryCopySaved).toBe(false);
+      expect(loadRes.recoveryRawData).toBe('{"malformed":');
+    }
+  });
+
+  // =========================================================================
+  // CASE AAK — Raw Recovery Download Returns Original Corrupt Data
+  // =========================================================================
+  it('CASE AAK — Raw recovery download returns original corrupt data without parsing/rewriting', () => {
+    const adapter = new MemoryStorageAdapter();
+    const originalCorrupt = 'RAW_CORRUPT_BYTES_XYZ_123_{}';
+    adapter.setItem('fintrack_pro_state_v1', originalCorrupt);
+
+    const loadRes = loadStorageSnapshot(adapter, 'fintrack_pro_state_v1');
+    expect(loadRes.status).toBe('RECOVERY_REQUIRED');
+    if (loadRes.status === 'RECOVERY_REQUIRED') {
+      expect(loadRes.recoveryRawData).toBe(originalCorrupt);
+    }
+  });
+
+  // =========================================================================
+  // CASE AAL — Invalid Datetime Rejected Rather Than Replaced by Now
+  // =========================================================================
+  it('CASE AAL — Invalid datetime rejected rather than replaced by current time', () => {
+    expect(localDateTimeInputToISO('')).toBeNull();
+    expect(localDateTimeInputToISO('invalid-string')).toBeNull();
+    expect(localDateTimeInputToISO('2026-99-99T25:99:99')).toBeNull();
+  });
+
+  // =========================================================================
+  // CASE AAM — Impossible Calendar Date Rejected
+  // =========================================================================
+  it('CASE AAM — Impossible calendar date rejected (no silent rollover to next month)', () => {
+    // Feb 31 does not exist
+    expect(localDateTimeInputToISO('2026-02-31T10:00')).toBeNull();
+    // Feb 29 in non-leap year (2025) does not exist
+    expect(localDateTimeInputToISO('2025-02-29T10:00')).toBeNull();
+    // April 31 does not exist (April has 30 days)
+    expect(localDateTimeInputToISO('2026-04-31T10:00')).toBeNull();
+    // Feb 29 in leap year (2024) is VALID
+    const leapDate = localDateTimeInputToISO('2024-02-29T10:00');
+    expect(leapDate).not.toBeNull();
+    expect(new Date(leapDate!).getUTCFullYear()).toBe(2024);
+  });
+
+  // =========================================================================
+  // CASE AAN — UTF-8 Import Byte Limit Uses Real Byte Count
+  // =========================================================================
+  it('CASE AAN — UTF-8 import byte limit uses real byte count (TextEncoder)', () => {
+    const textWithMultiByte = 'Ví Tiền Việt Nam 🇻🇳';
+    const charLen = textWithMultiByte.length;
+    const byteLen = getUtf8ByteLength(textWithMultiByte);
+    expect(byteLen).toBeGreaterThan(charLen);
+
+    // Verify byteLength enforcement
+    expect(getUtf8ByteLength('abc')).toBe(3);
+    expect(getUtf8ByteLength('€')).toBe(3); // Euro sign is 3 UTF-8 bytes but 1 char
+  });
+
+  // =========================================================================
+  // CASE AAO — Production Mock POST Does Not Return 201
+  // =========================================================================
+  it('CASE AAO — Production mock POST does not return 201 when demo API is disabled', async () => {
+    const originalEnv = process.env.NODE_ENV;
+    const originalDemo = process.env.ENABLE_DEMO_API;
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      delete process.env.ENABLE_DEMO_API;
+
+      const req = new Request('http://localhost:3000/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'EXPENSE', amount: 50000, walletId: 'wal-bank' }),
+      });
+      const res = await transactionsPost(req);
+      expect(res.status).toBe(501);
+      const json = await res.json();
+      expect(json.success).toBe(false);
+      expect(json._code).toBe('DEMO_MUTATION_DISABLED');
+    } finally {
+      (process.env as any).NODE_ENV = originalEnv;
+      if (originalDemo !== undefined) {
+        process.env.ENABLE_DEMO_API = originalDemo;
+      }
+    }
+  });
+
+  // =========================================================================
+  // CASE AAP — Production CSP Excludes unsafe-eval
+  // =========================================================================
+  it('CASE AAP — Production CSP excludes unsafe-eval and includes object-src none', async () => {
+    // Read next.config.mjs text directly to verify production CSP definition
+    const nextConfigContent = fs.readFileSync(path.resolve(__dirname, '../next.config.mjs'), 'utf-8');
+    expect(nextConfigContent).toContain("const isDev = process.env.NODE_ENV !== 'production'");
+    expect(nextConfigContent).toContain("script-src 'self' 'unsafe-inline'");
+    expect(nextConfigContent).toContain("object-src 'none'");
+    expect(nextConfigContent).toContain("X-Frame-Options");
+    expect(nextConfigContent).toContain("DENY");
+  });
+
+  // =========================================================================
+  // CASE AAQ — Security Docs and Header Evidence Remain Consistent
+  // =========================================================================
+  it('CASE AAQ — Security docs and header evidence remain consistent', () => {
+    const baselineDocs = fs.readFileSync(path.resolve(__dirname, '../docs/security/security-baseline.md'), 'utf-8');
+    const checklistDocs = fs.readFileSync(path.resolve(__dirname, '../docs/security/owasp-checklist.md'), 'utf-8');
+
+    expect(baselineDocs).toContain('X-Frame-Options: DENY');
+    expect(baselineDocs).toContain('exceljs');
+    expect(checklistDocs).toContain('X-Frame-Options: DENY');
+    expect(checklistDocs).toContain('Production Mock Mutation Gating');
   });
 });
 

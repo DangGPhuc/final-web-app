@@ -5,7 +5,7 @@ import { useApp } from '@/context/AppContext';
 import { TransactionType } from '@/types';
 import { X, Upload, Plus, Calendar, Tag, FileText, ArrowRightLeft, DollarSign, Image as ImageIcon } from 'lucide-react';
 import { POPULAR_TAGS } from '@/lib/constants';
-import { toLocalDateTimeInputValue, localDateTimeInputToISO } from '@/lib/utils';
+import { toLocalDateTimeInputValue, localDateTimeInputToISO, validateReceiptFile } from '@/lib/utils';
 import { IconHelper } from './IconHelper';
 
 export const QuickAddModal: React.FC = () => {
@@ -28,6 +28,7 @@ export const QuickAddModal: React.FC = () => {
   const [note, setNote] = useState<string>('');
   const [tags, setTags] = useState<string[]>([]);
   const [receiptImage, setReceiptImage] = useState<string | undefined>(undefined);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
 
   useEffect(() => {
     if (quickAddOpen) {
@@ -43,6 +44,7 @@ export const QuickAddModal: React.FC = () => {
       setNote('');
       setTags([]);
       setReceiptImage(undefined);
+      setReceiptError(null);
     }
   }, [quickAddOpen, quickAddDefaultType, categories, wallets]);
 
@@ -62,14 +64,24 @@ export const QuickAddModal: React.FC = () => {
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setReceiptError(null);
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setReceiptImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+
+    const validation = validateReceiptFile(file);
+    if (!validation.valid) {
+      const err = validation.error || 'Tập tin hình ảnh không hợp lệ';
+      setReceiptError(err);
+      alert(err);
+      e.target.value = '';
+      return;
     }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setReceiptImage(reader.result as string);
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -118,9 +130,15 @@ export const QuickAddModal: React.FC = () => {
       }
     }
 
+    const isoDate = localDateTimeInputToISO(date);
+    if (!isoDate) {
+      alert('Thời gian giao dịch không hợp lệ hoặc ngày trong lịch không tồn tại (ví dụ: ngày 31/02). Vui lòng chọn lại.');
+      return;
+    }
+
     const numFee = typeof fee === 'string' && Number(fee) > 0 && isFinite(Number(fee)) ? Number(fee) : 0;
 
-    addTransaction({
+    const res = addTransaction({
       type,
       amount: numAmount,
       categoryId: type === 'TRANSFER' ? undefined : categoryId,
@@ -132,11 +150,15 @@ export const QuickAddModal: React.FC = () => {
       fee: type === 'TRANSFER' ? numFee : 0,
       transferKind: type === 'TRANSFER' ? (selectedToWallet?.type === 'CREDIT' ? 'CREDIT_PAYMENT' : 'WALLET_TRANSFER') : undefined,
       origin: 'MANUAL',
-      date: localDateTimeInputToISO(date),
+      date: isoDate,
       note: note || (type === 'TRANSFER' ? (selectedToWallet?.type === 'CREDIT' ? `Thanh toán thẻ ${selectedToWallet?.name}` : `Chuyển sang ${selectedToWallet?.name}`) : selectedCategory?.name || 'Giao dịch'),
       tags,
       receiptImage,
     });
+
+    if (res && !res.ok) {
+      return;
+    }
 
     setQuickAddOpen(false);
   };
@@ -437,12 +459,15 @@ export const QuickAddModal: React.FC = () => {
                 </div>
                 <div>
                   <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                    Bấm để tải ảnh hóa đơn (JPG, PNG)
+                    Bấm để tải ảnh hóa đơn (JPG, PNG, WebP)
                   </p>
-                  <p className="text-[11px] text-slate-400">Giúp đối soát chi tiêu chính xác và tiện lợi</p>
+                  <p className="text-[11px] text-slate-400">Tối đa 1MB. Giúp đối soát chi tiêu chính xác</p>
                 </div>
-                <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                <input type="file" accept="image/jpeg,image/png,image/webp" onChange={handleImageUpload} className="hidden" />
               </label>
+            )}
+            {receiptError && (
+              <p className="text-xs text-rose-500 font-medium mt-1">{receiptError}</p>
             )}
           </div>
 

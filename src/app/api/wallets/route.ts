@@ -6,6 +6,7 @@
  */
 import { NextResponse } from 'next/server';
 import { INITIAL_WALLETS } from '@/lib/mock-data';
+import { checkDemoMutationAllowed, readBoundedJsonBody } from '@/lib/api-guard';
 
 const DEMO_HEADERS = { 'X-Demo-Only': 'true', 'X-Persistence': 'none' };
 const VALID_WALLET_TYPES = ['CASH', 'BANK', 'CREDIT', 'SAVINGS'] as const;
@@ -18,32 +19,21 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const contentLength = req.headers.get('content-length');
-  if (contentLength && parseInt(contentLength) > 10_000) {
+  // Production guard: mock mutation endpoints return 501 in production unless ENABLE_DEMO_API=true
+  const mutationBlocked = checkDemoMutationAllowed();
+  if (mutationBlocked) {
+    return mutationBlocked;
+  }
+
+  const parsed = await readBoundedJsonBody<Record<string, unknown>>(req, 10_000);
+  if (!parsed.ok) {
     return NextResponse.json(
-      { success: false, error: 'Payload too large' },
-      { status: 413, headers: DEMO_HEADERS }
+      { success: false, error: parsed.error },
+      { status: parsed.status, headers: DEMO_HEADERS }
     );
   }
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { success: false, error: 'Invalid JSON body' },
-      { status: 400, headers: DEMO_HEADERS }
-    );
-  }
-
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    return NextResponse.json(
-      { success: false, error: 'Body must be a JSON object' },
-      { status: 400, headers: DEMO_HEADERS }
-    );
-  }
-
-  const b = body as Record<string, unknown>;
+  const b = parsed.data;
 
   if (typeof b.name !== 'string' || !b.name.trim() || b.name.length > 100) {
     return NextResponse.json(

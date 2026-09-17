@@ -22,36 +22,50 @@ import {
 import { DEFAULT_CATEGORIES } from '@/lib/constants';
 import {
   calculateFinancialSummary,
+  getCurrentYearMonth,
+} from '@/lib/utils';
+import { safeErrorMessage } from '@/lib/error';
+import {
   applyAddTransaction,
   applyEditTransaction,
   applyDeleteTransaction,
-  applyGoalDeposit,
-  applyGoalWithdraw,
-  applyDeleteGoal,
-  applyEditGoal,
-  applyAddBill,
-  applyEditBill,
-  applyDeleteBill,
-  applyPayBill,
-  applyUnpayBill,
-  applyDeleteWallet,
-  applyEditWallet,
-  applyAddWallet,
   validateTransferFee,
-  applyAddGoal,
+  applyAddWallet,
+  applyEditWallet,
+  applyDeleteWallet,
   applyAddBudget,
   applyEditBudget,
   applyDeleteBudget,
   applyUpdatePlanner,
+  applyPayBill,
+  applyUnpayBill,
+  applyAddBill,
+  applyEditBill,
+  applyDeleteBill,
+  applyAddGoal,
+  applyEditGoal,
+  applyDeleteGoal,
+  applyGoalDeposit,
+  applyGoalWithdraw,
 } from '@/lib/domain-engine';
-import { getCurrentYearMonth } from '@/lib/utils';
 import {
-  validateAndNormalizeAppSnapshot,
-  StorageStatus,
   SCHEMA_VERSION,
   MAX_IMPORT_BYTES,
+  StorageStatus,
+  validateAndNormalizeAppSnapshot,
+  getUtf8ByteLength,
 } from '@/lib/storage-schema';
-import { safeErrorMessage } from '@/lib/error';
+import {
+  StorageAdapter,
+  loadStorageSnapshot,
+  persistStorageSnapshot,
+} from '@/lib/storage-service';
+
+export interface ToastNotification {
+  id: string;
+  text: string;
+  type: 'error' | 'info' | 'success';
+}
 
 interface AppContextType {
   wallets: Wallet[];
@@ -62,6 +76,8 @@ interface AppContextType {
   goals: SavingsGoal[];
   planner: IncomeBudgetPlanner;
   currentMonth: string;
+
+  // Navigation
   activeTab: string;
   setActiveTab: (tab: string) => void;
   quickAddOpen: boolean;
@@ -72,41 +88,43 @@ interface AppContextType {
 
   /** Storage lifecycle status — exposed to UI for banners/warnings */
   storageStatus: StorageStatus;
-  /** Human-readable storage error, set when storageStatus is RECOVERY_REQUIRED or SAVE_ERROR */
   storageError: string | undefined;
-  /** Retry last failed save */
+  recoveryCopySaved: boolean;
+  recoveryKey: string | undefined;
+  recoveryRawData: string | undefined;
   retrySave: () => void;
+  downloadRawRecoveryData: () => void;
 
-  // Transactions
-  addTransaction: (tx: Omit<Transaction, 'id' | 'createdAt'>) => void;
-  editTransaction: (id: string, tx: Partial<Transaction>) => void;
-  deleteTransaction: (id: string) => void;
+  // Transactions (return result so UI closes only on success)
+  addTransaction: (tx: Omit<Transaction, 'id' | 'createdAt'>) => { ok: true } | { ok: false; error: string };
+  editTransaction: (id: string, tx: Partial<Transaction>) => { ok: true } | { ok: false; error: string };
+  deleteTransaction: (id: string) => { ok: true } | { ok: false; error: string };
 
   // Wallets
-  addWallet: (wallet: Omit<Wallet, 'id' | 'createdAt'>) => void;
-  editWallet: (id: string, wallet: Partial<Wallet>) => void;
-  deleteWallet: (id: string) => void;
-  transferFunds: (fromWalletId: string, toWalletId: string, amount: number, fee: number, note?: string) => void;
+  addWallet: (wallet: Omit<Wallet, 'id' | 'createdAt'>) => { ok: true } | { ok: false; error: string };
+  editWallet: (id: string, wallet: Partial<Wallet>) => { ok: true } | { ok: false; error: string };
+  deleteWallet: (id: string) => { ok: true } | { ok: false; error: string };
+  transferFunds: (fromWalletId: string, toWalletId: string, amount: number, fee: number, note?: string) => { ok: true } | { ok: false; error: string };
 
   // Budgets
-  addBudget: (budget: Omit<Budget, 'id'>) => void;
-  editBudget: (id: string, budget: Partial<Budget>) => void;
-  deleteBudget: (id: string) => void;
-  updatePlanner: (planner: IncomeBudgetPlanner) => void;
+  addBudget: (budget: Omit<Budget, 'id'>) => { ok: true } | { ok: false; error: string };
+  editBudget: (id: string, budget: Partial<Budget>) => { ok: true } | { ok: false; error: string };
+  deleteBudget: (id: string) => { ok: true } | { ok: false; error: string };
+  updatePlanner: (planner: IncomeBudgetPlanner) => { ok: true } | { ok: false; error: string };
 
   // Bills
-  addBill: (bill: Omit<RecurringBill, 'id'>) => void;
-  editBill: (id: string, bill: Partial<RecurringBill>) => void;
-  deleteBill: (id: string) => void;
-  payBill: (billId: string, walletId: string) => void;
-  unpayBill: (billId: string) => void;
+  addBill: (bill: Omit<RecurringBill, 'id'>) => { ok: true } | { ok: false; error: string };
+  editBill: (id: string, bill: Partial<RecurringBill>) => { ok: true } | { ok: false; error: string };
+  deleteBill: (id: string) => { ok: true } | { ok: false; error: string };
+  payBill: (billId: string, walletId: string) => { ok: true } | { ok: false; error: string };
+  unpayBill: (billId: string) => { ok: true } | { ok: false; error: string };
 
   // Goals
-  addGoal: (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => void;
-  editGoal: (id: string, goal: Partial<SavingsGoal>) => void;
-  deleteGoal: (id: string) => void;
-  depositToGoal: (goalId: string, amount: number, walletId: string, note?: string) => void;
-  withdrawFromGoal: (goalId: string, amount: number, walletId: string, note?: string) => void;
+  addGoal: (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => { ok: true } | { ok: false; error: string };
+  editGoal: (id: string, goal: Partial<SavingsGoal>) => { ok: true } | { ok: false; error: string };
+  deleteGoal: (id: string) => { ok: true } | { ok: false; error: string };
+  depositToGoal: (goalId: string, amount: number, walletId: string, note?: string) => { ok: true } | { ok: false; error: string };
+  withdrawFromGoal: (goalId: string, amount: number, walletId: string, note?: string) => { ok: true } | { ok: false; error: string };
 
   // Backup & Reset
   resetToDefaultData: () => void;
@@ -114,14 +132,26 @@ interface AppContextType {
   exportDatabaseJSON: () => void;
   importDatabaseJSON: (jsonStr: string) => boolean;
 
-  // Domain error — shown by UI without blocking (replaces alert())
+  // Non-blocking user feedback
   lastDomainError: string | undefined;
   clearDomainError: () => void;
+  toastMessage: ToastNotification | null;
+  dismissToast: () => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const STORAGE_KEY = 'quan_ly_chi_tieu_data_v2';
+
+const browserStorageAdapter: StorageAdapter = {
+  getItem: (key) => (typeof window !== 'undefined' ? localStorage.getItem(key) : null),
+  setItem: (key, val) => {
+    if (typeof window !== 'undefined') localStorage.setItem(key, val);
+  },
+  removeItem: (key) => {
+    if (typeof window !== 'undefined') localStorage.removeItem(key);
+  },
+};
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [mounted, setMounted] = useState(false);
@@ -141,15 +171,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Storage lifecycle
   const [storageStatus, setStorageStatus] = useState<StorageStatus>('LOADING');
   const [storageError, setStorageError] = useState<string | undefined>(undefined);
+  const [recoveryCopySaved, setRecoveryCopySaved] = useState<boolean>(false);
+  const [recoveryKey, setRecoveryKey] = useState<string | undefined>(undefined);
+  const [recoveryRawData, setRecoveryRawData] = useState<string | undefined>(undefined);
 
-  // Domain error (non-blocking, replaces alert())
+  // Non-blocking toast feedback
   const [lastDomainError, setLastDomainError] = useState<string | undefined>(undefined);
+  const [toastMessage, setToastMessage] = useState<ToastNotification | null>(null);
+
   const clearDomainError = useCallback(() => setLastDomainError(undefined), []);
+  const dismissToast = useCallback(() => setToastMessage(null), []);
 
   const reportDomainError = useCallback((msg: string) => {
     setLastDomainError(msg);
-    // Also keep legacy alert for now — will be fully replaced once StorageStatusBanner is wired
-    alert(msg);
+    setToastMessage({ id: String(Date.now()), text: msg, type: 'error' });
   }, []);
 
   // Rollover currentMonth on focus, visibility change, and interval
@@ -171,26 +206,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  // ── Load from localStorage (safe recovery) ───────────────────────────────
+  // ── Load from storage via StorageService ──────────────────────────────────
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          // Unparseable — preserve raw bytes, enter RECOVERY_REQUIRED
-          const recoveryKey = `fintrack_recovery_corrupt_${Date.now()}`;
-          try { localStorage.setItem(recoveryKey, raw); } catch { /* ignore quota */ }
-          setStorageStatus('RECOVERY_REQUIRED');
-          setStorageError('Dữ liệu lưu trữ không thể đọc được (JSON không hợp lệ). Bản sao phục hồi đã được lưu.');
-          setMounted(true);
-          return;
-        }
-
-        const res = validateAndNormalizeAppSnapshot(parsed);
-        if (res.ok) {
+      const res = loadStorageSnapshot(browserStorageAdapter, STORAGE_KEY);
+      if (res.status === 'OK') {
+        if (res.data) {
           setWallets(res.data.wallets);
           setTransactions(res.data.transactions);
           setCategories(res.data.categories);
@@ -198,74 +219,77 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setBills(res.data.bills);
           setGoals(res.data.goals);
           setPlanner(res.data.planner);
-          setStorageStatus('OK');
-        } else {
-          // Validation failed — NEVER overwrite the original raw data automatically.
-          // Preserve a recovery copy under a timestamped key.
-          const recoveryKey = `fintrack_recovery_corrupt_${Date.now()}`;
-          try { localStorage.setItem(recoveryKey, raw); } catch { /* ignore quota */ }
-          setStorageStatus('RECOVERY_REQUIRED');
-          setStorageError(`Dữ liệu không vượt qua kiểm tra tính toàn vẹn: ${res.error}. Bản sao phục hồi đã được lưu. Ứng dụng đang chạy với dữ liệu mặc định — dữ liệu sẽ KHÔNG bị ghi đè cho đến khi bạn xác nhận.`);
-          // Load defaults in memory only — do NOT save yet
-          setMounted(true);
-          return;
         }
-      } else {
-        // No stored data — fresh start
         setStorageStatus('OK');
+      } else {
+        setStorageStatus('RECOVERY_REQUIRED');
+        setStorageError(res.error);
+        setRecoveryCopySaved(res.recoveryCopySaved);
+        setRecoveryKey(res.recoveryKey);
+        setRecoveryRawData(res.recoveryRawData);
       }
     } catch (e) {
       console.error('[AppContext] Failed to load storage data:', safeErrorMessage(e));
       setStorageStatus('RECOVERY_REQUIRED');
-      setStorageError('Không thể đọc dữ liệu từ bộ nhớ cục bộ.');
+      setStorageError('Không thể nạp dữ liệu từ bộ nhớ.');
     }
     setMounted(true);
   }, []);
 
-  // ── Save to localStorage ──────────────────────────────────────────────────
-  const buildPayload = useCallback(() => ({
-    schemaVersion: SCHEMA_VERSION,
-    exportedAt: new Date().toISOString(),
-    wallets,
-    transactions,
-    categories,
-    budgets,
-    bills,
-    goals,
-    planner,
-  }), [wallets, transactions, categories, budgets, bills, goals, planner]);
+  // ── Save to storage via StorageService ───────────────────────────────────
+  const buildPayload = useCallback(
+    () => ({
+      schemaVersion: SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      wallets,
+      transactions,
+      categories,
+      budgets,
+      bills,
+      goals,
+      planner,
+    }),
+    [wallets, transactions, categories, budgets, bills, goals, planner]
+  );
 
   const saveToStorage = useCallback(() => {
     if (!mounted) return;
-    // Do NOT save if we are in RECOVERY_REQUIRED — user must explicitly confirm
     if (storageStatus === 'RECOVERY_REQUIRED') return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPayload()));
+
+    const payload = buildPayload();
+    const res = persistStorageSnapshot(browserStorageAdapter, STORAGE_KEY, payload);
+
+    if (res.ok) {
       setStorageStatus('OK');
       setStorageError(undefined);
-    } catch (e) {
-      console.error('[AppContext] Failed to save to localStorage:', safeErrorMessage(e));
+    } else {
       setStorageStatus('SAVE_ERROR');
-      setStorageError('Không thể lưu dữ liệu vào bộ nhớ. Hãy xuất bản sao lưu để tránh mất dữ liệu.');
+      setStorageError(res.error);
     }
   }, [mounted, storageStatus, buildPayload]);
 
   useEffect(() => {
     saveToStorage();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounted, wallets, transactions, categories, budgets, bills, goals, planner]);
 
   const retrySave = useCallback(() => {
     if (!mounted) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPayload()));
-      setStorageStatus('OK');
-      setStorageError(undefined);
-    } catch (e) {
-      setStorageStatus('SAVE_ERROR');
-      setStorageError('Thử lại lưu thất bại. Vui lòng xuất bản sao lưu thủ công.');
-    }
-  }, [mounted, buildPayload]);
+    saveToStorage();
+  }, [mounted, saveToStorage]);
+
+  const downloadRawRecoveryData = useCallback(() => {
+    if (!recoveryRawData) return;
+    const blob = new Blob([recoveryRawData], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `fintrack_raw_recovery_${Date.now()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [recoveryRawData]);
 
   const openQuickAdd = (type: 'EXPENSE' | 'INCOME' | 'TRANSFER' = 'EXPENSE') => {
     setQuickAddDefaultType(type);
@@ -275,47 +299,79 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Financial summary
   const financialSummary = calculateFinancialSummary(wallets, transactions, currentMonth, goals);
 
-  // Add Transaction
-  const addTransaction = (tx: Omit<Transaction, 'id' | 'createdAt'>) => {
+  // ── Domain Mutations (Returning Status for UI Control) ─────────────────────
+
+  const addTransaction = (
+    tx: Omit<Transaction, 'id' | 'createdAt'>
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyAddTransaction({ wallets, transactions, goals, bills }, tx);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
     setTransactions(res.state.transactions);
+    return { ok: true };
   };
 
-  // Edit Transaction
-  const editTransaction = (id: string, updated: Partial<Transaction>) => {
+  const editTransaction = (
+    id: string,
+    updated: Partial<Transaction>
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyEditTransaction({ wallets, transactions, goals, bills }, id, updated);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
     setTransactions(res.state.transactions);
+    return { ok: true };
   };
 
-  // Delete Transaction
-  const deleteTransaction = (id: string) => {
+  const deleteTransaction = (id: string): { ok: true } | { ok: false; error: string } => {
     const res = applyDeleteTransaction({ wallets, transactions, goals, bills }, id);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
     setTransactions(res.state.transactions);
+    return { ok: true };
   };
 
-  // Wallets
-  const addWallet = (wallet: Omit<Wallet, 'id' | 'createdAt'>) => {
-    const res = applyAddWallet({ transactions, wallets, goals, bills }, wallet);
-    if (!res.ok) { reportDomainError(res.error); return; }
+  const addWallet = (
+    wallet: Omit<Wallet, 'id' | 'createdAt'>
+  ): { ok: true } | { ok: false; error: string } => {
+    const res = applyAddWallet({ wallets, transactions, goals, bills }, wallet);
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
+    return { ok: true };
   };
 
-  const editWallet = (id: string, updated: Partial<Wallet>) => {
-    const res = applyEditWallet({ wallets, transactions, goals, bills }, id, updated);
-    if (!res.ok) { reportDomainError(res.error); return; }
+  const editWallet = (
+    id: string,
+    updates: Partial<Wallet>
+  ): { ok: true } | { ok: false; error: string } => {
+    const res = applyEditWallet({ wallets, transactions, goals, bills }, id, updates);
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
+    return { ok: true };
   };
 
-  const deleteWallet = (id: string) => {
+  const deleteWallet = (id: string): { ok: true } | { ok: false; error: string } => {
     const res = applyDeleteWallet({ wallets, transactions, goals, bills }, id);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
+    return { ok: true };
   };
 
   const transferFunds = (
@@ -324,15 +380,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amount: number,
     fee: number,
     note?: string
-  ) => {
+  ): { ok: true } | { ok: false; error: string } => {
     const fromW = wallets.find((w) => w.id === fromWalletId);
     const toW = wallets.find((w) => w.id === toWalletId);
-    if (!fromW || !toW) { reportDomainError('Không tìm thấy thông tin ví'); return; }
+    if (!fromW || !toW) {
+      const err = 'Không tìm thấy thông tin ví';
+      reportDomainError(err);
+      return { ok: false, error: err };
+    }
 
     const feeCheck = validateTransferFee(fee);
-    if (!feeCheck.valid) { reportDomainError(feeCheck.error || 'Phí chuyển khoản không hợp lệ'); return; }
+    if (!feeCheck.valid) {
+      const err = feeCheck.error || 'Phí chuyển khoản không hợp lệ';
+      reportDomainError(err);
+      return { ok: false, error: err };
+    }
 
-    addTransaction({
+    return addTransaction({
       type: 'TRANSFER',
       amount,
       fee: feeCheck.fee,
@@ -341,109 +405,197 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       toWalletId,
       toWalletName: toW.name,
       date: new Date().toISOString(),
-      note: note || (toW.type === 'CREDIT' ? `Thanh toán dư nợ thẻ ${toW.name}` : `Chuyển khoản từ ${fromW.name} sang ${toW.name}`),
+      note:
+        note ||
+        (toW.type === 'CREDIT'
+          ? `Thanh toán dư nợ thẻ ${toW.name}`
+          : `Chuyển khoản từ ${fromW.name} sang ${toW.name}`),
       tags: [toW.type === 'CREDIT' ? 'Thanh toán thẻ tín dụng' : 'Chuyển khoản nội bộ'],
       transferKind: toW.type === 'CREDIT' ? 'CREDIT_PAYMENT' : 'WALLET_TRANSFER',
       origin: 'MANUAL',
     });
   };
 
-  // Budgets — pass categories for §5 validation
-  const addBudget = (budget: Omit<Budget, 'id'>) => {
+  const addBudget = (
+    budget: Omit<Budget, 'id'>
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyAddBudget(budgets, budget, categories);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setBudgets(res.budgets);
+    return { ok: true };
   };
 
-  const editBudget = (id: string, updated: Partial<Budget>) => {
-    const res = applyEditBudget(budgets, id, updated, categories);
-    if (!res.ok) { reportDomainError(res.error); return; }
+  const editBudget = (
+    id: string,
+    updates: Partial<Budget>
+  ): { ok: true } | { ok: false; error: string } => {
+    const res = applyEditBudget(budgets, id, updates, categories);
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setBudgets(res.budgets);
+    return { ok: true };
   };
 
-  const deleteBudget = (id: string) => {
+  const deleteBudget = (id: string): { ok: true } | { ok: false; error: string } => {
     const res = applyDeleteBudget(budgets, id);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setBudgets(res.budgets);
+    return { ok: true };
   };
 
-  const updatePlanner = (newPlanner: IncomeBudgetPlanner) => {
+  const updatePlanner = (
+    newPlanner: IncomeBudgetPlanner
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyUpdatePlanner(newPlanner);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setPlanner(res.planner);
+    return { ok: true };
   };
 
-  // Bills
-  const addBill = (bill: Omit<RecurringBill, 'id'>) => {
+  const addBill = (
+    bill: Omit<RecurringBill, 'id'>
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyAddBill({ wallets, transactions, goals, bills }, bill);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setBills(res.state.bills);
+    return { ok: true };
   };
 
-  const editBill = (id: string, updated: Partial<RecurringBill>) => {
-    const res = applyEditBill({ wallets, transactions, goals, bills }, id, updated);
-    if (!res.ok) { reportDomainError(res.error); return; }
+  const editBill = (
+    id: string,
+    updates: Partial<RecurringBill>
+  ): { ok: true } | { ok: false; error: string } => {
+    const res = applyEditBill({ wallets, transactions, goals, bills }, id, updates);
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setBills(res.state.bills);
+    return { ok: true };
   };
 
-  const deleteBill = (id: string) => {
+  const deleteBill = (id: string): { ok: true } | { ok: false; error: string } => {
     const res = applyDeleteBill({ wallets, transactions, goals, bills }, id);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setBills(res.state.bills);
+    return { ok: true };
   };
 
-  const payBill = (billId: string, walletId: string) => {
+  const payBill = (
+    billId: string,
+    walletId: string
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyPayBill({ wallets, transactions, goals, bills }, billId, walletId);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
     setBills(res.state.bills);
     setTransactions(res.state.transactions);
+    return { ok: true };
   };
 
-  const unpayBill = (billId: string) => {
+  const unpayBill = (billId: string): { ok: true } | { ok: false; error: string } => {
     const res = applyUnpayBill({ wallets, transactions, goals, bills }, billId);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
     setBills(res.state.bills);
     setTransactions(res.state.transactions);
+    return { ok: true };
   };
 
-  // Goals
-  const addGoal = (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => {
+  const addGoal = (
+    goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyAddGoal({ wallets, transactions, goals, bills }, goal);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setGoals(res.state.goals);
+    return { ok: true };
   };
 
-  const editGoal = (id: string, updated: Partial<SavingsGoal>) => {
-    const res = applyEditGoal({ wallets, transactions, goals, bills }, id, updated);
-    if (!res.ok) { reportDomainError(res.error); return; }
+  const editGoal = (
+    id: string,
+    updates: Partial<SavingsGoal>
+  ): { ok: true } | { ok: false; error: string } => {
+    const res = applyEditGoal({ wallets, transactions, goals, bills }, id, updates);
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setGoals(res.state.goals);
+    return { ok: true };
   };
 
-  const deleteGoal = (id: string) => {
+  const deleteGoal = (id: string): { ok: true } | { ok: false; error: string } => {
     const res = applyDeleteGoal({ wallets, transactions, goals, bills }, id);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setGoals(res.state.goals);
+    return { ok: true };
   };
 
-  const depositToGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
+  const depositToGoal = (
+    goalId: string,
+    amount: number,
+    walletId: string,
+    note?: string
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyGoalDeposit({ wallets, transactions, goals, bills }, goalId, walletId, amount, note);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
     setGoals(res.state.goals);
     setTransactions(res.state.transactions);
+    return { ok: true };
   };
 
-  const withdrawFromGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
+  const withdrawFromGoal = (
+    goalId: string,
+    amount: number,
+    walletId: string,
+    note?: string
+  ): { ok: true } | { ok: false; error: string } => {
     const res = applyGoalWithdraw({ wallets, transactions, goals, bills }, goalId, walletId, amount, note);
-    if (!res.ok) { reportDomainError(res.error); return; }
+    if (!res.ok) {
+      reportDomainError(res.error);
+      return { ok: false, error: res.error };
+    }
     setWallets(res.state.wallets);
     setGoals(res.state.goals);
     setTransactions(res.state.transactions);
+    return { ok: true };
   };
 
-  // Backup & Reset
+  // ── Reset & Clear ──────────────────────────────────────────────────────────
+
   const resetToDefaultData = () => {
     setWallets(INITIAL_WALLETS);
     setTransactions(INITIAL_TRANSACTIONS);
@@ -452,30 +604,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setBills(INITIAL_BILLS);
     setGoals(INITIAL_GOALS);
     setPlanner(INITIAL_PLANNER);
-    localStorage.removeItem(STORAGE_KEY);
     setStorageStatus('OK');
     setStorageError(undefined);
+    setToastMessage({ id: String(Date.now()), text: 'Đã khôi phục dữ liệu mẫu', type: 'info' });
   };
 
   const clearAllData = () => {
-    setWallets([
-      {
-        id: 'wal-cash-empty',
-        name: 'Tiền mặt',
-        type: 'CASH',
-        balance: 0,
-        initialBalance: 0,
-        currency: 'VND',
-        color: '#10b981',
-        icon: 'Banknote',
-        createdAt: new Date().toISOString(),
-      },
-    ]);
+    setWallets([]);
     setTransactions([]);
     setBudgets([]);
     setBills([]);
     setGoals([]);
-    setPlanner({ monthlyIncome: 0, needsPercent: 50, wantsPercent: 30, savingsPercent: 20 });
+    setStorageStatus('OK');
+    setStorageError(undefined);
+    setToastMessage({ id: String(Date.now()), text: 'Đã xóa toàn bộ dữ liệu', type: 'info' });
   };
 
   const exportDatabaseJSON = () => {
@@ -503,9 +645,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const importDatabaseJSON = (jsonStr: string): boolean => {
-    // Reject oversized payloads before parsing
-    if (jsonStr.length > MAX_IMPORT_BYTES) {
-      reportDomainError(`Tệp dữ liệu quá lớn (${(jsonStr.length / 1024 / 1024).toFixed(1)} MB). Giới hạn là ${MAX_IMPORT_BYTES / 1024 / 1024} MB.`);
+    const byteLength = getUtf8ByteLength(jsonStr);
+    if (byteLength > MAX_IMPORT_BYTES) {
+      reportDomainError(
+        `Tệp dữ liệu quá lớn (${(byteLength / (1024 * 1024)).toFixed(1)} MB). Giới hạn là ${
+          MAX_IMPORT_BYTES / (1024 * 1024)
+        } MB.`
+      );
       return false;
     }
 
@@ -517,7 +663,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // Full migration + validation — existing state is NOT touched until this passes
     const res = validateAndNormalizeAppSnapshot(data);
     if (!res.ok) {
       console.error('[AppContext] Import failed:', res.error);
@@ -525,7 +670,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // Atomic swap — only executed after successful validation
     setWallets(res.data.wallets);
     setTransactions(res.data.transactions);
     setCategories(res.data.categories);
@@ -535,6 +679,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPlanner(res.data.planner);
     setStorageStatus('OK');
     setStorageError(undefined);
+    setToastMessage({ id: String(Date.now()), text: 'Nhập dữ liệu thành công!', type: 'success' });
     return true;
   };
 
@@ -558,7 +703,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         financialSummary,
         storageStatus,
         storageError,
+        recoveryCopySaved,
+        recoveryKey,
+        recoveryRawData,
         retrySave,
+        downloadRawRecoveryData,
         addTransaction,
         editTransaction,
         deleteTransaction,
@@ -586,9 +735,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         importDatabaseJSON,
         lastDomainError,
         clearDomainError,
+        toastMessage,
+        dismissToast,
       }}
     >
       {children}
+      {/* Toast notifications container */}
+      {toastMessage && (
+        <div className="fixed bottom-20 right-4 z-50 max-w-md bg-slate-900 text-white px-4 py-3 rounded-xl shadow-xl border border-slate-700 flex items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2">
+          <p className="text-xs sm:text-sm font-medium">{toastMessage.text}</p>
+          <button
+            onClick={dismissToast}
+            className="text-slate-400 hover:text-white text-xs font-bold px-1.5 py-0.5"
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </AppContext.Provider>
   );
 };

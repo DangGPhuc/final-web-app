@@ -5,7 +5,16 @@ import { useApp } from '@/context/AppContext';
 import { AlertTriangle, Download, RefreshCw, AlertCircle } from 'lucide-react';
 
 export function StorageStatusBanner() {
-  const { storageStatus, storageError, retrySave, exportDatabaseJSON } = useApp();
+  const {
+    storageStatus,
+    storageError,
+    retrySave,
+    exportDatabaseJSON,
+    recoveryCopySaved,
+    recoveryKey,
+    recoveryRawData,
+    downloadRawRecoveryData,
+  } = useApp();
 
   if (storageStatus === 'OK' || storageStatus === 'LOADING') {
     return null;
@@ -20,14 +29,29 @@ export function StorageStatusBanner() {
             <div>
               <p className="text-sm font-semibold">Chế độ phục hồi dữ liệu an toàn</p>
               <p className="text-xs text-amber-800 dark:text-amber-300 mt-0.5">
-                {storageError || 'Dữ liệu trước đó bị lỗi hoặc không khớp cấu trúc. Bản sao phục hồi đã được lưu an toàn. Dữ liệu gốc KHÔNG bị ghi đè tự động.'}
+                {storageError || 'Dữ liệu trước đó không hợp lệ hoặc cấu trúc bị lỗi.'}
+              </p>
+              <p className="text-xs text-amber-700 dark:text-amber-400 mt-1 font-mono">
+                {recoveryCopySaved
+                  ? `Bản sao lưu dự phòng: ${recoveryKey} đã được lưu thành công. Khóa lưu trữ gốc được bảo toàn nguyên vẹn.`
+                  : 'Cảnh báo: Không thể tạo bản sao trong localStorage (hạn mức đã đầy). Khóa gốc vẫn được bảo toàn nguyên vẹn.'}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+          <div className="flex flex-wrap items-center gap-2 self-end sm:self-center shrink-0">
+            {recoveryRawData && (
+              <button
+                onClick={downloadRawRecoveryData}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold shadow-sm transition-colors"
+                title="Tải về dữ liệu gốc bị hỏng/không hợp lệ để phục hồi thủ công"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Download dữ liệu gốc để phục hồi
+              </button>
+            )}
             <button
               onClick={exportDatabaseJSON}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium shadow-sm transition-colors"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-800 text-white text-xs font-medium shadow-sm transition-colors"
             >
               <Download className="w-3.5 h-3.5" />
               Xuất dữ liệu hiện tại

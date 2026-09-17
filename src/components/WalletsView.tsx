@@ -90,8 +90,9 @@ export const WalletsView: React.FC = () => {
     if (walletType === 'CREDIT') icon = 'CreditCard';
     if (walletType === 'SAVINGS') icon = 'PiggyBank';
 
+    let res;
     if (editingWallet) {
-      editWallet(editingWallet.id, {
+      res = editWallet(editingWallet.id, {
         name: walletName,
         bankName: walletType !== 'CASH' ? walletBankName : undefined,
         accountNumber: walletAccountNumber,
@@ -101,7 +102,7 @@ export const WalletsView: React.FC = () => {
         icon,
       });
     } else {
-      addWallet({
+      res = addWallet({
         name: walletName,
         type: walletType,
         balance: bal,
@@ -114,6 +115,10 @@ export const WalletsView: React.FC = () => {
         color: walletColor,
         icon,
       });
+    }
+
+    if (res && !res.ok) {
+      return;
     }
 
     setWalletModalOpen(false);
@@ -144,9 +149,9 @@ export const WalletsView: React.FC = () => {
       return;
     }
 
-    const feeNum = Number(transferFee);
-    if (isNaN(feeNum) || !isFinite(feeNum) || feeNum < 0) {
-      alert('Phí chuyển khoản không hợp lệ (phải là số >= 0)');
+    const feeNum = Number(transferFee) || 0;
+    if (feeNum < 0 || !isFinite(feeNum)) {
+      alert('Phí chuyển khoản không hợp lệ');
       return;
     }
 
@@ -160,7 +165,10 @@ export const WalletsView: React.FC = () => {
       return;
     }
 
-    transferFunds(fromWalletId, toWalletId, amountNum, feeNum, transferNote);
+    const res = transferFunds(fromWalletId, toWalletId, amountNum, feeNum, transferNote);
+    if (res && !res.ok) {
+      return;
+    }
     setTransferModalOpen(false);
     setTransferAmount('');
     setTransferFee('0');

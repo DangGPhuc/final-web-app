@@ -2,22 +2,15 @@
  * FinTrack Pro v2 — Storage Schema Validation & Migration
  *
  * This module is the single gatekeeper for all persisted data entering the app,
- * whether from localStorage or a backup JSON import.
+ * whether from localStorage, a backup JSON import, or pre-save in-memory verification.
  *
  * SCHEMA VERSION HISTORY
  * ─────────────────────
  * Version 0 (legacy / unversioned): Original FinTrack v2 snapshots without
- *   a schemaVersion field. Migrated to v1 by treating all data as-is.
- * Version 1 (current): Adds schemaVersion field, splits TRANSFER validation
- *   by transferKind (WALLET_TRANSFER, CREDIT_PAYMENT, GOAL_DEPOSIT, GOAL_WITHDRAWAL).
- *   Budget categoryId must reference an EXPENSE category.
- *
- * UPGRADE RULES
- * ─────────────
- * - Unknown future schemaVersion (> SCHEMA_VERSION): REJECT – never silently
- *   reinterpret data from a newer schema we don't understand.
- * - Missing schemaVersion: legacy migration path (v0 → v1).
- * - schemaVersion === SCHEMA_VERSION: normal validation.
+ *   a schemaVersion field. Migrated to v1.
+ * Version 1 (current): Schema versioning, split TRANSFER validation by transferKind,
+ *   strict category referential integrity, system transaction invariants,
+ *   bill ↔ payment bidirectional integrity, and receipt data format/size constraints.
  */
 
 import {
@@ -36,11 +29,31 @@ import {
   TransferKind,
 } from '@/types';
 
-/** Current storage schema version. Bump this when adding migration logic. */
+/** Current storage schema version. */
 export const SCHEMA_VERSION = 1;
 
 /** Maximum import payload size (bytes). Payloads larger than this are rejected. */
 export const MAX_IMPORT_BYTES = 5 * 1024 * 1024; // 5 MB
+
+/** Maximum local receipt image size in bytes (1 MB binary equivalent). */
+export const LOCAL_RECEIPT_MAX_BYTES = 1 * 1024 * 1024; // 1 MB
+
+/** Maximum base64 Data URL string length allowed for local storage. */
+export const LOCAL_RECEIPT_MAX_STRING_LENGTH = Math.ceil((LOCAL_RECEIPT_MAX_BYTES * 4) / 3) + 128;
+
+/** Untrusted payload caps to prevent memory/CPU exhaustion attacks. */
+export const MAX_COLLECTION_LIMITS = {
+  categories: 100,
+  wallets: 100,
+  goals: 100,
+  bills: 200,
+  budgets: 500,
+  transactions: 10000,
+  tagsPerTransaction: 20,
+  maxStringLength: 1000,
+  maxNameLength: 150,
+  maxTagLength: 50,
+} as const;
 
 export interface ValidatedAppSnapshot {
   wallets: Wallet[];
@@ -63,6 +76,10 @@ function isObject(val: unknown): val is Record<string, unknown> {
   return typeof val === 'object' && val !== null && !Array.isArray(val);
 }
 
+export function getUtf8ByteLength(str: string): number {
+  return new TextEncoder().encode(str).byteLength;
+}
+
 const VALID_WALLET_TYPES: WalletType[] = ['CASH', 'BANK', 'CREDIT', 'SAVINGS'];
 const VALID_TRANSACTION_TYPES: TransactionType[] = ['EXPENSE', 'INCOME', 'TRANSFER'];
 const VALID_BILL_FREQUENCIES: BillFrequency[] = ['MONTHLY', 'QUARTERLY', 'YEARLY'];
@@ -75,23 +92,64 @@ const VALID_TRANSFER_KINDS: TransferKind[] = [
   'GOAL_WITHDRAWAL',
 ];
 
+const VALID_RECEIPT_DATA_URL_REGEX = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+
+function validatePersistedReceipt(
+  val: unknown,
+  txId: string
+): { ok: true; url?: string } | { ok: false; error: string } {
+  if (val === undefined || val === null || val === '') {
+    return { ok: true, url: undefined };
+  }
+  if (typeof val !== 'string') {
+    return {
+      ok: false,
+      error: `Biên lai của giao dịch "${txId}" phải là chuỗi ký tự Data URL hợp lệ`,
+    };
+  }
+  const trimmed = val.trim();
+  if (trimmed.length > LOCAL_RECEIPT_MAX_STRING_LENGTH) {
+    return {
+      ok: false,
+      error: `Ảnh biên lai của giao dịch "${txId}" vượt quá giới hạn lưu trữ cục bộ (${LOCAL_RECEIPT_MAX_BYTES / (1024 * 1024)} MB)`,
+    };
+  }
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.includes('javascript:') ||
+    lower.includes('image/svg') ||
+    lower.includes('<svg') ||
+    lower.includes('<html') ||
+    lower.includes('http://') ||
+    lower.includes('https://')
+  ) {
+    return {
+      ok: false,
+      error: `Ảnh biên lai của giao dịch "${txId}" chứa nội dung hoặc định dạng không an toàn (SVG/HTML/URL)`,
+    };
+  }
+  if (!VALID_RECEIPT_DATA_URL_REGEX.test(trimmed)) {
+    return {
+      ok: false,
+      error: `Ảnh biên lai của giao dịch "${txId}" không phải là Data URL hợp lệ (chỉ chấp nhận JPEG, PNG, WebP)`,
+    };
+  }
+  return { ok: true, url: trimmed };
+}
+
 // ─────────────────────────────────────────────────────────────
 // Public entry point
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Validate and normalize an application data snapshot (from localStorage or
- * backup JSON). Handles schema version detection and migration.
- *
- * NEVER call this after already having destructured the input — always pass
- * the raw parsed value so version detection works correctly.
+ * Validate and normalize an application data snapshot.
  */
 export function validateAndNormalizeAppSnapshot(input: unknown): SnapshotValidationResult {
   if (!isObject(input)) {
     return { ok: false, error: 'Dữ liệu snapshot không phải là một đối tượng JSON hợp lệ' };
   }
 
-  // ── Schema version detection ──────────────────────────────
+  // Schema version detection
   const rawVersion = input.schemaVersion;
 
   if (rawVersion === undefined || rawVersion === null) {
@@ -110,7 +168,6 @@ export function validateAndNormalizeAppSnapshot(input: unknown): SnapshotValidat
     };
   }
 
-  // rawVersion === 1 (or any supported version ≤ SCHEMA_VERSION)
   return validateV1(input);
 }
 
@@ -123,9 +180,18 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
   if (!Array.isArray(input.categories)) {
     return { ok: false, error: 'Danh mục (categories) phải là một danh sách' };
   }
-  const categoryIds = new Set<string>();
+  if (input.categories.length > MAX_COLLECTION_LIMITS.categories) {
+    return {
+      ok: false,
+      error: `Số lượng danh mục vượt quá giới hạn tối đa (${input.categories.length} > ${MAX_COLLECTION_LIMITS.categories})`,
+    };
+  }
+
+  const categoryMap = new Map<string, Category>();
   const expenseCategoryIds = new Set<string>();
+  const incomeCategoryIds = new Set<string>();
   const validatedCategories: Category[] = [];
+
   for (let i = 0; i < input.categories.length; i++) {
     const c = input.categories[i];
     if (!isObject(c)) {
@@ -134,31 +200,47 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     if (typeof c.id !== 'string' || !c.id.trim()) {
       return { ok: false, error: `Danh mục tại vị trí ${i} thiếu ID hợp lệ` };
     }
-    if (categoryIds.has(c.id)) {
+    if (categoryMap.has(c.id)) {
       return { ok: false, error: `ID danh mục trùng lặp: ${c.id}` };
     }
-    categoryIds.add(c.id);
-    if (c.type === 'EXPENSE') expenseCategoryIds.add(c.id);
-
     if (typeof c.name !== 'string' || !c.name.trim()) {
       return { ok: false, error: `Tên danh mục "${c.id}" không được để trống` };
+    }
+    if (c.name.trim().length > MAX_COLLECTION_LIMITS.maxNameLength) {
+      return { ok: false, error: `Tên danh mục "${c.id}" vượt quá độ dài cho phép` };
     }
     if (c.type !== 'EXPENSE' && c.type !== 'INCOME') {
       return { ok: false, error: `Loại danh mục "${c.id}" phải là EXPENSE hoặc INCOME` };
     }
-    validatedCategories.push({
+
+    const validatedCategory: Category = {
       id: c.id,
       name: c.name.trim(),
       type: c.type,
       icon: typeof c.icon === 'string' ? c.icon : 'Tag',
       color: typeof c.color === 'string' ? c.color : '#64748b',
-    });
+    };
+
+    categoryMap.set(c.id, validatedCategory);
+    if (c.type === 'EXPENSE') {
+      expenseCategoryIds.add(c.id);
+    } else {
+      incomeCategoryIds.add(c.id);
+    }
+    validatedCategories.push(validatedCategory);
   }
 
   // ── 2. WALLETS ────────────────────────────────────────────
   if (!Array.isArray(input.wallets)) {
     return { ok: false, error: 'Ví tiền (wallets) phải là một danh sách' };
   }
+  if (input.wallets.length > MAX_COLLECTION_LIMITS.wallets) {
+    return {
+      ok: false,
+      error: `Số lượng ví vượt quá giới hạn tối đa (${input.wallets.length} > ${MAX_COLLECTION_LIMITS.wallets})`,
+    };
+  }
+
   const walletMap = new Map<string, Wallet>();
   const validatedWallets: Wallet[] = [];
   for (let i = 0; i < input.wallets.length; i++) {
@@ -174,6 +256,9 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     }
     if (typeof w.name !== 'string' || !w.name.trim()) {
       return { ok: false, error: `Tên ví "${w.id}" không được để trống` };
+    }
+    if (w.name.trim().length > MAX_COLLECTION_LIMITS.maxNameLength) {
+      return { ok: false, error: `Tên ví "${w.id}" vượt quá độ dài cho phép` };
     }
     if (!VALID_WALLET_TYPES.includes(w.type as WalletType)) {
       return { ok: false, error: `Loại ví "${w.id}" không hợp lệ (${w.type})` };
@@ -218,11 +303,18 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     validatedWallets.push(validatedWallet);
   }
 
-  // ── 3. GOALS (needed before transactions for GOAL transfer ref-int) ───
+  // ── 3. GOALS ──────────────────────────────────────────────
   if (!Array.isArray(input.goals)) {
     return { ok: false, error: 'Mục tiêu (goals) phải là một danh sách' };
   }
-  const goalIds = new Set<string>();
+  if (input.goals.length > MAX_COLLECTION_LIMITS.goals) {
+    return {
+      ok: false,
+      error: `Số lượng mục tiêu vượt quá giới hạn tối đa (${input.goals.length} > ${MAX_COLLECTION_LIMITS.goals})`,
+    };
+  }
+
+  const goalMap = new Map<string, SavingsGoal>();
   const validatedGoals: SavingsGoal[] = [];
   for (let i = 0; i < input.goals.length; i++) {
     const g = input.goals[i];
@@ -232,12 +324,14 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     if (typeof g.id !== 'string' || !g.id.trim()) {
       return { ok: false, error: `Mục tiêu tại vị trí ${i} thiếu ID hợp lệ` };
     }
-    if (goalIds.has(g.id)) {
+    if (goalMap.has(g.id)) {
       return { ok: false, error: `ID mục tiêu trùng lặp: ${g.id}` };
     }
-    goalIds.add(g.id);
     if (typeof g.name !== 'string' || !g.name.trim()) {
       return { ok: false, error: `Tên mục tiêu "${g.id}" không được để trống` };
+    }
+    if (g.name.trim().length > MAX_COLLECTION_LIMITS.maxNameLength) {
+      return { ok: false, error: `Tên mục tiêu "${g.id}" vượt quá độ dài cho phép` };
     }
     if (typeof g.targetAmount !== 'number' || !Number.isFinite(g.targetAmount) || g.targetAmount <= 0) {
       return { ok: false, error: `Số tiền mục tiêu "${g.id}" phải là số hữu hạn lớn hơn 0` };
@@ -248,6 +342,7 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     if (typeof g.deadline !== 'string' || isNaN(new Date(g.deadline).getTime())) {
       return { ok: false, error: `Hạn hoàn thành của mục tiêu "${g.id}" không hợp lệ` };
     }
+
     const validatedHistory: SavingsGoal['history'] = [];
     if (g.history !== undefined) {
       if (!Array.isArray(g.history)) {
@@ -280,7 +375,8 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
         });
       }
     }
-    validatedGoals.push({
+
+    const validatedGoal: SavingsGoal = {
       id: g.id,
       name: g.name.trim(),
       targetAmount: g.targetAmount,
@@ -291,15 +387,114 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
       category: typeof g.category === 'string' ? g.category : undefined,
       history: validatedHistory,
       createdAt: typeof g.createdAt === 'string' ? g.createdAt : new Date().toISOString(),
-    });
+    };
+    goalMap.set(g.id, validatedGoal);
+    validatedGoals.push(validatedGoal);
   }
 
-  // ── 4. TRANSACTIONS ───────────────────────────────────────
+  // ── 4. BILLS ──────────────────────────────────────────────
+  if (!Array.isArray(input.bills)) {
+    return { ok: false, error: 'Hóa đơn (bills) phải là một danh sách' };
+  }
+  if (input.bills.length > MAX_COLLECTION_LIMITS.bills) {
+    return {
+      ok: false,
+      error: `Số lượng hóa đơn vượt quá giới hạn tối đa (${input.bills.length} > ${MAX_COLLECTION_LIMITS.bills})`,
+    };
+  }
+
+  const billMap = new Map<string, RecurringBill>();
+  const validatedBills: RecurringBill[] = [];
+  for (let i = 0; i < input.bills.length; i++) {
+    const bill = input.bills[i];
+    if (!isObject(bill)) {
+      return { ok: false, error: `Hóa đơn tại vị trí ${i} không hợp lệ` };
+    }
+    if (typeof bill.id !== 'string' || !bill.id.trim()) {
+      return { ok: false, error: `Hóa đơn tại vị trí ${i} thiếu ID hợp lệ` };
+    }
+    if (billMap.has(bill.id)) {
+      return { ok: false, error: `ID hóa đơn trùng lặp: ${bill.id}` };
+    }
+    if (typeof bill.name !== 'string' || !bill.name.trim()) {
+      return { ok: false, error: `Tên hóa đơn "${bill.id}" không được để trống` };
+    }
+    if (bill.name.trim().length > MAX_COLLECTION_LIMITS.maxNameLength) {
+      return { ok: false, error: `Tên hóa đơn "${bill.id}" vượt quá độ dài cho phép` };
+    }
+    if (typeof bill.amount !== 'number' || !Number.isFinite(bill.amount) || bill.amount <= 0) {
+      return { ok: false, error: `Số tiền hóa đơn "${bill.id}" phải là số hữu hạn lớn hơn 0` };
+    }
+    if (
+      typeof bill.dueDay !== 'number' ||
+      !Number.isInteger(bill.dueDay) ||
+      bill.dueDay < 1 ||
+      bill.dueDay > 31
+    ) {
+      return { ok: false, error: `Ngày đến hạn của hóa đơn "${bill.id}" phải là số nguyên từ 1 đến 31` };
+    }
+    if (!VALID_BILL_FREQUENCIES.includes(bill.frequency as BillFrequency)) {
+      return { ok: false, error: `Tần suất hóa đơn "${bill.id}" không hợp lệ (${bill.frequency})` };
+    }
+    if (!VALID_BILL_STATUSES.includes(bill.status as BillStatus)) {
+      return { ok: false, error: `Trạng thái hóa đơn "${bill.id}" không hợp lệ (${bill.status})` };
+    }
+    if (bill.walletId !== undefined && typeof bill.walletId === 'string' && !walletMap.has(bill.walletId)) {
+      return {
+        ok: false,
+        error: `Hóa đơn "${bill.id}" tham chiếu đến ví không tồn tại (walletId: ${bill.walletId})`,
+      };
+    }
+
+    // Bill category must exist and be an EXPENSE category
+    const billCategoryId = typeof bill.categoryId === 'string' ? bill.categoryId : 'cat-bills';
+    if (!categoryMap.has(billCategoryId)) {
+      return {
+        ok: false,
+        error: `Hóa đơn "${bill.id}" tham chiếu đến danh mục không tồn tại (${billCategoryId})`,
+      };
+    }
+    const billCat = categoryMap.get(billCategoryId)!;
+    if (billCat.type !== 'EXPENSE') {
+      return {
+        ok: false,
+        error: `Hóa đơn "${bill.id}" tham chiếu danh mục thu nhập "${billCat.name}". Chỉ danh mục EXPENSE được phép.`,
+      };
+    }
+
+    const validatedBill: RecurringBill = {
+      id: bill.id,
+      name: bill.name.trim(),
+      amount: bill.amount,
+      categoryId: billCategoryId,
+      categoryName: billCat.name,
+      walletId: typeof bill.walletId === 'string' ? bill.walletId : undefined,
+      dueDay: bill.dueDay,
+      frequency: bill.frequency as BillFrequency,
+      status: bill.status as BillStatus,
+      lastPaidDate: typeof bill.lastPaidDate === 'string' ? bill.lastPaidDate : undefined,
+      note: typeof bill.note === 'string' ? bill.note : undefined,
+      reminderDaysBefore: typeof bill.reminderDaysBefore === 'number' ? bill.reminderDaysBefore : 3,
+    };
+    billMap.set(bill.id, validatedBill);
+    validatedBills.push(validatedBill);
+  }
+
+  // ── 5. TRANSACTIONS ───────────────────────────────────────
   if (!Array.isArray(input.transactions)) {
     return { ok: false, error: 'Giao dịch (transactions) phải là một danh sách' };
   }
+  if (input.transactions.length > MAX_COLLECTION_LIMITS.transactions) {
+    return {
+      ok: false,
+      error: `Số lượng giao dịch vượt quá giới hạn tối đa (${input.transactions.length} > ${MAX_COLLECTION_LIMITS.transactions})`,
+    };
+  }
+
   const txIds = new Set<string>();
+  const billPaymentTxCount = new Map<string, number>();
   const validatedTransactions: Transaction[] = [];
+
   for (let i = 0; i < input.transactions.length; i++) {
     const t = input.transactions[i];
     if (!isObject(t)) {
@@ -330,7 +525,69 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     }
     const srcWallet = walletMap.get(t.walletId)!;
 
-    // ── TRANSFER: validate by transferKind ─────────────────
+    // ── Category Referential Integrity ──────────────────────
+    let categoryId: string | undefined = undefined;
+    let categoryName: string | undefined = undefined;
+
+    if (t.type === 'EXPENSE') {
+      if (t.categoryId !== undefined && t.categoryId !== null && t.categoryId !== '') {
+        if (typeof t.categoryId !== 'string' || !categoryMap.has(t.categoryId)) {
+          return {
+            ok: false,
+            error: `Giao dịch chi tiêu "${t.id}" tham chiếu đến danh mục không tồn tại (${t.categoryId})`,
+          };
+        }
+        const cat = categoryMap.get(t.categoryId)!;
+        if (cat.type !== 'EXPENSE') {
+          return {
+            ok: false,
+            error: `Giao dịch chi tiêu "${t.id}" tham chiếu đến danh mục thu nhập "${cat.name}" (${t.categoryId}). Chỉ danh mục EXPENSE được phép.`,
+          };
+        }
+        categoryId = cat.id;
+        categoryName =
+          typeof t.categoryName === 'string' && t.categoryName.trim() ? t.categoryName.trim() : cat.name;
+      }
+    } else if (t.type === 'INCOME') {
+      if (srcWallet.type === 'CREDIT') {
+        return {
+          ok: false,
+          error: `Giao dịch thu nhập "${t.id}" trực tiếp vào thẻ tín dụng không được hỗ trợ`,
+        };
+      }
+      if (t.categoryId !== undefined && t.categoryId !== null && t.categoryId !== '') {
+        if (typeof t.categoryId !== 'string' || !categoryMap.has(t.categoryId)) {
+          return {
+            ok: false,
+            error: `Giao dịch thu nhập "${t.id}" tham chiếu đến danh mục không tồn tại (${t.categoryId})`,
+          };
+        }
+        const cat = categoryMap.get(t.categoryId)!;
+        if (cat.type !== 'INCOME') {
+          return {
+            ok: false,
+            error: `Giao dịch thu nhập "${t.id}" tham chiếu đến danh mục chi tiêu "${cat.name}" (${t.categoryId}). Chỉ danh mục INCOME được phép.`,
+          };
+        }
+        categoryId = cat.id;
+        categoryName =
+          typeof t.categoryName === 'string' && t.categoryName.trim() ? t.categoryName.trim() : cat.name;
+      }
+    } else if (t.type === 'TRANSFER') {
+      // Cleanse transfer category fields to prevent stale spending semantics
+      if (t.categoryId !== undefined && t.categoryId !== null && t.categoryId !== '') {
+        if (typeof t.categoryId !== 'string' || !categoryMap.has(t.categoryId)) {
+          return {
+            ok: false,
+            error: `Giao dịch chuyển khoản "${t.id}" tham chiếu đến danh mục không tồn tại (${t.categoryId})`,
+          };
+        }
+      }
+      categoryId = undefined;
+      categoryName = undefined;
+    }
+
+    // ── TRANSFER validation split by transferKind ─────────────
     let toWalletId: string | undefined = undefined;
     let toWalletName: string | undefined = undefined;
     let transferKind: TransferKind | undefined = undefined;
@@ -351,7 +608,6 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
       transferKind = rawKind as TransferKind;
 
       if (transferKind === 'WALLET_TRANSFER' || transferKind === 'CREDIT_PAYMENT') {
-        // ── Wallet-to-wallet / bank→credit ────────────────
         if (typeof t.toWalletId !== 'string' || !walletMap.has(t.toWalletId)) {
           return {
             ok: false,
@@ -392,51 +648,142 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
           fee = t.fee;
         }
       } else if (transferKind === 'GOAL_DEPOSIT') {
-        // ── Goal deposit: wallet → goal ────────────────────
-        // walletId = source asset wallet (not CREDIT)
         if (srcWallet.type === 'CREDIT') {
           return {
             ok: false,
             error: `Giao dịch "${t.id}" nạp tiền vào mục tiêu từ thẻ tín dụng là không được phép`,
           };
         }
-        // goalId or originId required, and referenced goal must exist
-        const goalRef = (typeof t.goalId === 'string' ? t.goalId : undefined) ||
-          (typeof t.originId === 'string' ? t.originId : undefined);
-        if (!goalRef || !goalIds.has(goalRef)) {
+        if (t.origin !== 'GOAL') {
           return {
             ok: false,
-            error: `Giao dịch GOAL_DEPOSIT "${t.id}" thiếu hoặc tham chiếu mục tiêu không tồn tại (goalId/originId: ${goalRef})`,
+            error: `Giao dịch GOAL_DEPOSIT "${t.id}" phải có origin là "GOAL" (nhận được: ${t.origin})`,
           };
         }
-        // toWalletId is NOT required — no validation needed
+        if (typeof t.goalId !== 'string' || !t.goalId.trim()) {
+          return { ok: false, error: `Giao dịch GOAL_DEPOSIT "${t.id}" thiếu goalId` };
+        }
+        if (typeof t.originId !== 'string' || !t.originId.trim()) {
+          return { ok: false, error: `Giao dịch GOAL_DEPOSIT "${t.id}" thiếu originId` };
+        }
+        if (t.goalId !== t.originId) {
+          return {
+            ok: false,
+            error: `Giao dịch GOAL_DEPOSIT "${t.id}" có goalId (${t.goalId}) không khớp với originId (${t.originId})`,
+          };
+        }
+        if (!goalMap.has(t.goalId)) {
+          return {
+            ok: false,
+            error: `Giao dịch GOAL_DEPOSIT "${t.id}" tham chiếu mục tiêu không tồn tại (${t.goalId})`,
+          };
+        }
       } else if (transferKind === 'GOAL_WITHDRAWAL') {
-        // ── Goal withdrawal: goal → wallet ─────────────────
-        // walletId = destination asset wallet (not CREDIT)
         if (srcWallet.type === 'CREDIT') {
           return {
             ok: false,
             error: `Giao dịch "${t.id}" rút tiền từ mục tiêu vào thẻ tín dụng là không được phép`,
           };
         }
-        const goalRef = (typeof t.goalId === 'string' ? t.goalId : undefined) ||
-          (typeof t.originId === 'string' ? t.originId : undefined);
-        if (!goalRef || !goalIds.has(goalRef)) {
+        if (t.origin !== 'GOAL') {
           return {
             ok: false,
-            error: `Giao dịch GOAL_WITHDRAWAL "${t.id}" thiếu hoặc tham chiếu mục tiêu không tồn tại (goalId/originId: ${goalRef})`,
+            error: `Giao dịch GOAL_WITHDRAWAL "${t.id}" phải có origin là "GOAL" (nhận được: ${t.origin})`,
           };
         }
-        // toWalletId is NOT required
+        if (typeof t.goalId !== 'string' || !t.goalId.trim()) {
+          return { ok: false, error: `Giao dịch GOAL_WITHDRAWAL "${t.id}" thiếu goalId` };
+        }
+        if (typeof t.originId !== 'string' || !t.originId.trim()) {
+          return { ok: false, error: `Giao dịch GOAL_WITHDRAWAL "${t.id}" thiếu originId` };
+        }
+        if (t.goalId !== t.originId) {
+          return {
+            ok: false,
+            error: `Giao dịch GOAL_WITHDRAWAL "${t.id}" có goalId (${t.goalId}) không khớp với originId (${t.originId})`,
+          };
+        }
+        if (!goalMap.has(t.goalId)) {
+          return {
+            ok: false,
+            error: `Giao dịch GOAL_WITHDRAWAL "${t.id}" tham chiếu mục tiêu không tồn tại (${t.goalId})`,
+          };
+        }
       }
-    } else {
-      // EXPENSE / INCOME
-      if (t.type === 'INCOME' && srcWallet.type === 'CREDIT') {
+    }
+
+    // ── System Transaction Invariant: origin === 'GOAL' ──────
+    if (t.origin === 'GOAL') {
+      if (
+        t.type !== 'TRANSFER' ||
+        (t.transferKind !== 'GOAL_DEPOSIT' && t.transferKind !== 'GOAL_WITHDRAWAL')
+      ) {
         return {
           ok: false,
-          error: `Giao dịch thu nhập "${t.id}" trực tiếp vào thẻ tín dụng không được hỗ trợ`,
+          error: `Giao dịch origin "GOAL" "${t.id}" phải là TRANSFER với transferKind là GOAL_DEPOSIT hoặc GOAL_WITHDRAWAL`,
         };
       }
+    }
+
+    // ── System Transaction Invariant: origin === 'BILL_PAYMENT' ─
+    if (t.origin === 'BILL_PAYMENT') {
+      if (t.type !== 'EXPENSE') {
+        return {
+          ok: false,
+          error: `Giao dịch thanh toán hóa đơn "${t.id}" phải có loại EXPENSE (nhận được: ${t.type})`,
+        };
+      }
+      if (typeof t.originId !== 'string' || !billMap.has(t.originId)) {
+        return {
+          ok: false,
+          error: `Giao dịch thanh toán hóa đơn "${t.id}" tham chiếu đến hóa đơn không tồn tại (originId: ${t.originId})`,
+        };
+      }
+      const linkedBill = billMap.get(t.originId)!;
+      if (linkedBill.status !== 'PAID') {
+        return {
+          ok: false,
+          error: `Giao dịch thanh toán hóa đơn "${t.id}" tham chiếu đến hóa đơn "${linkedBill.name}" có trạng thái UNPAID`,
+        };
+      }
+      if (t.amount !== linkedBill.amount) {
+        return {
+          ok: false,
+          error: `Giao dịch thanh toán hóa đơn "${t.id}" có số tiền (${t.amount}) không khớp với số tiền hóa đơn (${linkedBill.amount})`,
+        };
+      }
+      if (linkedBill.walletId && t.walletId !== linkedBill.walletId) {
+        return {
+          ok: false,
+          error: `Giao dịch thanh toán hóa đơn "${t.id}" có ví (${t.walletId}) không khớp với ví thanh toán hóa đơn (${linkedBill.walletId})`,
+        };
+      }
+      billPaymentTxCount.set(t.originId, (billPaymentTxCount.get(t.originId) || 0) + 1);
+    }
+
+    // ── Receipt Data URL Validation ──────────────────────────
+    const receiptRes = validatePersistedReceipt(t.receiptImage, t.id);
+    if (!receiptRes.ok) {
+      return receiptRes;
+    }
+
+    // ── Tags & String length limits ──────────────────────────
+    const note = typeof t.note === 'string' ? t.note : '';
+    if (note.length > MAX_COLLECTION_LIMITS.maxStringLength) {
+      return { ok: false, error: `Ghi chú của giao dịch "${t.id}" vượt quá độ dài cho phép` };
+    }
+
+    let tags: string[] = [];
+    if (Array.isArray(t.tags)) {
+      if (t.tags.length > MAX_COLLECTION_LIMITS.tagsPerTransaction) {
+        return {
+          ok: false,
+          error: `Số lượng nhãn của giao dịch "${t.id}" vượt quá giới hạn (${MAX_COLLECTION_LIMITS.tagsPerTransaction})`,
+        };
+      }
+      tags = t.tags
+        .filter((tag): tag is string => typeof tag === 'string')
+        .map((tag) => tag.trim().slice(0, MAX_COLLECTION_LIMITS.maxTagLength));
     }
 
     const origin: TransactionOrigin =
@@ -454,26 +801,63 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
       toWalletName,
       transferKind,
       fee,
-      categoryId: typeof t.categoryId === 'string' ? t.categoryId : undefined,
-      categoryName: typeof t.categoryName === 'string' ? t.categoryName : undefined,
+      categoryId,
+      categoryName,
       date: t.date,
-      note: typeof t.note === 'string' ? t.note : '',
-      tags: Array.isArray(t.tags)
-        ? t.tags.filter((tag): tag is string => typeof tag === 'string')
-        : [],
-      receiptImage: typeof t.receiptImage === 'string' ? t.receiptImage : undefined,
+      note,
+      tags,
+      receiptImage: receiptRes.url,
       origin,
       originId: typeof t.originId === 'string' ? t.originId : undefined,
       goalId: typeof t.goalId === 'string' ? t.goalId : undefined,
-      goalName: typeof t.goalName === 'string' ? t.goalName : undefined,
+      goalName:
+        typeof t.goalId === 'string' && goalMap.has(t.goalId)
+          ? goalMap.get(t.goalId)!.name
+          : typeof t.goalName === 'string'
+            ? t.goalName
+            : undefined,
       createdAt: typeof t.createdAt === 'string' ? t.createdAt : t.date,
     });
   }
 
-  // ── 5. BUDGETS ────────────────────────────────────────────
+  // ── 6. BILL ↔ PAYMENT BIDIRECTIONAL RECONCILIATION ────────
+  for (const bill of validatedBills) {
+    const paymentCount = billPaymentTxCount.get(bill.id) || 0;
+    if (bill.status === 'PAID') {
+      if (paymentCount === 0) {
+        return {
+          ok: false,
+          error: `Hóa đơn "${bill.name}" trạng thái PAID nhưng không có giao dịch thanh toán liên kết`,
+        };
+      }
+      if (paymentCount > 1) {
+        return {
+          ok: false,
+          error: `Hóa đơn "${bill.name}" có nhiều hơn một giao dịch thanh toán liên kết (${paymentCount})`,
+        };
+      }
+    } else {
+      // bill.status === 'UNPAID'
+      if (paymentCount > 0) {
+        return {
+          ok: false,
+          error: `Hóa đơn "${bill.name}" trạng thái UNPAID nhưng có giao dịch thanh toán liên kết`,
+        };
+      }
+    }
+  }
+
+  // ── 7. BUDGETS ────────────────────────────────────────────
   if (!Array.isArray(input.budgets)) {
     return { ok: false, error: 'Ngân sách (budgets) phải là một danh sách' };
   }
+  if (input.budgets.length > MAX_COLLECTION_LIMITS.budgets) {
+    return {
+      ok: false,
+      error: `Số lượng ngân sách vượt quá giới hạn tối đa (${input.budgets.length} > ${MAX_COLLECTION_LIMITS.budgets})`,
+    };
+  }
+
   const budgetIds = new Set<string>();
   const budgetCategoryMonthSet = new Set<string>();
   const validatedBudgets: Budget[] = [];
@@ -490,13 +874,12 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     }
     budgetIds.add(b.id);
 
-    if (typeof b.categoryId !== 'string' || !categoryIds.has(b.categoryId)) {
+    if (typeof b.categoryId !== 'string' || !categoryMap.has(b.categoryId)) {
       return {
         ok: false,
         error: `Ngân sách "${b.id}" tham chiếu đến danh mục không tồn tại (${b.categoryId})`,
       };
     }
-    // ── §5: category must be EXPENSE type ────────────────────
     if (!expenseCategoryIds.has(b.categoryId)) {
       return {
         ok: false,
@@ -531,84 +914,7 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     });
   }
 
-  // ── 6. BILLS ──────────────────────────────────────────────
-  if (!Array.isArray(input.bills)) {
-    return { ok: false, error: 'Hóa đơn (bills) phải là một danh sách' };
-  }
-  const billIds = new Set<string>();
-  const validatedBills: RecurringBill[] = [];
-  for (let i = 0; i < input.bills.length; i++) {
-    const bill = input.bills[i];
-    if (!isObject(bill)) {
-      return { ok: false, error: `Hóa đơn tại vị trí ${i} không hợp lệ` };
-    }
-    if (typeof bill.id !== 'string' || !bill.id.trim()) {
-      return { ok: false, error: `Hóa đơn tại vị trí ${i} thiếu ID hợp lệ` };
-    }
-    if (billIds.has(bill.id)) {
-      return { ok: false, error: `ID hóa đơn trùng lặp: ${bill.id}` };
-    }
-    billIds.add(bill.id);
-    if (typeof bill.name !== 'string' || !bill.name.trim()) {
-      return { ok: false, error: `Tên hóa đơn "${bill.id}" không được để trống` };
-    }
-    if (typeof bill.amount !== 'number' || !Number.isFinite(bill.amount) || bill.amount <= 0) {
-      return { ok: false, error: `Số tiền hóa đơn "${bill.id}" phải là số hữu hạn lớn hơn 0` };
-    }
-    if (
-      typeof bill.dueDay !== 'number' ||
-      !Number.isInteger(bill.dueDay) ||
-      bill.dueDay < 1 ||
-      bill.dueDay > 31
-    ) {
-      return { ok: false, error: `Ngày đến hạn của hóa đơn "${bill.id}" phải là số nguyên từ 1 đến 31` };
-    }
-    if (!VALID_BILL_FREQUENCIES.includes(bill.frequency as BillFrequency)) {
-      return { ok: false, error: `Tần suất hóa đơn "${bill.id}" không hợp lệ (${bill.frequency})` };
-    }
-    if (!VALID_BILL_STATUSES.includes(bill.status as BillStatus)) {
-      return { ok: false, error: `Trạng thái hóa đơn "${bill.id}" không hợp lệ (${bill.status})` };
-    }
-    if (bill.walletId !== undefined && typeof bill.walletId === 'string' && !walletMap.has(bill.walletId)) {
-      return {
-        ok: false,
-        error: `Hóa đơn "${bill.id}" tham chiếu đến ví không tồn tại (walletId: ${bill.walletId})`,
-      };
-    }
-    if (bill.status === 'PAID') {
-      const linkedTxs = validatedTransactions.filter(
-        (t) => t.origin === 'BILL_PAYMENT' && t.originId === bill.id
-      );
-      if (linkedTxs.length === 0) {
-        return {
-          ok: false,
-          error: `Hóa đơn "${bill.name}" trạng thái PAID nhưng không có giao dịch thanh toán liên kết`,
-        };
-      }
-      if (linkedTxs.length > 1) {
-        return {
-          ok: false,
-          error: `Hóa đơn "${bill.name}" có nhiều hơn một giao dịch thanh toán liên kết (${linkedTxs.length})`,
-        };
-      }
-    }
-    validatedBills.push({
-      id: bill.id,
-      name: bill.name.trim(),
-      amount: bill.amount,
-      categoryId: typeof bill.categoryId === 'string' ? bill.categoryId : 'cat-bills',
-      categoryName: typeof bill.categoryName === 'string' ? bill.categoryName : undefined,
-      walletId: typeof bill.walletId === 'string' ? bill.walletId : undefined,
-      dueDay: bill.dueDay,
-      frequency: bill.frequency as BillFrequency,
-      status: bill.status as BillStatus,
-      lastPaidDate: typeof bill.lastPaidDate === 'string' ? bill.lastPaidDate : undefined,
-      note: typeof bill.note === 'string' ? bill.note : undefined,
-      reminderDaysBefore: typeof bill.reminderDaysBefore === 'number' ? bill.reminderDaysBefore : 3,
-    });
-  }
-
-  // ── 7. PLANNER ────────────────────────────────────────────
+  // ── 8. PLANNER ────────────────────────────────────────────
   if (!isObject(input.planner)) {
     return { ok: false, error: 'Kế hoạch 50/30/20 (planner) phải là một đối tượng' };
   }
@@ -635,7 +941,7 @@ function validateV1(input: Record<string, unknown>): SnapshotValidationResult {
     needsPercent: pl.needsPercent as number,
     wantsPercent: pl.wantsPercent as number,
     savingsPercent: pl.savingsPercent as number,
-    notes: typeof pl.notes === 'string' ? pl.notes : undefined,
+    notes: typeof pl.notes === 'string' ? pl.notes.slice(0, MAX_COLLECTION_LIMITS.maxStringLength) : undefined,
   };
 
   return {

@@ -66,8 +66,9 @@ export const BillsView: React.FC = () => {
 
     const cat = categories.find((c) => c.id === billCategory);
 
+    let res;
     if (editingBill) {
-      editBill(editingBill.id, {
+      res = editBill(editingBill.id, {
         name: billName,
         amount: amountNum,
         categoryId: billCategory,
@@ -77,7 +78,7 @@ export const BillsView: React.FC = () => {
         note: billNote,
       });
     } else {
-      addBill({
+      res = addBill({
         name: billName,
         amount: amountNum,
         categoryId: billCategory,
@@ -90,13 +91,20 @@ export const BillsView: React.FC = () => {
       });
     }
 
+    if (res && !res.ok) {
+      return;
+    }
+
     setBillModalOpen(false);
     setEditingBill(null);
   };
 
   const handleConfirmPay = () => {
     if (!billToPay) return;
-    payBill(billToPay.id, payWalletId);
+    const res = payBill(billToPay.id, payWalletId);
+    if (res && !res.ok) {
+      return;
+    }
     setPayModalOpen(false);
     setBillToPay(null);
   };

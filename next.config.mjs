@@ -30,18 +30,24 @@ const __dirname = path.dirname(__filename);
  *
  * OWASP A02 (Security Misconfiguration) — PARTIAL (implemented baseline)
  */
+const isDev = process.env.NODE_ENV !== 'production';
+
+const scriptSrc = isDev
+  ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+  : "script-src 'self' 'unsafe-inline'";
+
 const securityHeaders = [
   {
     key: 'Content-Security-Policy',
     value: [
       "default-src 'self'",
-      // Next.js requires unsafe-inline for hydration scripts and styles
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      scriptSrc,
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
       // data: for base64 receipts; blob: for object URLs (export, chart canvas)
       "img-src 'self' data: blob:",
       "connect-src 'self'",
+      "object-src 'none'",
       // Prevent the page from being embedded in iframes (clickjacking)
       "frame-ancestors 'none'",
       "base-uri 'self'",
@@ -52,6 +58,11 @@ const securityHeaders = [
     // Prevent browsers from MIME-sniffing a response away from the declared Content-Type
     key: 'X-Content-Type-Options',
     value: 'nosniff',
+  },
+  {
+    // Legacy defense-in-depth alongside CSP frame-ancestors 'none'
+    key: 'X-Frame-Options',
+    value: 'DENY',
   },
   {
     // Control how much referrer information is sent with requests

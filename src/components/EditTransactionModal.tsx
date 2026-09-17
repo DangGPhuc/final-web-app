@@ -5,7 +5,7 @@ import { useApp } from '@/context/AppContext';
 import { Transaction, TransactionType } from '@/types';
 import { X, Upload, Trash2, Calendar, Tag, FileText, ArrowRightLeft, DollarSign } from 'lucide-react';
 import { POPULAR_TAGS } from '@/lib/constants';
-import { toLocalDateTimeInputValue, localDateTimeInputToISO } from '@/lib/utils';
+import { toLocalDateTimeInputValue, localDateTimeInputToISO, validateReceiptFile } from '@/lib/utils';
 
 interface EditTransactionModalProps {
   isOpen: boolean;
@@ -30,6 +30,7 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
   const [note, setNote] = useState<string>('');
   const [tags, setTags] = useState<string[]>([]);
   const [receiptImage, setReceiptImage] = useState<string | undefined>(undefined);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
 
   useEffect(() => {
     if (transaction) {
@@ -43,20 +44,31 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
       setNote(transaction.note || '');
       setTags(transaction.tags || []);
       setReceiptImage(transaction.receiptImage);
+      setReceiptError(null);
     }
   }, [transaction, wallets]);
 
   if (!isOpen || !transaction) return null;
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setReceiptError(null);
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setReceiptImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+
+    const validation = validateReceiptFile(file);
+    if (!validation.valid) {
+      const err = validation.error || 'Tập tin hình ảnh không hợp lệ';
+      setReceiptError(err);
+      alert(err);
+      e.target.value = '';
+      return;
     }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setReceiptImage(reader.result as string);
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleTagToggle = (tag: string) => {
@@ -80,11 +92,17 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
       return;
     }
 
+    const isoDate = localDateTimeInputToISO(date);
+    if (!isoDate) {
+      alert('Thời gian giao dịch không hợp lệ hoặc ngày trong lịch không tồn tại (ví dụ: ngày 31/02). Vui lòng chọn lại.');
+      return;
+    }
+
     const selectedWallet = wallets.find((w) => w.id === walletId);
     const selectedToWallet = wallets.find((w) => w.id === toWalletId);
     const selectedCategory = categories.find((c) => c.id === categoryId);
 
-    editTransaction(transaction.id, {
+    const res = editTransaction(transaction.id, {
       type,
       amount: Number(amount),
       categoryId: type === 'TRANSFER' ? undefined : categoryId,
@@ -94,11 +112,15 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
       toWalletId: type === 'TRANSFER' ? toWalletId : undefined,
       toWalletName: type === 'TRANSFER' ? selectedToWallet?.name : undefined,
       fee: type === 'TRANSFER' ? Number(fee) : 0,
-      date: localDateTimeInputToISO(date),
+      date: isoDate,
       note,
       tags,
       receiptImage,
     });
+
+    if (res && !res.ok) {
+      return;
+    }
 
     onClose();
   };
@@ -110,7 +132,10 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
     }
 
     if (confirm('Bạn có chắc chắn muốn xóa giao dịch này? Số dư ví sẽ được tự động hoàn tác.')) {
-      deleteTransaction(transaction.id);
+      const res = deleteTransaction(transaction.id);
+      if (res && !res.ok) {
+        return;
+      }
       onClose();
     }
   };
@@ -330,9 +355,13 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
             ) : (
               <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl cursor-pointer hover:border-blue-500 transition-colors">
                 <Upload className="w-6 h-6 text-slate-400 mb-1" />
-                <span className="text-xs text-slate-500 dark:text-slate-400">Tải ảnh hóa đơn lên</span>
-                <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                <span className="text-xs text-slate-500 dark:text-slate-400">Tải ảnh hóa đơn lên (JPG, PNG, WebP)</span>
+                <span className="text-[11px] text-slate-400 mt-0.5">Tối đa 1MB</span>
+                <input type="file" accept="image/jpeg,image/png,image/webp" onChange={handleImageUpload} className="hidden" />
               </label>
+            )}
+            {receiptError && (
+              <p className="text-xs text-rose-500 font-medium mt-1">{receiptError}</p>
             )}
           </div>
         </div>

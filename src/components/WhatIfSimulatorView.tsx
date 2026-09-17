@@ -41,7 +41,6 @@ import {
   Tooltip,
   Legend,
 } from 'recharts';
-import * as XLSX from 'xlsx';
 import { IconHelper } from './IconHelper';
 
 interface PersonalSpendingItem {
@@ -441,27 +440,45 @@ export const WhatIfSimulatorView: React.FC = () => {
   };
 
   // Xuất bảng dự phóng chi tiết ra Excel (.xlsx)
-  const handleExportTableExcel = () => {
-    const wb = XLSX.utils.book_new();
+  const handleExportTableExcel = async () => {
+    const ExcelJSModule = await import('exceljs');
+    const ExcelJS = ExcelJSModule.default || ExcelJSModule;
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'FinTrack Pro v2';
+    wb.created = new Date();
 
-    const tableData = detailedMonthlyProjections.map((row) => ({
-      'Mốc Thời Gian': row.label,
-      'Thu Nhập (₫)': row.income,
-      'Chi Tiêu Thực Tế (₫)': row.actualExpense,
-      'Tiết Kiệm Nhờ Cắt Giảm (₫)': row.cutSavings,
-      'Trả Nợ Vay Ngoài (₫)': row.debtPaid,
-      'Dư Nợ Còn Lại (₫)': row.remainingDebtTotal,
-      'Gửi Tiết Kiệm Tích Lũy (₫)': row.savingsPot,
-      'Đầu Tư Tài Chính (₫)': row.investPot,
-      'Lãi/Lỗ Đầu Tư Tháng (₫)': row.investReturn,
-      'Tài Sản What-If (₫)': row.whatIfTotal,
-      'Kịch Bản Gốc (₫)': row.baselineTotal,
-      'Chênh Lệch Dôi Ra (₫)': row.netDelta,
-    }));
+    const ws = wb.addWorksheet('Du_Bao_Chi_Tiet_What_If');
+    ws.columns = [
+      { header: 'Mốc Thời Gian', key: 'label', width: 16 },
+      { header: 'Thu Nhập (₫)', key: 'income', width: 18 },
+      { header: 'Chi Tiêu Thực Tế (₫)', key: 'actualExpense', width: 22 },
+      { header: 'Tiết Kiệm Nhờ Cắt Giảm (₫)', key: 'cutSavings', width: 26 },
+      { header: 'Trả Nợ Vay Ngoài (₫)', key: 'debtPaid', width: 20 },
+      { header: 'Dư Nợ Còn Lại (₫)', key: 'remainingDebtTotal', width: 20 },
+      { header: 'Gửi Tiết Kiệm Tích Lũy (₫)', key: 'savingsPot', width: 25 },
+      { header: 'Đầu Tư Tài Chính (₫)', key: 'investPot', width: 22 },
+      { header: 'Lãi/Lỗ Đầu Tư Tháng (₫)', key: 'investReturn', width: 22 },
+      { header: 'Tài Sản What-If (₫)', key: 'whatIfTotal', width: 22 },
+      { header: 'Kịch Bản Gốc (₫)', key: 'baselineTotal', width: 20 },
+      { header: 'Chênh Lệch Dôi Ra (₫)', key: 'netDelta', width: 20 },
+    ];
 
-    const ws = XLSX.utils.json_to_sheet(tableData);
-    XLSX.utils.book_append_sheet(wb, ws, 'Du_Bao_Chi_Tiet_What_If');
-    XLSX.writeFile(wb, `Bang-Chi-Tiet-Mo-Phong-What-If-${projectionMonths}T.xlsx`);
+    detailedMonthlyProjections.forEach((row) => {
+      ws.addRow(row);
+    });
+
+    const buffer = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = `Bang-Chi-Tiet-Mo-Phong-What-If-${projectionMonths}T.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   // Run live benchmark simulation

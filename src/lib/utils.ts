@@ -1,5 +1,4 @@
 import { Wallet, Transaction, Budget, FinancialSummary, RecurringBill } from '@/types';
-import * as XLSX from 'xlsx';
 
 export function formatCurrency(amount: number): string {
   return new Intl.NumberFormat('vi-VN', {
@@ -65,14 +64,28 @@ export function toLocalDateTimeInputValue(dateOrIso: Date | string | number = ne
 
 /**
  * Convert local datetime-local value (YYYY-MM-DDTHH:mm or with seconds) to canonical ISO timestamp.
+ * Strictly validates calendar date and time. Returns null if invalid or impossible (e.g. 2026-02-31).
+ * Never silently substitutes current time.
  */
-export function localDateTimeInputToISO(value: string): string {
-  if (!value) return new Date().toISOString();
-  const [datePart, timePart = '00:00'] = value.split('T');
-  const [y, m, d] = datePart.split('-').map(Number);
-  const [hh, mm, ss = 0] = timePart.split(':').map(Number);
+export function localDateTimeInputToISO(value: string): string | null {
+  if (!value || typeof value !== 'string') return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (!match) return null;
+  const y = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  const d = parseInt(match[3], 10);
+  const hh = parseInt(match[4], 10);
+  const mm = parseInt(match[5], 10);
+  const ss = match[6] ? parseInt(match[6], 10) : 0;
+  if (m < 1 || m > 12) return null;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return null;
+  const daysInMonth = new Date(y, m, 0).getDate();
+  if (d < 1 || d > daysInMonth) return null;
   const localDate = new Date(y, m - 1, d, hh, mm, ss);
-  if (isNaN(localDate.getTime())) return new Date().toISOString();
+  if (isNaN(localDate.getTime())) return null;
+  if (localDate.getFullYear() !== y || localDate.getMonth() !== m - 1 || localDate.getDate() !== d) {
+    return null;
+  }
   return localDate.toISOString();
 }
 
@@ -216,8 +229,13 @@ export function sanitizeCsvCell(val: string): string {
 
 // ─── Receipt / File Upload Security Foundation ────────────────────────────────
 
-/** Maximum allowed receipt file size (bytes). */
-export const RECEIPT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+/**
+ * Maximum allowed local receipt file size (bytes).
+ * 1 MB conservative local limit to avoid localStorage exhaustion.
+ * Future private object-storage upload pipeline may support up to 5 MB.
+ */
+export const LOCAL_RECEIPT_MAX_BYTES = 1 * 1024 * 1024; // 1 MB
+export const RECEIPT_MAX_BYTES = LOCAL_RECEIPT_MAX_BYTES;
 
 /** Allowed MIME types for receipt images. SVG is excluded (active content risk). */
 export const RECEIPT_ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/webp'] as const;
@@ -226,32 +244,26 @@ export const RECEIPT_ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/webp'] a
  * Client-side receipt file validation.
  *
  * Validates file size and declared MIME type against a strict allowlist.
- * NOTE: Browser MIME type validation alone is NOT sufficient for production.
- * Future server-side pipeline must additionally validate:
- *   - File extension (allowlist: .jpg, .jpeg, .png, .webp)
- *   - Actual magic bytes / file signature (not just Content-Type header)
- *   - Image decode validity (attempt decode, reject if corrupt)
- *   - Virus/malware scanning (optional pipeline)
- *   - Store with random server-generated key in PRIVATE object storage
- *   - Never serve uploaded files from the application webroot
- *
- * Per OWASP File Upload Cheat Sheet:
- *   allowlist types → validate signatures → rename → restrict size → authorize
  */
-export function validateReceiptFile(file: File): { ok: boolean; error?: string } {
+export function validateReceiptFile(file: File): { ok: boolean; valid: boolean; error?: string } {
+  if (!file) {
+    return { ok: false, valid: false, error: 'Tệp không hợp lệ' };
+  }
   if (file.size > RECEIPT_MAX_BYTES) {
     return {
       ok: false,
-      error: `Ảnh biên lai quá lớn (${(file.size / 1024 / 1024).toFixed(1)} MB). Giới hạn: ${RECEIPT_MAX_BYTES / 1024 / 1024} MB.`,
+      valid: false,
+      error: `Ảnh biên lai quá lớn (${(file.size / 1024 / 1024).toFixed(1)} MB). Giới hạn lưu trữ cục bộ: ${RECEIPT_MAX_BYTES / (1024 * 1024)} MB.`,
     };
   }
   if (!RECEIPT_ALLOWED_MIMES.includes(file.type as (typeof RECEIPT_ALLOWED_MIMES)[number])) {
     return {
       ok: false,
-      error: `Định dạng tệp không được hỗ trợ (${file.type}). Chỉ chấp nhận: JPEG, PNG, WEBP.`,
+      valid: false,
+      error: `Định dạng tệp không được hỗ trợ (${file.type || 'không rõ'}). Chỉ chấp nhận: JPEG, PNG, WEBP.`,
     };
   }
-  return { ok: true };
+  return { ok: true, valid: true };
 }
 
 export function exportToCSV(transactions: Transaction[], filename = 'bao-cao-giao-dich.csv'): void {
@@ -283,69 +295,117 @@ export function exportToCSV(transactions: Transaction[], filename = 'bao-cao-gia
   document.body.removeChild(link);
 }
 
-export function exportToExcel(
+export async function exportToExcel(
   transactions: Transaction[],
   budgets: Budget[],
   wallets: Wallet[],
   summary: FinancialSummary,
   filename = 'Bao-Cao-Tai-Chinh-Chi-Tieu.xlsx'
-): void {
-  const wb = XLSX.utils.book_new();
+): Promise<void> {
+  const ExcelJSModule = await import('exceljs');
+  const ExcelJS = ExcelJSModule.default || ExcelJSModule;
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'FinTrack Pro v2';
+  wb.created = new Date();
 
   // Sheet 1: Danh sách giao dịch
-  const txData = transactions.map((t, idx) => ({
-    'STT': idx + 1,
-    'Mã GD': t.id,
-    'Thời gian': formatDate(t.date, 'full'),
-    'Loại giao dịch': t.type === 'EXPENSE' ? 'Khoản chi' : t.type === 'INCOME' ? 'Khoản thu' : 'Chuyển khoản nội bộ',
-    'Danh mục': sanitizeCsvCell(t.categoryName || 'Khác'),
-    'Số tiền (₫)': t.amount,
-    'Tài khoản / Ví': sanitizeCsvCell(t.walletName || t.walletId),
-    'Ví đích (nếu chuyển)': sanitizeCsvCell(t.toWalletName || ''),
-    'Ghi chú': sanitizeCsvCell(t.note || ''),
-    'Nhãn phân loại': sanitizeCsvCell((t.tags || []).join(', ')),
-  }));
-  const wsTx = XLSX.utils.json_to_sheet(txData);
-  XLSX.utils.book_append_sheet(wb, wsTx, 'Sổ Giao Dịch');
+  const wsTx = wb.addWorksheet('Sổ Giao Dịch');
+  wsTx.columns = [
+    { header: 'STT', key: 'stt', width: 6 },
+    { header: 'Mã GD', key: 'id', width: 15 },
+    { header: 'Thời gian', key: 'date', width: 22 },
+    { header: 'Loại giao dịch', key: 'type', width: 20 },
+    { header: 'Danh mục', key: 'category', width: 20 },
+    { header: 'Số tiền (₫)', key: 'amount', width: 16 },
+    { header: 'Tài khoản / Ví', key: 'wallet', width: 22 },
+    { header: 'Ví đích (nếu chuyển)', key: 'toWallet', width: 22 },
+    { header: 'Ghi chú', key: 'note', width: 30 },
+    { header: 'Nhãn phân loại', key: 'tags', width: 20 },
+  ];
+  transactions.forEach((t, idx) => {
+    wsTx.addRow({
+      stt: idx + 1,
+      id: t.id,
+      date: formatDate(t.date, 'full'),
+      type: t.type === 'EXPENSE' ? 'Khoản chi' : t.type === 'INCOME' ? 'Khoản thu' : 'Chuyển khoản nội bộ',
+      category: sanitizeCsvCell(t.categoryName || 'Khác'),
+      amount: t.amount,
+      wallet: sanitizeCsvCell(t.walletName || t.walletId),
+      toWallet: sanitizeCsvCell(t.toWalletName || ''),
+      note: sanitizeCsvCell(t.note || ''),
+      tags: sanitizeCsvCell((t.tags || []).join(', ')),
+    });
+  });
 
   // Sheet 2: Tổng hợp tài sản & Ví
-  const walletData = wallets.map((w) => ({
-    'Tên Ví / Tài khoản': sanitizeCsvCell(w.name),
-    'Loại ví': w.type === 'CASH' ? 'Tiền mặt' : w.type === 'BANK' ? 'Ngân hàng' : w.type === 'CREDIT' ? 'Thẻ tín dụng' : 'Sổ tiết kiệm',
-    'Số dư hiện tại (₫)': w.balance,
-    'Hạn mức (Thẻ tín dụng)': w.creditLimit || '-',
-    'Lãi suất (%/năm)': w.interestRate ? `${w.interestRate}%` : '-',
-    'Số tài khoản / Thẻ': sanitizeCsvCell(w.accountNumber || '-'),
-  }));
-  const wsWallets = XLSX.utils.json_to_sheet(walletData);
-  XLSX.utils.book_append_sheet(wb, wsWallets, 'Tài Khoản & Ví');
+  const wsWallets = wb.addWorksheet('Tài Khoản & Ví');
+  wsWallets.columns = [
+    { header: 'Tên Ví / Tài khoản', key: 'name', width: 25 },
+    { header: 'Loại ví', key: 'type', width: 16 },
+    { header: 'Số dư hiện tại (₫)', key: 'balance', width: 18 },
+    { header: 'Hạn mức (Thẻ tín dụng)', key: 'limit', width: 22 },
+    { header: 'Lãi suất (%/năm)', key: 'rate', width: 16 },
+    { header: 'Số tài khoản / Thẻ', key: 'acc', width: 22 },
+  ];
+  wallets.forEach((w) => {
+    wsWallets.addRow({
+      name: sanitizeCsvCell(w.name),
+      type: w.type === 'CASH' ? 'Tiền mặt' : w.type === 'BANK' ? 'Ngân hàng' : w.type === 'CREDIT' ? 'Thẻ tín dụng' : 'Sổ tiết kiệm',
+      balance: w.balance,
+      limit: w.creditLimit || '-',
+      rate: w.interestRate ? `${w.interestRate}%` : '-',
+      acc: sanitizeCsvCell(w.accountNumber || '-'),
+    });
+  });
 
   // Sheet 3: Báo cáo ngân sách
+  const wsBudgets = wb.addWorksheet('Theo Dõi Ngân Sách');
+  wsBudgets.columns = [
+    { header: 'Danh mục', key: 'cat', width: 22 },
+    { header: 'Hạn mức tháng (₫)', key: 'amount', width: 18 },
+    { header: 'Đã chi tiêu (₫)', key: 'spent', width: 18 },
+    { header: 'Còn lại (₫)', key: 'rem', width: 18 },
+    { header: 'Tỷ lệ đã dùng (%)', key: 'pct', width: 18 },
+    { header: 'Tình trạng cảnh báo', key: 'status', width: 24 },
+  ];
   const budgetStatuses = calculateBudgetStatuses(budgets, transactions);
-  const budgetData = budgetStatuses.map((bs) => ({
-    'Danh mục': sanitizeCsvCell(bs.budget.categoryName),
-    'Hạn mức tháng (₫)': bs.budget.amount,
-    'Đã chi tiêu (₫)': bs.spent,
-    'Còn lại (₫)': bs.remaining,
-    'Tỷ lệ đã dùng (%)': `${bs.percentage}%`,
-    'Tình trạng cảnh báo': bs.status === 'EXCEEDED' ? 'VƯỢT 100% NGÂN SÁCH' : bs.status === 'WARNING' ? 'CẢNH BÁO (>80%)' : 'An toàn',
-  }));
-  const wsBudgets = XLSX.utils.json_to_sheet(budgetData);
-  XLSX.utils.book_append_sheet(wb, wsBudgets, 'Theo Dõi Ngân Sách');
+  budgetStatuses.forEach((bs) => {
+    wsBudgets.addRow({
+      cat: sanitizeCsvCell(bs.budget.categoryName),
+      amount: bs.budget.amount,
+      spent: bs.spent,
+      rem: bs.remaining,
+      pct: `${bs.percentage}%`,
+      status: bs.status === 'EXCEEDED' ? 'VƯỢT 100% NGÂN SÁCH' : bs.status === 'WARNING' ? 'CẢNH BÁO (>80%)' : 'An toàn',
+    });
+  });
 
   // Sheet 4: Chỉ số tài chính tổng quan
-  const kpiData = [
-    { 'Chỉ tiêu': 'Tổng tài sản ròng', 'Giá trị (₫)': summary.totalAssets },
-    { 'Chỉ tiêu': 'Số dư khả dụng (Tiền mặt + Ngân hàng)', 'Giá trị (₫)': summary.availableBalance },
-    { 'Chỉ tiêu': 'Dư nợ thẻ tín dụng', 'Giá trị (₫)': summary.totalCreditDebt },
-    { 'Chỉ tiêu': 'Tổng tiền gửi tiết kiệm', 'Giá trị (₫)': summary.totalSavings },
-    { 'Chỉ tiêu': 'Tổng thu nhập tháng này', 'Giá trị (₫)': summary.monthlyIncome },
-    { 'Chỉ tiêu': 'Tổng chi tiêu tháng này', 'Giá trị (₫)': summary.monthlyExpense },
-    { 'Chỉ tiêu': 'Tích lũy ròng trong tháng', 'Giá trị (₫)': summary.netSavingsThisMonth },
-    { 'Chỉ tiêu': 'Tỷ lệ tiết kiệm', 'Giá trị (₫)': `${summary.savingsRate}%` },
+  const wsKPI = wb.addWorksheet('Tổng Hợp Tài Chính');
+  wsKPI.columns = [
+    { header: 'Chỉ tiêu', key: 'label', width: 35 },
+    { header: 'Giá trị (₫)', key: 'val', width: 20 },
   ];
-  const wsKPI = XLSX.utils.json_to_sheet(kpiData);
-  XLSX.utils.book_append_sheet(wb, wsKPI, 'Tổng Hợp Tài Chính');
+  const kpiData = [
+    { label: 'Tổng tài sản ròng', val: summary.totalAssets },
+    { label: 'Số dư khả dụng (Tiền mặt + Ngân hàng)', val: summary.availableBalance },
+    { label: 'Dư nợ thẻ tín dụng', val: summary.totalCreditDebt },
+    { label: 'Tổng tiền gửi tiết kiệm', val: summary.totalSavings },
+    { label: 'Tổng thu nhập tháng này', val: summary.monthlyIncome },
+    { label: 'Tổng chi tiêu tháng này', val: summary.monthlyExpense },
+    { label: 'Tích lũy ròng trong tháng', val: summary.netSavingsThisMonth },
+    { label: 'Tỷ lệ tiết kiệm', val: `${summary.savingsRate}%` },
+  ];
+  kpiData.forEach((r) => wsKPI.addRow(r));
 
-  XLSX.writeFile(wb, filename);
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }

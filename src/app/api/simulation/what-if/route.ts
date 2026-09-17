@@ -8,36 +8,20 @@
  */
 import { NextResponse } from 'next/server';
 import { INITIAL_TRANSACTIONS, INITIAL_WALLETS, INITIAL_PLANNER } from '@/lib/mock-data';
+import { readBoundedJsonBody } from '@/lib/api-guard';
 
 const DEMO_HEADERS = { 'X-Demo-Only': 'true', 'X-Persistence': 'none' };
 
 export async function POST(req: Request) {
-  const contentLength = req.headers.get('content-length');
-  if (contentLength && parseInt(contentLength) > 10_000) {
+  const parsed = await readBoundedJsonBody<Record<string, unknown>>(req, 10_000);
+  if (!parsed.ok) {
     return NextResponse.json(
-      { success: false, error: 'Payload too large' },
-      { status: 413, headers: DEMO_HEADERS }
+      { success: false, error: parsed.error },
+      { status: parsed.status, headers: DEMO_HEADERS }
     );
   }
 
-  let rawBody: unknown = {};
-  try {
-    rawBody = await req.json();
-  } catch {
-    return NextResponse.json(
-      { success: false, error: 'Invalid JSON body' },
-      { status: 400, headers: DEMO_HEADERS }
-    );
-  }
-
-  if (typeof rawBody !== 'object' || rawBody === null || Array.isArray(rawBody)) {
-    return NextResponse.json(
-      { success: false, error: 'Body must be a JSON object' },
-      { status: 400, headers: DEMO_HEADERS }
-    );
-  }
-
-  const body = rawBody as Record<string, unknown>;
+  const body = parsed.data;
 
   // ── Validated + bounded numeric inputs ──────────────────────────────────
   const reducePercent = clampFinite(body.reducePercent, 0, 100, 20);
