@@ -283,14 +283,35 @@ export const WhatIfSimulatorView: React.FC = () => {
       // 1. Kịch bản gốc (Baseline: không cắt giảm, không đầu tư thêm, không quản lý nợ riêng)
       baselineWealth += baseMonthlySavings;
 
-      // 2. Tính toán trả nợ trong tháng m
+      // 2. Tính toán trả nợ trong tháng m (bao gồm lãi suất vay %/năm)
       let monthDebtPaid = 0;
       if (hasExternalLoan) {
         currentLoanDebts = currentLoanDebts.map((loan) => {
           if (loan.remaining <= 0) return { ...loan, remaining: 0 };
-          const pay = Math.min(loan.remaining, loan.monthlyPayment);
-          monthDebtPaid += pay;
-          return { ...loan, remaining: Math.max(0, loan.remaining - pay) };
+
+          // Lãi suất tháng
+          const annualRate = typeof loan.annualInterestRate === 'number' && isFinite(loan.annualInterestRate) && loan.annualInterestRate > 0
+            ? loan.annualInterestRate
+            : 0;
+          const monthlyRate = annualRate / 100 / 12;
+
+          // Tiền lãi phát sinh trong tháng trên dư nợ còn lại
+          const interestMonth = loan.remaining * monthlyRate;
+
+          // Tổng nghĩa vụ phải trả để thanh toán dứt điểm khoản nợ
+          const totalDue = loan.remaining + interestMonth;
+
+          // Số tiền thực trả tháng này: không vượt quá tổng dư nợ + lãi
+          const plannedPayment = typeof loan.monthlyPayment === 'number' && isFinite(loan.monthlyPayment) && loan.monthlyPayment > 0
+            ? loan.monthlyPayment
+            : 0;
+          const actualPayment = Math.min(totalDue, plannedPayment);
+          monthDebtPaid += actualPayment;
+
+          // Dư nợ gốc mới sau khi trả lãi và giảm trừ gốc
+          const newRemaining = Math.max(0, loan.remaining + interestMonth - actualPayment);
+
+          return { ...loan, remaining: newRemaining };
         });
       }
       const remainingDebtTotal = hasExternalLoan ? currentLoanDebts.reduce((s, l) => s + l.remaining, 0) : 0;
