@@ -130,7 +130,8 @@ export function applyAddTransaction(
   const updatedWallets = state.wallets.map((w) => ({ ...w }));
   const targetSource = updatedWallets.find((w) => w.id === txInput.walletId)!;
 
-  let transferKind: TransferKind | undefined = txInput.transferKind;
+  let transferKind: TransferKind | undefined = undefined;
+  let targetDest: Wallet | undefined = undefined;
 
   if (txInput.type === 'EXPENSE') {
     if (targetSource.type === 'CREDIT') {
@@ -159,7 +160,7 @@ export function applyAddTransaction(
     if (!txInput.toWalletId || txInput.toWalletId === txInput.walletId) {
       return { ok: false, error: 'Ví nhận phải khác ví chuyển' };
     }
-    const targetDest = updatedWallets.find((w) => w.id === txInput.toWalletId);
+    targetDest = updatedWallets.find((w) => w.id === txInput.toWalletId);
     if (!targetDest) {
       return { ok: false, error: 'Ví đích không tồn tại' };
     }
@@ -181,7 +182,7 @@ export function applyAddTransaction(
       targetDest.balance -= txInput.amount;
     } else {
       // Normal wallet -> Normal wallet
-      transferKind = transferKind || 'WALLET_TRANSFER';
+      transferKind = 'WALLET_TRANSFER';
       if (targetSource.balance < txInput.amount + normalizedFee) {
         return { ok: false, error: 'Số dư ví nguồn không đủ để thực hiện chuyển khoản' };
       }
@@ -194,8 +195,10 @@ export function applyAddTransaction(
   const createdAt = new Date().toISOString();
   const newTx: Transaction = {
     ...txInput,
-    fee: normalizedFee,
-    transferKind,
+    fee: txInput.type === 'TRANSFER' ? normalizedFee : 0,
+    transferKind: txInput.type === 'TRANSFER' ? transferKind : undefined,
+    toWalletId: txInput.type === 'TRANSFER' ? txInput.toWalletId : undefined,
+    toWalletName: txInput.type === 'TRANSFER' ? targetDest?.name : undefined,
     origin: txInput.origin || 'MANUAL',
     id,
     createdAt,
@@ -235,26 +238,81 @@ export function applyEditTransaction(
     };
   }
 
-  if (updated.amount !== undefined) {
-    if (typeof updated.amount !== 'number' || isNaN(updated.amount) || !isFinite(updated.amount) || updated.amount <= 0) {
-      return { ok: false, error: 'Số tiền giao dịch không hợp lệ' };
-    }
+  const finalAmount = updated.amount !== undefined ? updated.amount : oldTx.amount;
+  if (typeof finalAmount !== 'number' || isNaN(finalAmount) || !isFinite(finalAmount) || finalAmount <= 0) {
+    return { ok: false, error: 'Số tiền giao dịch không hợp lệ' };
   }
 
-  const newTxCandidate: Transaction = { ...oldTx, ...updated };
+  const finalType: TransactionType = updated.type || oldTx.type;
+  const finalWalletId = updated.walletId || oldTx.walletId;
+  const sourceWallet = state.wallets.find((w) => w.id === finalWalletId);
+  if (!sourceWallet) {
+    return { ok: false, error: 'Không tìm thấy ví nguồn mới' };
+  }
 
-  if (newTxCandidate.type === 'TRANSFER') {
-    if (!newTxCandidate.toWalletId || newTxCandidate.toWalletId === newTxCandidate.walletId) {
+  let finalToWalletId: string | undefined = undefined;
+  let finalToWalletName: string | undefined = undefined;
+  let finalTransferKind: TransferKind | undefined = undefined;
+  let finalFee: number = 0;
+
+  if (finalType === 'TRANSFER') {
+    // source CREDIT: reject
+    if (sourceWallet.type === 'CREDIT') {
+      return { ok: false, error: 'Không hỗ trợ chuyển khoản từ thẻ tín dụng' };
+    }
+
+    finalToWalletId = updated.toWalletId !== undefined ? updated.toWalletId : oldTx.toWalletId;
+    if (!finalToWalletId || finalToWalletId === finalWalletId) {
       return { ok: false, error: 'Ví nhận phải khác ví chuyển' };
     }
-    const feeCheck = validateTransferFee(newTxCandidate.fee);
+
+    const destWallet = state.wallets.find((w) => w.id === finalToWalletId);
+    if (!destWallet) {
+      return { ok: false, error: 'Không tìm thấy ví đích mới' };
+    }
+    finalToWalletName = destWallet.name;
+
+    // Authoritative transferKind:
+    // destination CREDIT: transferKind MUST be CREDIT_PAYMENT
+    // normal destination: transferKind MUST be WALLET_TRANSFER
+    if (destWallet.type === 'CREDIT') {
+      finalTransferKind = 'CREDIT_PAYMENT';
+    } else {
+      finalTransferKind = 'WALLET_TRANSFER';
+    }
+
+    const feeCandidate = updated.fee !== undefined ? updated.fee : (oldTx.type === 'TRANSFER' ? oldTx.fee : 0);
+    const feeCheck = validateTransferFee(feeCandidate);
     if (!feeCheck.valid) {
       return { ok: false, error: feeCheck.error || 'Phí chuyển khoản không hợp lệ' };
     }
-    newTxCandidate.fee = feeCheck.fee;
+    finalFee = feeCheck.fee;
   } else {
-    newTxCandidate.fee = 0;
+    // For final type INCOME or EXPENSE: clear transfer-only metadata
+    finalToWalletId = undefined;
+    finalToWalletName = undefined;
+    finalTransferKind = undefined;
+    finalFee = 0;
   }
+
+  const newTxCandidate: Transaction = {
+    ...oldTx,
+    ...updated,
+    id: oldTx.id,
+    createdAt: oldTx.createdAt,
+    origin: oldTx.origin,
+    originId: oldTx.originId,
+    type: finalType,
+    amount: finalAmount,
+    walletId: finalWalletId,
+    walletName: sourceWallet.name,
+    toWalletId: finalToWalletId,
+    toWalletName: finalToWalletName,
+    transferKind: finalTransferKind,
+    fee: finalFee,
+    categoryId: finalType === 'TRANSFER' ? undefined : (updated.categoryId !== undefined ? updated.categoryId : oldTx.categoryId),
+    categoryName: finalType === 'TRANSFER' ? undefined : (updated.categoryName !== undefined ? updated.categoryName : oldTx.categoryName),
+  };
 
   // Simulate rolling back oldTx and applying newTx
   const simulatedWallets = state.wallets.map((w) => ({ ...w }));

@@ -1585,4 +1585,114 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
       expect(resValid.newWallet.initialBalance).toBe(5000000);
     }
   });
+
+  // =========================================================================
+  // CASE Z — Transaction Transfer Metadata Normalization
+  // =========================================================================
+  it('CASE Z — Transaction Transfer Metadata Normalization: normalizes transferKind, cleanses transfer fields on EXPENSE/INCOME, prevents credit source', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-bank-1',
+          name: 'Ngân hàng 1',
+          type: 'BANK',
+          balance: 20000000,
+          initialBalance: 20000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          createdAt: '2026-01-01',
+        },
+        {
+          id: 'wal-bank-2',
+          name: 'Ngân hàng 2',
+          type: 'BANK',
+          balance: 10000000,
+          initialBalance: 10000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          createdAt: '2026-01-01',
+        },
+        {
+          id: 'wal-credit',
+          name: 'Thẻ Tín Dụng',
+          type: 'CREDIT',
+          balance: 5000000, // debt = 5M
+          initialBalance: 5000000,
+          creditLimit: 20000000,
+          currency: 'VND',
+          color: '#8b5cf6',
+          icon: 'CreditCard',
+          createdAt: '2026-01-01',
+        },
+      ],
+      transactions: [],
+    });
+
+    // 1. normal wallet -> normal wallet => WALLET_TRANSFER (authoritative)
+    const addTxRes = applyAddTransaction(state, {
+      amount: 1000000,
+      type: 'TRANSFER',
+      walletId: 'wal-bank-1',
+      toWalletId: 'wal-bank-2',
+      date: '2026-03-01T10:00:00.000Z',
+      fee: 0,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      transferKind: 'CREDIT_PAYMENT' as any, // Untrusted UI input
+    });
+    expect(addTxRes.ok).toBe(true);
+    if (!addTxRes.ok) return;
+
+    const txId = addTxRes.newTx.id;
+    expect(addTxRes.newTx.transferKind).toBe('WALLET_TRANSFER');
+
+    // 2. normal wallet -> CREDIT => CREDIT_PAYMENT
+    const editToCreditRes = applyEditTransaction(addTxRes.state, txId, {
+      toWalletId: 'wal-credit',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      transferKind: 'WALLET_TRANSFER' as any, // Untrusted UI input
+    });
+    expect(editToCreditRes.ok).toBe(true);
+    if (!editToCreditRes.ok) return;
+
+    expect(editToCreditRes.updatedTx.transferKind).toBe('CREDIT_PAYMENT');
+    expect(editToCreditRes.updatedTx.toWalletId).toBe('wal-credit');
+
+    // 3. A previous CREDIT_PAYMENT edited to target a normal wallet must become WALLET_TRANSFER
+    const editBackToBankRes = applyEditTransaction(editToCreditRes.state, txId, {
+      toWalletId: 'wal-bank-2',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      transferKind: 'CREDIT_PAYMENT' as any, // Untrusted UI input
+    });
+    expect(editBackToBankRes.ok).toBe(true);
+    if (!editBackToBankRes.ok) return;
+
+    expect(editBackToBankRes.updatedTx.transferKind).toBe('WALLET_TRANSFER');
+    expect(editBackToBankRes.updatedTx.toWalletId).toBe('wal-bank-2');
+
+    // 4. TRANSFER edited to EXPENSE => transferKind/toWalletId/toWalletName cleared, fee is 0
+    const editToExpRes = applyEditTransaction(editBackToBankRes.state, txId, {
+      type: 'EXPENSE',
+      categoryId: 'cat-food',
+    });
+    expect(editToExpRes.ok).toBe(true);
+    if (!editToExpRes.ok) return;
+
+    expect(editToExpRes.updatedTx.type).toBe('EXPENSE');
+    expect(editToExpRes.updatedTx.toWalletId).toBeUndefined();
+    expect(editToExpRes.updatedTx.toWalletName).toBeUndefined();
+    expect(editToExpRes.updatedTx.transferKind).toBeUndefined();
+    expect(editToExpRes.updatedTx.fee).toBe(0);
+
+    // 5. Source CREDIT for TRANSFER is rejected
+    const editCreditSourceRes = applyEditTransaction(editBackToBankRes.state, txId, {
+      walletId: 'wal-credit',
+      toWalletId: 'wal-bank-1',
+    });
+    expect(editCreditSourceRes.ok).toBe(false);
+    if (!editCreditSourceRes.ok) {
+      expect(editCreditSourceRes.error).toMatch(/từ thẻ tín dụng/i);
+    }
+  });
 });
