@@ -11,11 +11,10 @@ import { Client } from 'pg';
 
 const connectionString =
   process.env.DATABASE_MAINTENANCE_URL ||
-  process.env.DATABASE_ADMIN_URL ||
-  process.env.DATABASE_URL;
+  process.env.DATABASE_ADMIN_URL;
 
 if (!connectionString) {
-  console.error('ERROR: DATABASE_MAINTENANCE_URL or DATABASE_ADMIN_URL is required.');
+  console.error('ERROR: DATABASE_MAINTENANCE_URL or DATABASE_ADMIN_URL is required. Fallback to DATABASE_URL is strictly forbidden.');
   process.exit(1);
 }
 
@@ -27,9 +26,9 @@ async function runMaintenance() {
     const roleCheck = await client.query('SELECT current_user AS name');
     const currentUser = roleCheck.rows[0]?.name;
 
-    if (currentUser === 'fintrack_runtime') {
+    if (currentUser === 'fintrack_runtime' || currentUser === 'fintrack_app_login') {
       console.error(
-        'SECURITY VIOLATION: Maintenance cleanup cannot be executed by web runtime role "fintrack_runtime". Operator credentials required.'
+        `SECURITY VIOLATION: Maintenance cleanup cannot be executed by application role "${currentUser}". Operator credentials required.`
       );
       process.exit(1);
     }
@@ -40,8 +39,7 @@ async function runMaintenance() {
     const result = await client.query(`
       DELETE FROM fintrack.sessions
       WHERE (revoked_at IS NOT NULL AND revoked_at < now() - interval '30 days')
-         OR (expires_at < now() - interval '30 days')
-      RETURNING token_hash;
+         OR (expires_at < now() - interval '30 days');
     `);
 
     console.log(
