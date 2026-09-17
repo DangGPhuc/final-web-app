@@ -1015,4 +1015,104 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     expect(editedWallet?.color).toBe('#ef4444');
     expect(editedWallet?.accountNumber).toBe('999999');
   });
+
+  // =========================================================================
+  // CASE P — Credit Wallet Generic Income
+  // =========================================================================
+  it('CASE P — Credit Wallet Generic Income: direct INCOME to CREDIT wallet is rejected, debt unchanged', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-credit-test',
+          name: 'Thẻ tín dụng Test',
+          type: 'CREDIT',
+          balance: 3000000, // Dư nợ 3,000,000đ
+          initialBalance: 0,
+          creditLimit: 20000000,
+          currency: 'VND',
+          color: '#8b5cf6',
+          icon: 'CreditCard',
+          createdAt: '2026-01-01',
+        },
+      ],
+      transactions: [],
+    });
+
+    // Attempt: INCOME 10M -> CREDIT
+    const incomeRes = applyAddTransaction(state, {
+      type: 'INCOME',
+      amount: 10000000,
+      walletId: 'wal-credit-test',
+      date: '2026-09-15T10:00:00',
+      note: 'Thu nhập vào thẻ tín dụng',
+      tags: [],
+    });
+
+    expect(incomeRes.ok).toBe(false);
+    if (!incomeRes.ok) {
+      expect(incomeRes.error).toContain('Không hỗ trợ ghi nhận thu nhập trực tiếp vào thẻ tín dụng');
+    }
+
+    // Credit debt must remain unchanged (3,000,000)
+    const wallet = state.wallets.find((w) => w.id === 'wal-credit-test');
+    expect(wallet?.balance).toBe(3000000);
+    expect(state.transactions.length).toBe(0);
+  });
+
+  // =========================================================================
+  // CASE Q — Credit Repayment Still Works
+  // =========================================================================
+  it('CASE Q — Credit Repayment Still Works: TRANSFER bank -> credit reduces debt and bank balance', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-bank-q',
+          name: 'Tài khoản Ngân hàng',
+          type: 'BANK',
+          balance: 10000000, // 10M
+          initialBalance: 10000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          createdAt: '2026-01-01',
+        },
+        {
+          id: 'wal-credit-q',
+          name: 'Thẻ tín dụng',
+          type: 'CREDIT',
+          balance: 3000000, // 3M debt
+          initialBalance: 0,
+          creditLimit: 20000000,
+          currency: 'VND',
+          color: '#8b5cf6',
+          icon: 'CreditCard',
+          createdAt: '2026-01-01',
+        },
+      ],
+      transactions: [],
+    });
+
+    // TRANSFER bank -> credit = 2M (fee = 0)
+    const transferRes = applyAddTransaction(state, {
+      type: 'TRANSFER',
+      amount: 2000000,
+      fee: 0,
+      walletId: 'wal-bank-q',
+      toWalletId: 'wal-credit-q',
+      date: '2026-09-15T12:00:00',
+      note: 'Thanh toán thẻ tín dụng',
+      tags: ['Thanh toán thẻ'],
+    });
+
+    expect(transferRes.ok).toBe(true);
+    if (!transferRes.ok) return;
+
+    const bank = transferRes.state.wallets.find((w) => w.id === 'wal-bank-q');
+    const credit = transferRes.state.wallets.find((w) => w.id === 'wal-credit-q');
+
+    // Expected: Bank = 8M, Credit debt = 1M
+    expect(bank?.balance).toBe(8000000);
+    expect(credit?.balance).toBe(1000000);
+    expect(transferRes.newTx.transferKind).toBe('CREDIT_PAYMENT');
+  });
 });

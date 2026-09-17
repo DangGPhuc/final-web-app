@@ -149,11 +149,12 @@ export function applyAddTransaction(
     }
   } else if (txInput.type === 'INCOME') {
     if (targetSource.type === 'CREDIT') {
-      // Income into credit card reduces debt
-      targetSource.balance = Math.max(0, targetSource.balance - txInput.amount);
-    } else {
-      targetSource.balance += txInput.amount;
+      return {
+        ok: false,
+        error: 'Không hỗ trợ ghi nhận thu nhập trực tiếp vào thẻ tín dụng. Để trả nợ thẻ, vui lòng sử dụng tính năng Chuyển khoản (Thanh toán thẻ tín dụng) từ ví thanh toán/ngân hàng.',
+      };
     }
+    targetSource.balance += txInput.amount;
   } else if (txInput.type === 'TRANSFER') {
     if (!txInput.toWalletId || txInput.toWalletId === txInput.walletId) {
       return { ok: false, error: 'Ví nhận phải khác ví chuyển' };
@@ -304,10 +305,12 @@ export function applyEditTransaction(
     }
   } else if (newTxCandidate.type === 'INCOME') {
     if (newSource.type === 'CREDIT') {
-      newSource.balance -= newTxCandidate.amount;
-    } else {
-      newSource.balance += newTxCandidate.amount;
+      return {
+        ok: false,
+        error: 'Không hỗ trợ ghi nhận thu nhập trực tiếp vào thẻ tín dụng. Để trả nợ thẻ, vui lòng sử dụng tính năng Chuyển khoản (Thanh toán thẻ tín dụng) từ ví thanh toán/ngân hàng.',
+      };
     }
+    newSource.balance += newTxCandidate.amount;
   } else if (newTxCandidate.type === 'TRANSFER') {
     const newDest = simulatedWallets.find((w) => w.id === newTxCandidate.toWalletId);
     if (!newDest) {

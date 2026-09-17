@@ -141,6 +141,7 @@ export const QuickAddModal: React.FC = () => {
   };
 
   const filteredCategories = categories.filter((c) => c.type === (type === 'INCOME' ? 'INCOME' : 'EXPENSE'));
+  const selectableWallets = type === 'INCOME' ? wallets.filter((w) => w.type !== 'CREDIT') : wallets;
 
   return (
     <div className="fixed inset-0 z-50 flex items-end lg:items-center justify-center bg-black/60 backdrop-blur-sm overflow-hidden">
@@ -186,6 +187,11 @@ export const QuickAddModal: React.FC = () => {
                 setType('INCOME');
                 const cat = categories.find((c) => c.type === 'INCOME');
                 if (cat) setCategoryId(cat.id);
+                const currentW = wallets.find((w) => w.id === walletId);
+                if (currentW?.type === 'CREDIT') {
+                  const nonCredit = wallets.find((w) => w.type !== 'CREDIT');
+                  if (nonCredit) setWalletId(nonCredit.id);
+                }
               }}
               className={`py-2.5 text-sm font-semibold rounded-lg transition-all ${
                 type === 'INCOME'
@@ -261,7 +267,7 @@ export const QuickAddModal: React.FC = () => {
                 onChange={(e) => setWalletId(e.target.value)}
                 className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm"
               >
-                {wallets.map((w) => (
+                {selectableWallets.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name} ({new Intl.NumberFormat('vi-VN').format(w.balance)} ₫)
                   </option>
