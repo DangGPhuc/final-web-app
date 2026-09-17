@@ -81,7 +81,6 @@ export const WalletsView: React.FC = () => {
       editWallet(editingWallet.id, {
         name: walletName,
         type: walletType,
-        balance: bal,
         bankName: walletType !== 'CASH' ? walletBankName : undefined,
         accountNumber: walletAccountNumber,
         creditLimit: walletType === 'CREDIT' ? limit : undefined,
@@ -371,13 +370,21 @@ export const WalletsView: React.FC = () => {
               <div>
                 <label className="block text-xs font-semibold text-slate-500 mb-1">
                   {walletType === 'CREDIT' ? 'Dư nợ hiện tại (VNĐ)' : 'Số dư hiện tại (VNĐ)'}
+                  {editingWallet && (
+                    <span className="ml-1.5 text-[10px] font-normal text-amber-600 dark:text-amber-400">
+                      (Không thể sửa trực tiếp - số dư quản lý qua giao dịch)
+                    </span>
+                  )}
                 </label>
                 <input
                   type="number"
                   value={walletBalance}
                   onChange={(e) => setWalletBalance(e.target.value)}
+                  disabled={!!editingWallet}
                   placeholder="0"
-                  className="w-full text-xl font-bold px-4 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl dark:text-white"
+                  className={`w-full text-xl font-bold px-4 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl dark:text-white ${
+                    editingWallet ? 'opacity-60 cursor-not-allowed bg-slate-100 dark:bg-slate-800/50' : ''
+                  }`}
                 />
               </div>
 

@@ -902,3 +902,47 @@ export function applyDeleteWallet(state: AppDomainState, walletId: string): Doma
     },
   };
 }
+
+/**
+ * Edit an existing wallet's metadata safely:
+ * - Allows updates to metadata: name, bankName, accountNumber, color, icon, creditLimit, interestRate, isExcludedFromTotal
+ * - Invariant: Existing wallet balance cannot be arbitrarily changed through normal wallet editing.
+ *   Balances are strictly managed through transactions/ledger entries.
+ */
+export function applyEditWallet(
+  state: AppDomainState,
+  walletId: string,
+  updates: Partial<Wallet>
+): DomainResult<{ state: AppDomainState; updatedWallet: Wallet }> {
+  const wallet = state.wallets.find((w) => w.id === walletId);
+  if (!wallet) {
+    return { ok: false, error: 'Không tìm thấy ví cần chỉnh sửa' };
+  }
+
+  // Strictly preserve existing balance and initialBalance
+  const {
+    balance: _ignoredBalance,
+    initialBalance: _ignoredInitialBalance,
+    id: _ignoredId,
+    createdAt: _ignoredCreatedAt,
+    type: updatedType,
+    ...metadataUpdates
+  } = updates;
+
+  const updatedWallet: Wallet = {
+    ...wallet,
+    ...metadataUpdates,
+    type: updatedType || wallet.type,
+    balance: wallet.balance, // Strictly preserved
+    initialBalance: wallet.initialBalance, // Strictly preserved
+  };
+
+  return {
+    ok: true,
+    state: {
+      ...state,
+      wallets: state.wallets.map((w) => (w.id === walletId ? updatedWallet : w)),
+    },
+    updatedWallet,
+  };
+}

@@ -10,6 +10,7 @@ import {
   applyPayBill,
   applyUnpayBill,
   applyDeleteWallet,
+  applyEditWallet,
   validateTransferFee,
   AppDomainState,
 } from '../src/lib/domain-engine';
@@ -968,5 +969,50 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     if (res.ok) {
       expect(res.state.goals.some((g) => g.id === 'goal-unused')).toBe(false);
     }
+  });
+
+  // =========================================================================
+  // CASE O — Existing Wallet Balance Cannot Be Arbitrarily Edited
+  // =========================================================================
+  it('CASE O — Existing Wallet Balance Cannot Be Arbitrarily Edited: balance remains 10M, metadata changes allowed', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-edit-test',
+          name: 'Tài khoản Chi tiêu',
+          type: 'BANK',
+          balance: 10000000,
+          initialBalance: 10000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          bankName: 'Vietcombank',
+          accountNumber: '123456',
+          createdAt: '2026-01-01',
+        },
+      ],
+    });
+
+    // Attempt to edit wallet including balance = 999M and metadata changes
+    const editRes = applyEditWallet(state, 'wal-edit-test', {
+      name: 'Tài khoản Chi tiêu Đổi Tên',
+      color: '#ef4444',
+      accountNumber: '999999',
+      balance: 999000000, // Attempting to arbitrarily set 999M
+    } as Partial<Wallet>);
+
+    expect(editRes.ok).toBe(true);
+    if (!editRes.ok) return;
+
+    const editedWallet = editRes.state.wallets.find((w) => w.id === 'wal-edit-test');
+    expect(editedWallet).toBeDefined();
+    // Invariant check: balance MUST remain 10M
+    expect(editedWallet?.balance).toBe(10000000);
+    expect(editedWallet?.initialBalance).toBe(10000000);
+
+    // Metadata changes MUST be applied
+    expect(editedWallet?.name).toBe('Tài khoản Chi tiêu Đổi Tên');
+    expect(editedWallet?.color).toBe('#ef4444');
+    expect(editedWallet?.accountNumber).toBe('999999');
   });
 });

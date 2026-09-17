@@ -32,6 +32,7 @@ import {
   applyPayBill,
   applyUnpayBill,
   applyDeleteWallet,
+  applyEditWallet,
   validateTransferFee,
 } from '@/lib/domain-engine';
 import { getCurrentYearMonth } from '@/lib/utils';
@@ -204,13 +205,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const editWallet = (id: string, updated: Partial<Wallet>) => {
-    setWallets((prev) =>
-      prev.map((w) => {
-        if (w.id !== id) return w;
-        const bal = updated.balance !== undefined && isFinite(updated.balance) ? updated.balance : w.balance;
-        return { ...w, ...updated, balance: bal };
-      })
-    );
+    const res = applyEditWallet({ wallets, transactions, goals, bills }, id, updated);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setWallets(res.state.wallets);
   };
 
   const deleteWallet = (id: string) => {
