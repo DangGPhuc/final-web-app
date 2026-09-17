@@ -395,12 +395,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const wallet = wallets.find((w) => w.id === walletId);
     if (!goal || !wallet) return;
 
-    // Deduct from wallet
-    setWallets((prev) =>
-      prev.map((w) => (w.id === walletId ? { ...w, balance: w.balance - amount } : w))
-    );
-
-    // Add to goal
+    // Add to goal history & update current amount
     const newHistoryItem = {
       id: `gh-${Date.now()}`,
       date: new Date().toISOString().split('T')[0],
@@ -422,7 +417,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       )
     );
 
-    // Log transaction
+    // addTransaction is the single authoritative mutator for wallet balance (-amount)
     addTransaction({
       type: 'EXPENSE',
       amount,
@@ -440,11 +435,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const goal = goals.find((g) => g.id === goalId);
     const wallet = wallets.find((w) => w.id === walletId);
     if (!goal || !wallet) return;
-
-    // Add back to wallet
-    setWallets((prev) =>
-      prev.map((w) => (w.id === walletId ? { ...w, balance: w.balance + amount } : w))
-    );
 
     // Deduct from goal
     const newHistoryItem = {
@@ -468,7 +458,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       )
     );
 
-    // Log income transaction
+    // addTransaction is the single authoritative mutator for wallet balance (+amount)
     addTransaction({
       type: 'INCOME',
       amount,
