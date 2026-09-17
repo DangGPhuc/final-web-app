@@ -26,7 +26,7 @@ import { formatCurrency } from '@/lib/utils';
 import { IconHelper } from './IconHelper';
 
 export const BillsView: React.FC = () => {
-  const { bills, wallets, categories, addBill, editBill, deleteBill, payBill } = useApp();
+  const { bills, wallets, categories, addBill, editBill, deleteBill, payBill, unpayBill } = useApp();
 
   const [billModalOpen, setBillModalOpen] = useState(false);
   const [editingBill, setEditingBill] = useState<RecurringBill | null>(null);
@@ -265,10 +265,12 @@ export const BillsView: React.FC = () => {
                   ) : (
                     <button
                       onClick={() => {
-                        editBill(bill.id, { status: 'UNPAID', lastPaidDate: undefined });
+                        if (confirm(`Xác nhận hoàn tác thanh toán hóa đơn "${bill.name}"? Số tiền sẽ được hoàn về ví và giao dịch thanh toán sẽ được xóa.`)) {
+                          unpayBill(bill.id);
+                        }
                       }}
                       className="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-medium transition-colors"
-                      title="Đặt lại chưa thanh toán"
+                      title="Đặt lại chưa thanh toán và hoàn tiền ví"
                     >
                       <RotateCcw className="w-3.5 h-3.5 inline mr-1" />
                       <span>Đặt lại</span>

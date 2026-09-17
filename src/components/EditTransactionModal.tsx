@@ -66,7 +66,14 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
     }
   };
 
+  const isSystemTx = transaction.origin === 'GOAL' || transaction.origin === 'BILL_PAYMENT';
+
   const handleSave = () => {
+    if (isSystemTx) {
+      alert('Không thể chỉnh sửa trực tiếp giao dịch tự động của hệ thống (Hũ tích lũy / Hóa đơn).');
+      return;
+    }
+
     if (!amount || amount <= 0) {
       alert('Vui lòng nhập số tiền hợp lệ');
       return;
@@ -96,6 +103,11 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
   };
 
   const handleDelete = () => {
+    if (isSystemTx) {
+      alert('Không thể xóa trực tiếp giao dịch tự động của hệ thống (Hũ tích lũy / Hóa đơn).');
+      return;
+    }
+
     if (confirm('Bạn có chắc chắn muốn xóa giao dịch này? Số dư ví sẽ được tự động hoàn tác.')) {
       deleteTransaction(transaction.id);
       onClose();
@@ -119,6 +131,12 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
         </div>
 
         <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
+          {isSystemTx && (
+            <div className="p-3.5 bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 rounded-xl text-xs text-amber-900 dark:text-amber-200">
+              <strong>Giao dịch tự động của hệ thống:</strong> Giao dịch này liên kết với{' '}
+              {transaction.origin === 'GOAL' ? 'Hũ tích lũy' : 'Hóa đơn định kỳ'}. Để bảo toàn tính toàn vẹn tài chính, giao dịch không thể chỉnh sửa hoặc xóa trực tiếp từ sổ giao dịch. Vui lòng thao tác từ mục tương ứng.
+            </div>
+          )}
           {/* Type Selector */}
           <div className="grid grid-cols-3 gap-2 bg-slate-100 dark:bg-slate-800/60 p-1.5 rounded-xl">
             <button
@@ -314,8 +332,13 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
         <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50">
           <button
             type="button"
+            disabled={isSystemTx}
             onClick={handleDelete}
-            className="flex items-center space-x-1.5 px-4 py-2.5 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-xl font-medium text-sm transition-colors"
+            className={`flex items-center space-x-1.5 px-4 py-2.5 rounded-xl font-medium text-sm transition-colors ${
+              isSystemTx
+                ? 'text-slate-400 cursor-not-allowed opacity-50'
+                : 'text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40'
+            }`}
           >
             <Trash2 className="w-4 h-4" />
             <span>Xóa giao dịch</span>
@@ -327,12 +350,17 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
               onClick={onClose}
               className="px-4 py-2.5 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-xl font-medium text-sm transition-colors"
             >
-              Hủy
+              Đóng
             </button>
             <button
               type="button"
+              disabled={isSystemTx}
               onClick={handleSave}
-              className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl text-sm transition-colors shadow-sm"
+              className={`px-5 py-2.5 font-medium rounded-xl text-sm transition-colors shadow-sm ${
+                isSystemTx
+                  ? 'bg-slate-400 text-white cursor-not-allowed opacity-50'
+                  : 'bg-blue-600 hover:bg-blue-700 text-white'
+              }`}
             >
               Lưu thay đổi
             </button>

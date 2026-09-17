@@ -442,9 +442,27 @@ export const TransactionsView: React.FC = () => {
                         <div className="flex items-center space-x-2">
                           <span className="font-bold text-sm text-slate-900 dark:text-white truncate">
                             {tx.type === 'TRANSFER'
-                              ? `Chuyển sang: ${tx.toWalletName || 'Ví'}`
+                              ? tx.transferKind === 'GOAL_DEPOSIT'
+                                ? `Tích lũy: ${tx.goalName || 'Mục tiêu'}`
+                                : tx.transferKind === 'GOAL_WITHDRAWAL'
+                                ? `Rút từ hũ: ${tx.goalName || 'Mục tiêu'}`
+                                : tx.transferKind === 'CREDIT_PAYMENT'
+                                ? `Thanh toán thẻ: ${tx.toWalletName || 'Thẻ tín dụng'}`
+                                : `Chuyển sang: ${tx.toWalletName || 'Ví'}`
                               : tx.categoryName || 'Khác'}
                           </span>
+
+                          {/* Origin Badges */}
+                          {tx.origin === 'GOAL' && (
+                            <span className="px-1.5 py-0.5 bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 rounded text-[10px] font-bold border border-amber-200 dark:border-amber-800">
+                              Hũ tích lũy
+                            </span>
+                          )}
+                          {tx.origin === 'BILL_PAYMENT' && (
+                            <span className="px-1.5 py-0.5 bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 rounded text-[10px] font-bold border border-purple-200 dark:border-purple-800">
+                              Hóa đơn
+                            </span>
+                          )}
 
                           {/* Receipt Badge */}
                           {tx.receiptImage && (
@@ -513,24 +531,35 @@ export const TransactionsView: React.FC = () => {
 
                       {/* Edit / Delete Buttons */}
                       <div className="flex items-center space-x-1 opacity-80 sm:opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={() => setTransactionToEdit(tx)}
-                          className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg transition-colors"
-                          title="Chỉnh sửa giao dịch"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (confirm('Xác nhận xóa giao dịch này? Số dư ví sẽ được tự động hoàn lại.')) {
-                              deleteTransaction(tx.id);
-                            }
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors"
-                          title="Xóa giao dịch"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {tx.origin === 'GOAL' || tx.origin === 'BILL_PAYMENT' ? (
+                          <span
+                            className="px-2 py-1 text-[11px] text-slate-400 dark:text-slate-500 italic bg-slate-100 dark:bg-slate-800 rounded-lg cursor-not-allowed"
+                            title={`Giao dịch tự động liên kết với ${tx.origin === 'GOAL' ? 'Hũ tích lũy' : 'Hóa đơn'}. Vui lòng thao tác từ mục ${tx.origin === 'GOAL' ? 'Hũ tích lũy' : 'Hóa đơn'}.`}
+                          >
+                            Tự động ({tx.origin === 'GOAL' ? 'Hũ' : 'Hóa đơn'})
+                          </span>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => setTransactionToEdit(tx)}
+                              className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg transition-colors"
+                              title="Chỉnh sửa giao dịch"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (confirm('Xác nhận xóa giao dịch này? Số dư ví sẽ được tự động hoàn lại.')) {
+                                  deleteTransaction(tx.id);
+                                }
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors"
+                              title="Xóa giao dịch"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
