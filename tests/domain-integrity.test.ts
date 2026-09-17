@@ -10,6 +10,7 @@ import {
   applyEditGoal,
   applyPayBill,
   applyUnpayBill,
+  applyAddBill,
   applyEditBill,
   applyDeleteBill,
   applyDeleteWallet,
@@ -1694,5 +1695,166 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     if (!editCreditSourceRes.ok) {
       expect(editCreditSourceRes.error).toMatch(/từ thẻ tín dụng/i);
     }
+  });
+
+  // =========================================================================
+  // CASE AA — Bill Data Structural Validation
+  // =========================================================================
+  it('CASE AA — Bill Data Structural Validation: rejects non-positive amount, invalid dueDay, frequency, or empty name', () => {
+    const state = createMockState({ bills: [] });
+
+    // 1. Rejects empty bill name
+    const resEmptyName = applyAddBill(state, {
+      name: '   ',
+      amount: 500000,
+      categoryId: 'cat-bills',
+      dueDay: 15,
+      frequency: 'MONTHLY',
+    });
+    expect(resEmptyName.ok).toBe(false);
+
+    // 2. Rejects negative or zero amount
+    const resZeroAmount = applyAddBill(state, {
+      name: 'Internet',
+      amount: 0,
+      categoryId: 'cat-bills',
+      dueDay: 15,
+      frequency: 'MONTHLY',
+    });
+    expect(resZeroAmount.ok).toBe(false);
+
+    const resNaN = applyAddBill(state, {
+      name: 'Internet',
+      amount: NaN,
+      categoryId: 'cat-bills',
+      dueDay: 15,
+      frequency: 'MONTHLY',
+    });
+    expect(resNaN.ok).toBe(false);
+
+    // 3. Rejects invalid dueDay (0, 32, float)
+    const resDue0 = applyAddBill(state, {
+      name: 'Internet',
+      amount: 300000,
+      categoryId: 'cat-bills',
+      dueDay: 0,
+      frequency: 'MONTHLY',
+    });
+    expect(resDue0.ok).toBe(false);
+
+    const resDue32 = applyAddBill(state, {
+      name: 'Internet',
+      amount: 300000,
+      categoryId: 'cat-bills',
+      dueDay: 32,
+      frequency: 'MONTHLY',
+    });
+    expect(resDue32.ok).toBe(false);
+
+    const resDueFloat = applyAddBill(state, {
+      name: 'Internet',
+      amount: 300000,
+      categoryId: 'cat-bills',
+      dueDay: 15.5,
+      frequency: 'MONTHLY',
+    });
+    expect(resDueFloat.ok).toBe(false);
+
+    // 4. Rejects invalid frequency
+    const resFreq = applyAddBill(state, {
+      name: 'Internet',
+      amount: 300000,
+      categoryId: 'cat-bills',
+      dueDay: 15,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      frequency: 'WEEKLY' as any,
+    });
+    expect(resFreq.ok).toBe(false);
+  });
+
+  // =========================================================================
+  // CASE BB — Credit Limit Edits Validation
+  // =========================================================================
+  it('CASE BB — Credit Limit Edits Validation: rejects zero, negative, NaN or Infinity creditLimit and negative interest', () => {
+    const state = createMockState({
+      wallets: [
+        {
+          id: 'wal-credit-bb',
+          name: 'Thẻ BB',
+          type: 'CREDIT',
+          balance: 2000000, // debt = 2M
+          initialBalance: 2000000,
+          creditLimit: 10000000,
+          currency: 'VND',
+          color: '#8b5cf6',
+          icon: 'CreditCard',
+          createdAt: '2026-01-01',
+        },
+        {
+          id: 'wal-savings-bb',
+          name: 'Sổ BB',
+          type: 'SAVINGS',
+          balance: 5000000,
+          initialBalance: 5000000,
+          interestRate: 6.0,
+          currency: 'VND',
+          color: '#f59e0b',
+          icon: 'PiggyBank',
+          createdAt: '2026-01-01',
+        },
+      ],
+    });
+
+    // 1. creditLimit <= 0
+    const resZero = applyEditWallet(state, 'wal-credit-bb', { creditLimit: 0 });
+    expect(resZero.ok).toBe(false);
+
+    // 2. creditLimit is NaN
+    const resNaN = applyEditWallet(state, 'wal-credit-bb', { creditLimit: NaN });
+    expect(resNaN.ok).toBe(false);
+
+    // 3. creditLimit is Infinity
+    const resInf = applyEditWallet(state, 'wal-credit-bb', { creditLimit: Infinity });
+    expect(resInf.ok).toBe(false);
+
+    // 4. negative SAVINGS interest rate
+    const resNegInt = applyEditWallet(state, 'wal-savings-bb', { interestRate: -2.5 });
+    expect(resNegInt.ok).toBe(false);
+  });
+
+  // =========================================================================
+  // CASE CC — Unpaid Bill Valid Edit Succeeds
+  // =========================================================================
+  it('CASE CC — Unpaid Bill Valid Edit Succeeds: UNPAID bill can update name, amount, dueDay, and frequency', () => {
+    const state = createMockState({
+      bills: [
+        {
+          id: 'bill-cc',
+          name: 'Tiền Nước CC',
+          amount: 200000,
+          categoryId: 'cat-bills',
+          dueDay: 10,
+          frequency: 'MONTHLY',
+          status: 'UNPAID',
+        },
+      ],
+    });
+
+    const editRes = applyEditBill(state, 'bill-cc', {
+      name: 'Tiền Nước Sinh Hoạt Mới',
+      amount: 250000,
+      dueDay: 25,
+      frequency: 'QUARTERLY',
+    });
+
+    expect(editRes.ok).toBe(true);
+    if (!editRes.ok) return;
+
+    const updated = editRes.state.bills.find((b) => b.id === 'bill-cc');
+    expect(updated?.name).toBe('Tiền Nước Sinh Hoạt Mới');
+    expect(updated?.amount).toBe(250000);
+    expect(updated?.dueDay).toBe(25);
+    expect(updated?.frequency).toBe('QUARTERLY');
+    expect(updated?.status).toBe('UNPAID');
   });
 });
