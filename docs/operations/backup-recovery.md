@@ -84,9 +84,44 @@ Financial data cannot be recreated from memory. The core storage engine enforces
 
 ---
 
-## 4. Future Backend Recovery Architecture (PostgreSQL)
+## 4. PostgreSQL Database-Level Restore Drill & Limitations
 
-When migrating to a persistent database:
-- **Automated Daily Backups**: Managed pg_dump exports retained for 30 days.
-- **Point-in-Time Recovery (PITR)**: Write-ahead log (WAL) archiving enabling recovery to any second within a 7-day window.
-- **Geo-redundant Storage**: Encrypted backup copies mirrored to a secondary region.
+> [!IMPORTANT]
+> **Database-Level Restore Only**: FinTrack's automated drill (`scripts/backup-restore-drill.sh`) performs a **Database-Level Logical Restore**, not a fresh-cluster disaster recovery. PostgreSQL `pg_dump` exports schema and table objects for a specific database but **DOES NOT serialize cluster-wide global objects** such as roles (`pg_roles`).
+> On a newly instantiated, blank PostgreSQL cluster/container, disaster recovery procedures MUST first run the version-controlled migration/bootstrap scripts (`001_backend_foundation.sql` through `003_backend_deployment_closure.sql`) to provision the cluster-level roles (`fintrack_runtime`, `fintrack_app_login`) before restoring database dumps.
+
+### Security Invariants Validated on Restore
+Every logical restore drill verifies:
+1. **Cluster Role Dependency**: Validates that backup files do not contain cluster-global role declarations, requiring operator bootstrap.
+2. **Mandatory Row-Level Security**: Verifies that `relrowsecurity = true` AND `relforcerowsecurity = true` (FORCE RLS) on **all 6 security tables**:
+   - `fintrack.sessions`
+   - `fintrack.wallets`
+   - `fintrack.transfers`
+   - `fintrack.idempotency`
+   - `fintrack.audit_events`
+   - `fintrack.rate_limits`
+3. **Tenant Data Isolation**: Verifies that restoring preserves row security by executing queries under `fintrack_runtime` for separate tenants (Alice vs. Bob) and asserting zero cross-tenant leakage.
+4. **Login Privilege Sandboxing**: Connects as `fintrack_app_login`, executes `SET LOCAL ROLE fintrack_runtime`, sets `app.session_hash`, and asserts `current_session_user_id()` correctly resolves.
+5. **Ledger & Audit Parity**: Validates account balances match the cumulative transfer ledger and all transfer mutations correlate with a valid `request_id` in `fintrack.audit_events`.
+
+---
+
+## 5. Storage Growth & Retention Policies
+
+| Table | Nature | Retention Policy | Maintenance Purge | Notes |
+|---|---|---|---|---|
+| `transfers` | Durable Ledger | Permanent (Indefinite) | **NEVER** | Immutable financial double-entry transaction history. Must NEVER be deleted merely to reduce storage. |
+| `audit_events` | Durable Compliance | Permanent (Indefinite) | **NEVER** | Security audit trail correlating mutations with `request_id` and actor. Retained for compliance. |
+| `idempotency` | Mutation Dedup | Minimum 7 days | Yes (> 8 days) | Guaranteed public retention is at least 7 days. Operator cleanup purges records older than 8 days to prevent boundary races. |
+| `sessions` | Auth State | 30 days post-expiry | Yes (> 30 days) | Expired or revoked sessions retained for 30 days for forensic investigation, then purged. |
+| `rate_limits` | Traffic Throttling | Transient / Bounded | Yes | In-memory/database counters partitioned by minute buckets. Kept strictly bounded. |
+
+### Operational Maintenance Automation
+Operator maintenance tasks are executed via:
+```bash
+DATABASE_MAINTENANCE_URL=postgresql://fintrack_admin:.../fintrack node scripts/backend-maintenance.mjs
+```
+- **Operator-Only Authentication**: Refuses to run if connected as application roles (`fintrack_app_login` or `fintrack_runtime`).
+- **Zero Token Leaks**: Sessions are deleted without `RETURNING token_hash`.
+- **Atomic Operations**: Deletions execute within batched transactions reporting purged row counts only.
+

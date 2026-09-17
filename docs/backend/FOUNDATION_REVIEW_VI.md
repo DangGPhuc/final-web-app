@@ -1,11 +1,11 @@
-# FinTrack — review và backend foundation V2 (Security Hardened)
+# FinTrack — review và backend foundation V2 (Deployment & Security Closure)
 
 ## Kết luận và phạm vi
 
-Bản đầu vào: ZIP `final-web-app-backend-foundation-v2.zip`, branch `feature/backend-foundation-v2` (SHA baseline `746e5cd1812d1fe6a30704d741db53fc3992c512`).
-Branch thực hiện hardening: `fix/backend-security-hardening-v2`.
+Bản đầu vào: Branch `fix/backend-security-hardening-v2` (SHA baseline `6b549bb706e48f9288b1b5739feaa8ee3d31098f`).
+Branch thực hiện closure: `fix/backend-deployment-closure-v2`.
 
-Iteration này hoàn thành đợt hardening bảo mật toàn diện cho backend foundation trước khi tích hợp authentication người dùng thật và cutover frontend.
+Iteration này hoàn thành đợt đóng toàn diện các vấn đề triển khai và vòng đời bảo mật (Backend Deployment & Security Closure) trước khi thực hiện OAuth/Identity provider, chuyển đổi frontend sang PostgreSQL, API tài chính toàn diện và private object storage.
 
 > [!IMPORTANT]
 > **Ranh giới kiến trúc & Frontend**:
@@ -16,67 +16,46 @@ Iteration này hoàn thành đợt hardening bảo mật toàn diện cho backen
 
 ---
 
-## Các cải tiến bảo mật đã hoàn thành (Security Hardening Iteration)
+## Bảng tổng hợp các cải tiến triển khai & bảo mật (Deployment & Security Closure)
 
-| Hạng mục | Vấn đề trước đây | Giải pháp đã triển khai (Hardened) | Trạng thái |
+| Hạng mục | Vấn đề trước đây | Giải pháp đã triển khai (Closure) | Trạng thái |
 |---|---|---|---|
-| **RLS Trust Root** | RLS tin cậy `app.user_id` (có thể bị giả mạo nếu có SQL injection) | Chuyển hoàn toàn sang `fintrack.current_session_user_id()` tra cứu từ `app.session_hash` (high-entropy secret). `app.user_id` bị loại bỏ và có ZERO tác dụng phân quyền. | **IMPLEMENTED** |
-| **Legacy Demo APIs** | `/api/*` và `/api/simulation/what-if` vẫn mở ở production | Tắt toàn bộ route `/api/*` ở `NODE_ENV=production` (trả về HTTP 404). `ENABLE_DEMO_API=true` bị vô hiệu hóa hoàn toàn ở production. | **IMPLEMENTED** |
-| **Rate Limit Storage** | Bảng `rate_limits` phình to vô hạn theo từng phút (unbounded rows) | Thiết kế lại bảng với khóa chính `(user_id, scope)`. Reset bucket/hits tại chỗ; số dòng luôn cố định ở mức tối đa 1 dòng/user/scope. Bổ sung các scope nghiệp vụ: `global` (60/phút), `wallet:create` (10/phút), `transfer:create` (20/phút). | **IMPLEMENTED** |
-| **Quota tài nguyên ví** | Người dùng có thể tạo không giới hạn ví | Giới hạn tối đa `MAX_WALLETS_PER_USER = 100`. Kiểm tra an toàn đồng thời bằng advisory transaction lock `${user}:wallet-create`; trả về mã lỗi chuẩn `WALLET_LIMIT_REACHED` (422). | **IMPLEMENTED** |
-| **Logout & Revocation** | Chưa có cơ chế thu hồi session đã cấp | Thêm `POST /api/v2/session/logout`. Cấp quyền tối thiểu `UPDATE(revoked_at)` cho `fintrack_runtime` chỉ trên chính session hiện tại qua RLS `session_revoke`. Xóa cookie `__Host-fintrack_session` (`Max-Age=0`, `HttpOnly`, `Secure`, `SameSite=Lax`, không Domain). Đặt khóa hàng `FOR SHARE` trong mutation để xung đột an toàn với logout. | **IMPLEMENTED** |
-| **Audit Traceability** | Bảng `audit_events` thiếu request ID | Bổ sung cột `request_id uuid` vào `fintrack.audit_events`, đồng bộ với header response `X-Request-Id` để phục vụ đối soát và hỗ trợ người dùng mà không lưu payload nhạy cảm. | **IMPLEMENTED** |
-| **Migration Discipline** | Cần cập nhật schema có kiểm soát | Giữ nguyên `001_backend_foundation.sql`. Bổ sung `002_backend_security_hardening.sql`. Kiểm thử CI cả clean install và kịch bản nâng cấp 001 → 002. | **IMPLEMENTED** |
-| **Idempotency Policy** | Bản ghi idempotency không hết hạn, chưa rõ hợp đồng | Bổ sung index `(user_id, created_at)`. Xác lập hợp đồng cam kết: Idempotency keys được đảm bảo 7 ngày. Quá hạn 7 ngày bản ghi được dọn dẹp bởi tác vụ vận hành out-of-band. Thêm hàm query monitoring theo user. | **IMPLEMENTED** |
-| **Session Maintenance** | Dòng session hết hạn/bị thu hồi tích tụ vô hạn | Tạo kịch bản vận hành `scripts/session-maintenance.mjs` dọn dẹp các session đã hết hạn/thu hồi > 30 ngày (cửa sổ forensic audit). Yêu cầu operator credential, cấm chạy bằng `fintrack_runtime`. | **IMPLEMENTED** |
-| **Production HSTS** | Thiếu HSTS header ở production | Cấu hình `Strict-Transport-Security: max-age=31536000` trong `next.config.mjs` khi `!isDev`. Không thêm `includeSubDomains`. | **IMPLEMENTED** |
-| **Supply Chain Hardening** | Actions và container image dùng mutable tag | Ghim các GitHub Actions về full commit SHA 40 ký tự. Ghim image PostgreSQL 17 về official release digest `postgres:17.4-alpine@sha256:7062a2109c4b51f3c792c7ea01e83ed12ef9a980886e3b3d380a7d2e5f6ce3f5`. Cấu hình `.github/dependabot.yml`. Chạy cả dual audit (prod và dev). | **IMPLEMENTED** |
-| **Static Security Analysis**| Chưa có workflow SAST tự động | Thiết lập GitHub CodeQL workflow `.github/workflows/codeql.yml` với quyền tối thiểu và ghim commit SHA. Hướng dẫn quét secret bằng GitHub Secret Scanning hoặc `gitleaks`. | **IMPLEMENTED** |
-| **Backup / Restore Drill** | Hướng dẫn backup chỉ là lý thuyết trên giấy | Xây dựng kịch bản tự động `scripts/backup-restore-drill.sh` chạy trong CI: tạo dữ liệu, dump, restore vào DB sạch `fintrack_restore`, xác thực số dư, ledger, và trạng thái FORCE RLS. | **PARTIAL** (Logical drill xong; PITR production thuộc hạ tầng triển khai) |
+| **Database Role Model** | `fintrack_runtime` có thuộc tính `NOLOGIN`, mâu thuẫn với `DATABASE_URL` thực tế | Tách bạch 2 role: `fintrack_app_login` (`LOGIN`, `NOINHERIT`, `NOSUPERUSER`, không có quyền trực tiếp trên bảng) dùng cho `DATABASE_URL`. Sau `BEGIN`, pool thực hiện `SET LOCAL ROLE fintrack_runtime` để thực thi RLS. Truy vấn trực tiếp từ login role bị từ chối fail-closed. | **IMPLEMENTED** |
+| **Success-Only Logout Cookie** | Cookie bị xóa (`Max-Age=0`) ngay cả khi request lỗi (401, 403 INVALID_ORIGIN, 429, DB error) | Tách biệt `commonHeaders`, `successHeaders`, và `errorHeaders` trong `src/server/http.ts`. `Set-Cookie` xóa session chỉ được gắn khi `revokeCurrentSession()` commit thành công. HTTP status trả về 200. | **IMPLEMENTED** |
+| **Stacked Rate Limiting** | Mỗi request chỉ tiêu thụ một scope đơn lẻ (global không bao trùm các route nhạy cảm) | Mọi request API đã xác thực bắt buộc tiêu thụ scope `global` (60/phút). Các thao tác nhạy cảm tiêu thụ thêm scope nghiệp vụ riêng (`wallet:create`, `transfer:create`). Vượt bất kỳ hạn mức nào đều bị chặn HTTP 429. | **IMPLEMENTED** |
+| **Daily Transfer Quota** | `transfer:create` (20/phút) vẫn cho phép hàng chục ngàn transaction/ngày từ 1 user | Bổ sung hạn ngạch ngày `MAX_TRANSFERS_PER_USER_PER_DAY` (mặc định 1000/ngày theo UTC). Khóa concurrency-safe bằng advisory transaction lock `${user}:transfer-daily:${utcDate}`; trả về `TRANSFER_DAILY_LIMIT_REACHED` (422). | **IMPLEMENTED** |
+| **Idempotency Retention** | Cam kết 7 ngày nhưng không có công cụ dọn dẹp thực tế | Xây dựng script vận hành `scripts/backend-maintenance.mjs` dọn dẹp bản ghi idempotency quá 8 ngày (bảo vệ cam kết 7 ngày khỏi race condition tại biên) và session hết hạn quá 30 ngày. | **IMPLEMENTED** |
+| **Maintenance Credential Safety** | Script dọn dẹp fallback về `DATABASE_URL` của ứng dụng | Xóa bỏ hoàn toàn fallback. Yêu cầu bắt buộc `DATABASE_MAINTENANCE_URL` (hoặc `DATABASE_ADMIN_URL`). Từ chối chạy dưới các role ứng dụng (`fintrack_app_login`, `fintrack_runtime`). Không log `token_hash`. | **IMPLEMENTED** |
+| **Audit Traceability** | `request_id` có thể null; repository mutation nhận `requestId?: string` | Chuyển `requestId: string` thành tham số bắt buộc trong repository; validate định dạng UUID hợp lệ trước khi ghi audit trail. | **IMPLEMENTED** |
+| **Migration Integrity** | Không có cơ chế kỹ thuật ngăn chặn sửa đổi file migration cũ | Xây dựng `scripts/migrate.mjs` lưu trữ và xác thực SHA-256 checksum trong bảng `fintrack.schema_migrations`. Tự động từ chối (fail-closed) nếu phát hiện migration đã áp dụng bị sửa đổi. | **IMPLEMENTED** |
+| **Real PostgreSQL Upgrade Test** | Kiểm thử nâng cấp migration trước đây dùng PGlite | Xây dựng test case kiểm thử trực tiếp trên PostgreSQL 17 thật: áp dụng tuần tự 001 → seed data → 002 → 003, xác thực schema invariants, balances, roles, RLS, và audit request IDs. | **IMPLEMENTED** |
+| **Backup & Restore Drill** | Diễn tập trên cùng cluster che giấu việc thiếu global roles | Ghi chú rõ đây là **Database-Level Logical Restore**, không phải Fresh-Cluster DR (vì `pg_dump` không chứa `pg_roles`). Bổ sung kiểm tra ENABLE + FORCE RLS trên cả 6 bảng bảo mật, kiểm thử tenant isolation sau phục hồi. | **IMPLEMENTED** |
+| **Secret Scanning Gate** | CodeQL không quét secret; chưa có CI gate thực tế | Thiết lập workflow Gitleaks `.github/workflows/secret-scan.yml` với action được ghim commit SHA 40 ký tự. | **IMPLEMENTED** |
+| **Logging vs Alerting** | Tài liệu chưa phân định giữa log và cảnh báo vận hành | Cập nhật tài liệu: Structured Logging đã IMPLEMENTED; Centralized Alerting/Thresholds là PARTIAL / PLANNED. | **IMPLEMENTED** |
 
 ---
 
-## Chi tiết kỹ thuật & Hợp đồng bảo mật
+## Chi tiết kiến trúc Role Deployment Model
 
-### 1. Cơ chế RLS không tin cậy `app.user_id`
-
-```sql
-CREATE OR REPLACE FUNCTION fintrack.current_session_user_id()
-RETURNS uuid
-LANGUAGE sql
-STABLE
-SECURITY INVOKER
-SET search_path = fintrack, pg_temp
-AS $$
-  SELECT user_id
-  FROM fintrack.sessions
-  WHERE token_hash = nullif(current_setting('app.session_hash', true), '')
-    AND revoked_at IS NULL
-    AND expires_at > now()
-  LIMIT 1;
-$$;
+```
+Production DATABASE_URL
+  └── postgresql://fintrack_app_login:PASSWORD@host/fintrack
+        │
+        ├── 1. Connects as session_user = 'fintrack_app_login' (NO direct table grants)
+        │
+        ├── 2. BEGIN transaction
+        │
+        ├── 3. SET LOCAL ROLE fintrack_runtime
+        │        ├── current_user becomes 'fintrack_runtime' (RLS role)
+        │        └── Sets app.session_hash
+        │
+        ├── 4. Business queries execute under fintrack_runtime with strict RLS
+        │
+        └── 5. COMMIT
 ```
 
-Các chính sách tenant trên các bảng nghiệp vụ:
-`USING (user_id = fintrack.current_session_user_id()) WITH CHECK (user_id = fintrack.current_session_user_id())`
-
-Khi người dùng gửi request, server chỉ thực hiện:
-`SELECT set_config('app.session_hash', $1, true)`
-Tuyệt đối không đặt `app.user_id`. Nếu attacker bằng bất kỳ cách nào thực thi `SET app.user_id = '<victim>'`, chính sách RLS vẫn không hề bị ảnh hưởng.
-
-### 2. Hợp đồng Idempotency (7 ngày)
-
-- **Retention**: Bản ghi idempotency được bảo lưu trong 7 ngày kể từ thời điểm tạo.
-- **Replay semantics**: Trong vòng 7 ngày, một request gửi kèm cùng `Idempotency-Key` và payload trùng khớp SHA-256 fingerprint sẽ nhận lại đúng kết quả đã xử lý lần đầu mà không thực thi lại mutation. Nếu gửi cùng key nhưng khác payload, hệ thống trả về HTTP `409 IDEMPOTENCY_CONFLICT`.
-- **Dọn dẹp**: Các bản ghi > 7 ngày được lưu trữ/xóa bởi tiến trình bảo trì hạ tầng, không xóa ngầm trong luồng HTTP của người dùng.
-
-### 3. Rate-limiting Bounded Table
-
-Khóa chính: `PRIMARY KEY (user_id, scope)`
-Một câu lệnh `INSERT ... ON CONFLICT (user_id, scope) DO UPDATE`:
-- Nếu bucket thay đổi (bước sang phút mới): `bucket = EXCLUDED.bucket, hits = 1`.
-- Nếu cùng bucket: tăng `hits = hits + 1` nếu `hits < limit`.
-- Không bao giờ sinh thêm dòng lịch sử mới. Dung lượng bảng tỉ lệ thuận trực tiếp với số lượng user hoạt động nhân với số scope cố định (tối đa 3 dòng/user).
+### Rủi ro tồn dư đã tài liệu hóa (Residual Risk Disclosure)
+Nếu xảy ra lỗ hổng SQL injection dưới quyền `fintrack_runtime`, cơ chế RLS ngăn chặn hoàn toàn việc đọc/ghi dữ liệu của tenant khác (cross-tenant confidentiality & integrity). Tuy nhiên, các bản ghi thuộc chính tenant của attacker vẫn có thể bị chỉnh sửa trong phạm vi quyền hạn được cấp cho `fintrack_runtime`. RLS không thay thế việc tham số hóa truy vấn an toàn (parameterized queries).
 
 ---
 
@@ -87,18 +66,24 @@ Một câu lệnh `INSERT ... ON CONFLICT (user_id, scope) DO UPDATE`:
 # Kiểm tra định kiểu
 npm run typecheck
 
-# Chạy toàn bộ test suite (mặc định PGlite)
+# Chạy toàn bộ test suite (bao gồm route integration & PGlite fallback)
 npm test
 
-# Chạy test suite bảo mật với PostgreSQL 17 thật
+# Chạy test suite bảo mật với PostgreSQL 17 thật (toàn bộ test O -> AD)
 DATABASE_TEST_URL=postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test npm run test:backend
 
 # Chạy diễn tập Backup & Restore tự động
-./scripts/backup-restore-drill.sh
+bash ./scripts/backup-restore-drill.sh
 ```
 
-### Chạy bảo trì Session hết hạn
+### Chạy Migration Runner (với Checksum Verification)
 ```bash
-DATABASE_MAINTENANCE_URL=postgresql://operator_user:PASSWORD@host:5432/fintrack node scripts/session-maintenance.mjs
+DATABASE_ADMIN_URL=postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test node scripts/migrate.mjs
 ```
-*(Lưu ý: Không được chạy script này dưới role `fintrack_runtime`)*.
+
+### Chạy bảo trì Session & Idempotency
+```bash
+DATABASE_MAINTENANCE_URL=postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test node scripts/backend-maintenance.mjs
+```
+*(Tuyệt đối từ chối chạy dưới role `fintrack_app_login` hoặc `fintrack_runtime`)*.
+
