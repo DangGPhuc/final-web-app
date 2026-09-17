@@ -626,8 +626,10 @@ export function applyGoalWithdraw(
 }
 
 /**
- * Delete a goal.
- * Invariant: Must NOT silently delete a goal whose currentAmount > 0.
+ * Delete a goal safely.
+ * Invariants:
+ * 1. Must NOT delete a goal whose currentAmount > 0.
+ * 2. Must NOT delete a goal that has financial transaction history (origin === 'GOAL' or goalId or goal.history).
  */
 export function applyDeleteGoal(state: AppDomainState, goalId: string): DomainResult<{ state: AppDomainState }> {
   const goal = state.goals.find((g) => g.id === goalId);
@@ -639,6 +641,18 @@ export function applyDeleteGoal(state: AppDomainState, goalId: string): DomainRe
     return {
       ok: false,
       error: 'Không thể xóa mục tiêu tích lũy khi số dư lớn hơn 0. Vui lòng rút hết tiền về ví trước khi xóa.',
+    };
+  }
+
+  const hasTxHistory = state.transactions.some(
+    (t) => (t.origin === 'GOAL' && t.originId === goalId) || t.goalId === goalId
+  );
+  const hasInternalHistory = Boolean(goal.history && goal.history.length > 0);
+
+  if (hasTxHistory || hasInternalHistory) {
+    return {
+      ok: false,
+      error: 'Goal has transaction history and cannot be permanently deleted. (Mục tiêu đã có lịch sử giao dịch, không thể xóa vĩnh viễn.)',
     };
   }
 

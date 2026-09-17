@@ -882,4 +882,91 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     expect(finalBill?.status).toBe('PAID');
     expect(stateAfterFailedUndo.transactions.some((t) => t.originId === 'bill-phone')).toBe(true);
   });
+
+  // =========================================================================
+  // CASE M — Goal With History Cannot Be Deleted
+  // =========================================================================
+  it('CASE M — Goal With History Cannot Be Deleted: goal with currentAmount === 0 but linked history rejected', () => {
+    const state = createMockState({
+      goals: [
+        {
+          id: 'goal-used',
+          name: 'Mua điện thoại',
+          targetAmount: 15000000,
+          currentAmount: 0, // Balance is currently 0
+          deadline: '2026-12-31',
+          color: '#10b981',
+          icon: 'Smartphone',
+          history: [
+            {
+              id: 'gh-1',
+              date: '2026-09-01',
+              amount: 5000000,
+              type: 'DEPOSIT',
+              walletId: 'wal-bank',
+            },
+            {
+              id: 'gh-2',
+              date: '2026-09-02',
+              amount: 5000000,
+              type: 'WITHDRAW',
+              walletId: 'wal-bank',
+            },
+          ],
+          createdAt: '2026-01-01',
+        },
+      ],
+      transactions: [
+        {
+          id: 'tx-goal-hist-1',
+          type: 'TRANSFER',
+          amount: 5000000,
+          walletId: 'wal-bank',
+          date: '2026-09-01T10:00:00',
+          note: 'Tích lũy vào hũ',
+          tags: [],
+          createdAt: '2026-09-01T10:00:00',
+          origin: 'GOAL',
+          originId: 'goal-used',
+        },
+      ],
+    });
+
+    const res = applyDeleteGoal(state, 'goal-used');
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toMatch(/transaction history|lịch sử giao dịch/i);
+    }
+
+    // Goal still exists in state
+    expect(state.goals.some((g) => g.id === 'goal-used')).toBe(true);
+  });
+
+  // =========================================================================
+  // CASE N — Empty Unused Goal Can Be Deleted
+  // =========================================================================
+  it('CASE N — Empty Unused Goal Can Be Deleted: goal with currentAmount === 0 and no history can be deleted', () => {
+    const state = createMockState({
+      goals: [
+        {
+          id: 'goal-unused',
+          name: 'Mục tiêu mới chưa dùng',
+          targetAmount: 10000000,
+          currentAmount: 0,
+          deadline: '2026-12-31',
+          color: '#3b82f6',
+          icon: 'Target',
+          history: [],
+          createdAt: '2026-09-01',
+        },
+      ],
+      transactions: [],
+    });
+
+    const res = applyDeleteGoal(state, 'goal-unused');
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.state.goals.some((g) => g.id === 'goal-unused')).toBe(false);
+    }
+  });
 });
