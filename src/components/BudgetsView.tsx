@@ -715,6 +715,10 @@ export const BudgetsView: React.FC = () => {
                         setIsDepositMode(true);
                         setDepositAmount('');
                         setDepositNote('');
+                        const nonCredit = wallets.find((w) => w.type !== 'CREDIT');
+                        if (nonCredit && (!depositWalletId || wallets.find((w) => w.id === depositWalletId)?.type === 'CREDIT')) {
+                          setDepositWalletId(nonCredit.id);
+                        }
                         setDepositModalOpen(true);
                       }}
                       className="flex-1 flex items-center justify-center space-x-1.5 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-xl transition-colors shadow-sm"
@@ -729,6 +733,10 @@ export const BudgetsView: React.FC = () => {
                         setIsDepositMode(false);
                         setDepositAmount('');
                         setDepositNote('');
+                        const nonCredit = wallets.find((w) => w.type !== 'CREDIT');
+                        if (nonCredit && (!depositWalletId || wallets.find((w) => w.id === depositWalletId)?.type === 'CREDIT')) {
+                          setDepositWalletId(nonCredit.id);
+                        }
                         setDepositModalOpen(true);
                       }}
                       className="flex-1 flex items-center justify-center space-x-1.5 py-2 px-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs rounded-xl transition-colors"
@@ -975,11 +983,13 @@ export const BudgetsView: React.FC = () => {
                   onChange={(e) => setDepositWalletId(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm dark:text-white"
                 >
-                  {wallets.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name} ({formatCurrency(w.balance)})
-                    </option>
-                  ))}
+                  {wallets
+                    .filter((w) => w.type !== 'CREDIT')
+                    .map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name} ({formatCurrency(w.balance)})
+                      </option>
+                    ))}
                 </select>
               </div>
 

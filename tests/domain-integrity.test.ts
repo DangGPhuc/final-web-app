@@ -7,6 +7,7 @@ import {
   applyGoalDeposit,
   applyGoalWithdraw,
   applyDeleteGoal,
+  applyEditGoal,
   applyPayBill,
   applyUnpayBill,
   applyDeleteWallet,
@@ -1182,5 +1183,112 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     // September budget must NOT appear in October results
     expect(octStatuses.some((b) => b.budget.id === 'bud-food-sep')).toBe(false);
     expect(octStatuses.some((b) => b.budget.month === '2026-09')).toBe(false);
+  });
+
+  // =========================================================================
+  // CASE S — Goal Withdraw To Credit Rejected
+  // =========================================================================
+  it('CASE S — Goal Withdraw To Credit Rejected: withdrawal from goal directly to CREDIT is rejected', () => {
+    const state = createMockState({
+      goals: [
+        {
+          id: 'goal-s',
+          name: 'Hũ tiết kiệm S',
+          targetAmount: 10000000,
+          currentAmount: 5000000, // 5M
+          deadline: '2026-12-31',
+          color: '#10b981',
+          icon: 'PiggyBank',
+          history: [],
+          createdAt: '2026-01-01',
+        },
+      ],
+      wallets: [
+        {
+          id: 'wal-credit-s',
+          name: 'Thẻ tín dụng S',
+          type: 'CREDIT',
+          balance: 2000000, // 2M debt
+          initialBalance: 0,
+          creditLimit: 20000000,
+          currency: 'VND',
+          color: '#8b5cf6',
+          icon: 'CreditCard',
+          createdAt: '2026-01-01',
+        },
+      ],
+      transactions: [],
+    });
+
+    // Attempt: Goal withdrawal 3M directly to CREDIT
+    const withdrawRes = applyGoalWithdraw(state, 'goal-s', 'wal-credit-s', 3000000);
+
+    expect(withdrawRes.ok).toBe(false);
+    if (!withdrawRes.ok) {
+      expect(withdrawRes.error).toContain('thẻ tín dụng');
+    }
+
+    // Expected: goal unchanged, credit debt unchanged, transactions unchanged
+    const goal = state.goals.find((g) => g.id === 'goal-s');
+    const credit = state.wallets.find((w) => w.id === 'wal-credit-s');
+
+    expect(goal?.currentAmount).toBe(5000000);
+    expect(credit?.balance).toBe(2000000);
+    expect(state.transactions.length).toBe(0);
+  });
+
+  // =========================================================================
+  // CASE Y — Goal Financial Fields Cannot Be Edited
+  // =========================================================================
+  it('CASE Y — Goal Financial Fields Cannot Be Edited: currentAmount and history are strictly preserved', () => {
+    const state = createMockState({
+      goals: [
+        {
+          id: 'goal-y',
+          name: 'Quỹ Dự Phòng Y',
+          targetAmount: 20000000,
+          currentAmount: 5000000, // 5M
+          deadline: '2026-12-31',
+          color: '#0ea5e9',
+          icon: 'ShieldCheck',
+          history: [
+            {
+              id: 'gh-y1',
+              date: '2026-09-01',
+              amount: 5000000,
+              type: 'DEPOSIT',
+              walletId: 'wal-bank',
+              note: 'Nạp đầu kỳ',
+            },
+          ],
+          createdAt: '2026-01-01',
+        },
+      ],
+    });
+
+    // Attempt generic metadata edit containing currentAmount = 999M and history = []
+    const editRes = applyEditGoal(state, 'goal-y', {
+      name: 'Quỹ Dự Phòng Đổi Tên',
+      targetAmount: 30000000,
+      color: '#f59e0b',
+      currentAmount: 999000000, // Illegal overwrite attempt
+      history: [], // Illegal overwrite attempt
+    } as Partial<SavingsGoal>);
+
+    expect(editRes.ok).toBe(true);
+    if (!editRes.ok) return;
+
+    const editedGoal = editRes.state.goals.find((g) => g.id === 'goal-y');
+    expect(editedGoal).toBeDefined();
+
+    // Invariant: financial fields remain unchanged!
+    expect(editedGoal?.currentAmount).toBe(5000000);
+    expect(editedGoal?.history.length).toBe(1);
+    expect(editedGoal?.history[0].id).toBe('gh-y1');
+
+    // Metadata changes remain possible
+    expect(editedGoal?.name).toBe('Quỹ Dự Phòng Đổi Tên');
+    expect(editedGoal?.targetAmount).toBe(30000000);
+    expect(editedGoal?.color).toBe('#f59e0b');
   });
 });

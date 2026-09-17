@@ -564,6 +564,14 @@ export function applyGoalWithdraw(
     return { ok: false, error: 'Không tìm thấy ví nhận tiền' };
   }
 
+  // Savings Goal withdrawal directly into CREDIT wallets is NOT supported
+  if (wallet.type === 'CREDIT') {
+    return {
+      ok: false,
+      error: 'Không hỗ trợ rút tiền từ mục tiêu tích lũy trực tiếp vào thẻ tín dụng. Vui lòng rút về ví tiền mặt hoặc tài khoản ngân hàng, sau đó dùng tính năng Chuyển khoản (Thanh toán thẻ tín dụng).',
+    };
+  }
+
   if (goal.currentAmount < amount) {
     return { ok: false, error: 'Số tiền rút vượt quá số dư hiện có trong mục tiêu tích lũy!' };
   }
@@ -590,13 +598,9 @@ export function applyGoalWithdraw(
       : g
   );
 
-  const updatedWallets = state.wallets.map((w) => {
-    if (w.id !== walletId) return w;
-    if (w.type === 'CREDIT') {
-      return { ...w, balance: Math.max(0, w.balance - amount) };
-    }
-    return { ...w, balance: w.balance + amount };
-  });
+  const updatedWallets = state.wallets.map((w) =>
+    w.id === walletId ? { ...w, balance: w.balance + amount } : w
+  );
 
   const newTx: Transaction = {
     id: `tx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -625,6 +629,64 @@ export function applyGoalWithdraw(
       transactions: [newTx, ...state.transactions],
     },
     newTx,
+  };
+}
+
+/**
+ * Edit an existing savings goal safely.
+ * Metadata fields (name, targetAmount, deadline, color, icon, category) may be edited.
+ * Invariant: Financial and system-managed fields (id, createdAt, currentAmount, history) are strictly preserved.
+ */
+export function applyEditGoal(
+  state: AppDomainState,
+  goalId: string,
+  updates: Partial<SavingsGoal>
+): DomainResult<{ state: AppDomainState; updatedGoal: SavingsGoal }> {
+  const goal = state.goals.find((g) => g.id === goalId);
+  if (!goal) {
+    return { ok: false, error: 'Không tìm thấy mục tiêu tích lũy' };
+  }
+
+  if (updates.name !== undefined && !updates.name.trim()) {
+    return { ok: false, error: 'Tên mục tiêu tích lũy không được để trống' };
+  }
+
+  if (updates.targetAmount !== undefined) {
+    if (
+      typeof updates.targetAmount !== 'number' ||
+      isNaN(updates.targetAmount) ||
+      !isFinite(updates.targetAmount) ||
+      updates.targetAmount <= 0
+    ) {
+      return { ok: false, error: 'Mục tiêu số tiền cần tích lũy không hợp lệ (phải là số hữu hạn > 0)' };
+    }
+  }
+
+  // Preserve financial and system-managed fields
+  const {
+    id: _ignoredId,
+    createdAt: _ignoredCreatedAt,
+    currentAmount: _ignoredCurrentAmount,
+    history: _ignoredHistory,
+    ...allowedMetadata
+  } = updates;
+
+  const updatedGoal: SavingsGoal = {
+    ...goal,
+    ...allowedMetadata,
+    id: goal.id,
+    createdAt: goal.createdAt,
+    currentAmount: goal.currentAmount, // Strictly preserved
+    history: goal.history, // Strictly preserved
+  };
+
+  return {
+    ok: true,
+    state: {
+      ...state,
+      goals: state.goals.map((g) => (g.id === goalId ? updatedGoal : g)),
+    },
+    updatedGoal,
   };
 }
 

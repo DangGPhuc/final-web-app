@@ -29,6 +29,7 @@ import {
   applyGoalDeposit,
   applyGoalWithdraw,
   applyDeleteGoal,
+  applyEditGoal,
   applyPayBill,
   applyUnpayBill,
   applyDeleteWallet,
@@ -335,7 +336,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const editGoal = (id: string, updated: Partial<SavingsGoal>) => {
-    setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, ...updated } : g)));
+    const res = applyEditGoal({ wallets, transactions, goals, bills }, id, updated);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setGoals(res.state.goals);
   };
 
   const deleteGoal = (id: string) => {
