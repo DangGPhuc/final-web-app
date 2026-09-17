@@ -1,5 +1,9 @@
 # FinTrack Pro - Web App Quản Lý Chi Tiêu & Mô Phỏng Tài Chính Thông Minh
 
+> Backend foundation V2: xem [review, API contract và hướng dẫn](docs/backend/FOUNDATION_REVIEW_VI.md).
+> UI hiện vẫn dùng localStorage; `/api/*` cũ là demo. Backend PostgreSQL mới ở
+> `/api/v2/wallets` và `/api/v2/transfers`, tắt mặc định, chưa có luồng login production.
+
 Dự án Web App Quản lý Chi tiêu toàn diện kèm tính năng đột phá **What-If Financial Simulator** (Mô phỏng tài chính phản ứng thời gian thực & Benchmark tối ưu hiệu năng).
 
 ---
@@ -57,9 +61,9 @@ Dự án Web App Quản lý Chi tiêu toàn diện kèm tính năng đột phá 
 - **Data Visualization**: **Recharts** (Interactive Area, Bar, Pie charts)
 - **Reactive State & Debounce**: Tối ưu 60 FPS khi kéo thanh trượt mô phỏng
 - **Iconography**: **Lucide React**
-- **Spreadsheet Engine**: **SheetJS (xlsx)**
+- **Spreadsheet Engine**: **ExcelJS (xlsx)**
 - **Animations**: **canvas-confetti**
-- **Backend REST API**: `/api/wallets`, `/api/transactions`, `/api/budgets`, `/api/bills`, `/api/goals`, `/api/simulation/what-if`, `/api/summary`
+- **Demo API (không persist vào DB)**: `/api/wallets`, `/api/transactions`, `/api/budgets`, `/api/bills`, `/api/goals`, `/api/simulation/what-if`, `/api/summary`
 
 ---
 

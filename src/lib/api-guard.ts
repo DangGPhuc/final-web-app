@@ -65,18 +65,33 @@ export async function readBoundedJsonBody<T = Record<string, unknown>>(
     }
   }
 
-  // 2. Read full raw text
-  let rawText: string;
+  // Enforce the byte budget while streaming, before buffering or JSON parsing.
+  if (!req.body) return { ok: false, error: 'Request body cannot be empty', status: 400 };
+  const reader = req.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let rawText = '';
+  let bytes = 0;
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => {}); }, 5000);
   try {
-    rawText = await req.text();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (timedOut) return { ok: false, error: 'Request body timeout', status: 408 };
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        void reader.cancel().catch(() => {});
+        return { ok: false, error: 'Payload too large', status: 413 };
+      }
+      rawText += decoder.decode(value, { stream: true });
+    }
+    rawText += decoder.decode();
   } catch {
-    return { ok: false, error: 'Failed to read request body', status: 400 };
-  }
-
-  // 3. Measure actual UTF-8 byte size (prevents header spoofing / absent Content-Length)
-  const actualBytes = new TextEncoder().encode(rawText).byteLength;
-  if (actualBytes > maxBytes) {
-    return { ok: false, error: 'Payload too large', status: 413 };
+    void reader.cancel().catch(() => {});
+    return { ok: false, error: 'Failed to read UTF-8 body', status: 400 };
+  } finally {
+    clearTimeout(timeout);
+    reader.releaseLock();
   }
 
   if (!rawText.trim()) {
