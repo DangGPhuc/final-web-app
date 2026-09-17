@@ -193,17 +193,78 @@ export function calculateBudgetStatuses(
   });
 }
 
+/**
+ * Sanitize a string value for safe inclusion in CSV/spreadsheet output.
+ *
+ * Spreadsheet applications (Excel, LibreOffice, Google Sheets) interpret cells
+ * beginning with =, +, -, or @ as formula expressions when imported from CSV.
+ * This allows CSV Injection / Formula Injection attacks where user-controlled
+ * data can execute macros or exfiltrate data.
+ *
+ * Mitigation: prefix dangerous cells with a tab character (\t).
+ * The tab is invisible in most spreadsheet views but prevents formula execution.
+ * The original data is preserved — only the injection vector is neutralized.
+ *
+ * OWASP Reference: OWASP Testing Guide — OTG-INPVAL-017
+ */
+export function sanitizeCsvCell(val: string): string {
+  if (val && /^[=+\-@]/.test(val)) {
+    return `\t${val}`;
+  }
+  return val;
+}
+
+// ─── Receipt / File Upload Security Foundation ────────────────────────────────
+
+/** Maximum allowed receipt file size (bytes). */
+export const RECEIPT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+
+/** Allowed MIME types for receipt images. SVG is excluded (active content risk). */
+export const RECEIPT_ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/webp'] as const;
+
+/**
+ * Client-side receipt file validation.
+ *
+ * Validates file size and declared MIME type against a strict allowlist.
+ * NOTE: Browser MIME type validation alone is NOT sufficient for production.
+ * Future server-side pipeline must additionally validate:
+ *   - File extension (allowlist: .jpg, .jpeg, .png, .webp)
+ *   - Actual magic bytes / file signature (not just Content-Type header)
+ *   - Image decode validity (attempt decode, reject if corrupt)
+ *   - Virus/malware scanning (optional pipeline)
+ *   - Store with random server-generated key in PRIVATE object storage
+ *   - Never serve uploaded files from the application webroot
+ *
+ * Per OWASP File Upload Cheat Sheet:
+ *   allowlist types → validate signatures → rename → restrict size → authorize
+ */
+export function validateReceiptFile(file: File): { ok: boolean; error?: string } {
+  if (file.size > RECEIPT_MAX_BYTES) {
+    return {
+      ok: false,
+      error: `Ảnh biên lai quá lớn (${(file.size / 1024 / 1024).toFixed(1)} MB). Giới hạn: ${RECEIPT_MAX_BYTES / 1024 / 1024} MB.`,
+    };
+  }
+  if (!RECEIPT_ALLOWED_MIMES.includes(file.type as (typeof RECEIPT_ALLOWED_MIMES)[number])) {
+    return {
+      ok: false,
+      error: `Định dạng tệp không được hỗ trợ (${file.type}). Chỉ chấp nhận: JPEG, PNG, WEBP.`,
+    };
+  }
+  return { ok: true };
+}
+
 export function exportToCSV(transactions: Transaction[], filename = 'bao-cao-giao-dich.csv'): void {
   const headers = ['Mã GD', 'Thời gian', 'Loại GD', 'Danh mục', 'Số tiền (VND)', 'Ví nguồn', 'Ví đích/Ghi chú', 'Nhãn'];
   const rows = transactions.map((t) => [
     t.id,
     formatDate(t.date, 'full'),
     t.type === 'EXPENSE' ? 'Chi tiêu' : t.type === 'INCOME' ? 'Thu nhập' : 'Chuyển khoản',
-    t.categoryName || 'Không có',
+    sanitizeCsvCell(t.categoryName || 'Không có'),
     t.amount,
-    t.walletName || t.walletId,
-    t.type === 'TRANSFER' ? (t.toWalletName || t.toWalletId || '') : (t.note || ''),
-    (t.tags || []).join('; '),
+    sanitizeCsvCell(t.walletName || t.walletId),
+    sanitizeCsvCell(t.type === 'TRANSFER' ? (t.toWalletName || t.toWalletId || '') : (t.note || '')),
+    sanitizeCsvCell((t.tags || []).join('; ')),
   ]);
 
   const csvContent =
@@ -237,24 +298,24 @@ export function exportToExcel(
     'Mã GD': t.id,
     'Thời gian': formatDate(t.date, 'full'),
     'Loại giao dịch': t.type === 'EXPENSE' ? 'Khoản chi' : t.type === 'INCOME' ? 'Khoản thu' : 'Chuyển khoản nội bộ',
-    'Danh mục': t.categoryName || 'Khác',
+    'Danh mục': sanitizeCsvCell(t.categoryName || 'Khác'),
     'Số tiền (₫)': t.amount,
-    'Tài khoản / Ví': t.walletName || t.walletId,
-    'Ví đích (nếu chuyển)': t.toWalletName || '',
-    'Ghi chú': t.note,
-    'Nhãn phân loại': (t.tags || []).join(', '),
+    'Tài khoản / Ví': sanitizeCsvCell(t.walletName || t.walletId),
+    'Ví đích (nếu chuyển)': sanitizeCsvCell(t.toWalletName || ''),
+    'Ghi chú': sanitizeCsvCell(t.note || ''),
+    'Nhãn phân loại': sanitizeCsvCell((t.tags || []).join(', ')),
   }));
   const wsTx = XLSX.utils.json_to_sheet(txData);
   XLSX.utils.book_append_sheet(wb, wsTx, 'Sổ Giao Dịch');
 
   // Sheet 2: Tổng hợp tài sản & Ví
   const walletData = wallets.map((w) => ({
-    'Tên Ví / Tài khoản': w.name,
+    'Tên Ví / Tài khoản': sanitizeCsvCell(w.name),
     'Loại ví': w.type === 'CASH' ? 'Tiền mặt' : w.type === 'BANK' ? 'Ngân hàng' : w.type === 'CREDIT' ? 'Thẻ tín dụng' : 'Sổ tiết kiệm',
     'Số dư hiện tại (₫)': w.balance,
     'Hạn mức (Thẻ tín dụng)': w.creditLimit || '-',
     'Lãi suất (%/năm)': w.interestRate ? `${w.interestRate}%` : '-',
-    'Số tài khoản / Thẻ': w.accountNumber || '-',
+    'Số tài khoản / Thẻ': sanitizeCsvCell(w.accountNumber || '-'),
   }));
   const wsWallets = XLSX.utils.json_to_sheet(walletData);
   XLSX.utils.book_append_sheet(wb, wsWallets, 'Tài Khoản & Ví');
@@ -262,7 +323,7 @@ export function exportToExcel(
   // Sheet 3: Báo cáo ngân sách
   const budgetStatuses = calculateBudgetStatuses(budgets, transactions);
   const budgetData = budgetStatuses.map((bs) => ({
-    'Danh mục': bs.budget.categoryName,
+    'Danh mục': sanitizeCsvCell(bs.budget.categoryName),
     'Hạn mức tháng (₫)': bs.budget.amount,
     'Đã chi tiêu (₫)': bs.spent,
     'Còn lại (₫)': bs.remaining,
