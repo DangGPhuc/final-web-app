@@ -65,10 +65,13 @@ export async function POST(req: Request) {
         totalCurrentAssets,
         projections,
         finalGain: projections[projections.length - 1].gain,
+        // Chỉ số benchmark minh họa (illustrative / mock) kịch bản tối ưu hóa
         benchmark: {
+          isMockSimulation: true,
           executionTimeMs: 1.8,
           unindexedQueryMs: 184.5,
           throughputReqSec: 2840,
+          note: 'Chỉ số minh họa kịch bản tối ưu hóa full-stack trong tương lai',
         },
       },
     });

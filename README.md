@@ -15,9 +15,9 @@ Dự án Web App Quản lý Chi tiêu toàn diện kèm tính năng đột phá 
   - *Đường Baseline (nét đứt)*: Quỹ đạo tài sản nếu giữ nguyên cách chi tiêu hiện tại.
   - *Đường What-If (nét liền có phủ gradient)*: Quỹ đạo tài sản bứt phá sau khi tối ưu và sinh lời nhờ lãi kép.
   - Thẻ hiển thị **Số tiền gia tăng thêm (Delta Extra Gain)** nổi bật (ví dụ: `+28.780.000 ₫`).
-- **Trung tâm Benchmark Kỹ thuật Trực tiếp (Live Performance Audit)**:
-  - Nút bấm **"Chạy Benchmark Kiểm Tra"** stress-test đo trực tiếp độ trễ trên trình duyệt.
-  - So sánh trực quan: **Chưa tối ưu (184.5 ms - Full Table Scan)** vs **Đã tối ưu (1.8 ms - Compound Index & Cache)**, tốc độ nhanh hơn **102 lần**, throughput đạt **2.840 req/s**.
+- **Mô Phỏng Đo Đạc Hiệu Năng Frontend (Client-side Performance Simulation)**:
+  - Nút bấm **"Chạy Benchmark Client"** đo trực tiếp độ trễ tính toán mô phỏng What-If trên trình duyệt.
+  - So sánh trực quan mang tính minh họa: kịch bản giả định chưa tối ưu vs đo đạc thực tế vòng lặp client JS, kèm định hướng kiến trúc tối ưu (Compound Index & Cache) cho giai đoạn phát triển full-stack cơ sở dữ liệu sau này.
 
 ### 💳 Quản lý Tài khoản & Ví (Accounts & Wallets)
 - **Hỗ trợ 4 loại nguồn tiền**: Tiền mặt (Cash), Tài khoản ngân hàng (Bank Accounts), Thẻ tín dụng (Credit Cards - hạn mức, dư nợ), Sổ tiết kiệm (Savings - lãi suất, kỳ hạn).

@@ -1309,7 +1309,7 @@ export const WhatIfSimulatorView: React.FC = () => {
         </div>
       </div>
 
-      {/* 5. LIVE PERFORMANCE BENCHMARK INSPECTOR */}
+      {/* 5. CLIENT-SIDE PERFORMANCE SIMULATION & BENCHMARK INSPECTOR */}
       <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
           <div className="flex items-center space-x-2.5">
@@ -1318,10 +1318,10 @@ export const WhatIfSimulatorView: React.FC = () => {
             </div>
             <div>
               <h3 className="text-base font-bold text-slate-800 dark:text-white">
-                Kiểm Tra Hiệu Năng &amp; Benchmark Kỹ Thuật (Live Performance Audit)
+                Mô Phỏng Đo Đạc Hiệu Năng Frontend (Client-side Performance Audit)
               </h3>
               <p className="text-xs text-slate-400">
-                Chứng minh khả năng tính toán aggregation tốc độ cao trên 1.000+ giao dịch theo yêu cầu đồ án
+                Đo đạc độ trễ vòng lặp tính toán What-If trên trình duyệt (Các số liệu Database bên dưới mang tính chất minh họa kịch bản tối ưu)
               </p>
             </div>
           </div>
@@ -1332,48 +1332,50 @@ export const WhatIfSimulatorView: React.FC = () => {
             className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isBenchmarking ? 'animate-spin' : ''}`} />
-            <span>{isBenchmarking ? 'Đang đo đạc...' : 'Chạy Benchmark Kiểm Tra'}</span>
+            <span>{isBenchmarking ? 'Đang đo đạc...' : 'Chạy Benchmark Client'}</span>
           </button>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
           <div className="p-4 rounded-2xl bg-rose-50/60 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900/40">
             <div className="flex items-center justify-between font-bold text-rose-700 dark:text-rose-300 mb-2">
-              <span>Chưa Tối Ưu (Before)</span>
+              <span>Kịch Bản Giả Định Chưa Tối Ưu</span>
               <span className="text-[10px] px-2 py-0.5 bg-rose-200 dark:bg-rose-900 rounded-full">
-                Full Table Scan
+                Minh Họa Mock
               </span>
             </div>
             <p className="text-2xl font-black text-rose-600 mt-1">184.5 ms</p>
-            <p className="text-[11px] text-slate-500 mt-1">Throughput: ~180 requests/sec</p>
-            <p className="text-[10px] text-rose-600/80 mt-1">Khi kéo thanh trượt: Bị lag, nghẽn request</p>
+            <p className="text-[11px] text-slate-500 mt-1">Throughput tham chiếu: ~180 req/s</p>
+            <p className="text-[10px] text-rose-600/80 mt-1">Ước tính khi duyệt tuần tự không có index/cache</p>
           </div>
 
           <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/40">
             <div className="flex items-center justify-between font-bold text-emerald-700 dark:text-emerald-300 mb-2">
-              <span>Sau Tối Ưu (After)</span>
+              <span>Đo Đạc Frontend Thực Tế</span>
               <span className="text-[10px] px-2 py-0.5 bg-emerald-200 dark:bg-emerald-900 rounded-full">
-                Index + Cache
+                Client Latency
               </span>
             </div>
             <p className="text-2xl font-black text-emerald-600 mt-1">
               {benchmarkResult ? `${benchmarkResult.optimizedMs} ms` : '1.8 ms'}
             </p>
-            <p className="text-[11px] text-slate-500 mt-1">Throughput: ~2.840 requests/sec</p>
+            <p className="text-[11px] text-slate-500 mt-1">
+              {benchmarkResult ? `Đo đạc trên ${benchmarkResult.recordsTested} chu kỳ lặp` : 'Tính toán mượt mà trên bộ nhớ trình duyệt'}
+            </p>
             <p className="text-[10px] text-emerald-600 font-semibold mt-1">
-              Nhanh hơn gấp 102 lần • 60 FPS mượt mà
+              *Thời gian thực thi JavaScript trực tiếp trên client
             </p>
           </div>
 
           <div className="p-4 rounded-2xl bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/40">
             <div className="flex items-center justify-between font-bold text-blue-700 dark:text-blue-300 mb-2">
-              <span>3 Kỹ Thuật Cốt Lõi Đã Áp Dụng</span>
+              <span>Định Hướng Kiến Trúc Tối Ưu</span>
               <CheckCircle2 className="w-4 h-4 text-blue-600" />
             </div>
             <ul className="space-y-1 text-slate-600 dark:text-slate-300 text-[11px]">
-              <li>✓ <strong>Debounce 150ms</strong> ở Frontend triệt tiêu spam API</li>
-              <li>✓ <strong>Compound Index</strong>: `{`userId, date, category`}`</li>
-              <li>✓ <strong>Dataset In-place Mutation</strong> trên Recharts</li>
+              <li>✓ <strong>Client</strong>: useMemo &amp; tối ưu cấu trúc dữ liệu O(N)</li>
+              <li>✓ <strong>UX</strong>: Phản hồi tức thời 60 FPS khi kéo thanh trượt</li>
+              <li>✓ <strong>Database (Định hướng tương lai)</strong>: Compound Index &amp; Cache</li>
             </ul>
           </div>
         </div>
