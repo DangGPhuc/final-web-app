@@ -140,7 +140,7 @@ export const INITIAL_BILLS: RecurringBill[] = [
     amount: 6000000,
     categoryId: 'cat-housing',
     categoryName: 'Nhà cửa & Thuê nhà',
-    walletId: 'wal-vcb',
+    walletId: 'wal-tcb',
     dueDay: 5,
     frequency: 'MONTHLY',
     status: 'PAID',
@@ -307,6 +307,8 @@ export const INITIAL_TRANSACTIONS: Transaction[] = [
     date: '2026-09-05T08:15:00',
     note: 'Thanh toán tiền thuê căn hộ tháng 9/2026',
     tags: ['Gia đình', 'Hóa đơn'],
+    origin: 'BILL_PAYMENT',
+    originId: 'bill-rent',
     createdAt: '2026-09-05T08:15:00',
   },
   {

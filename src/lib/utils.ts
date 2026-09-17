@@ -40,6 +40,74 @@ export function formatDate(dateString: string, type: 'short' | 'full' | 'time' |
 }
 
 /**
+ * Convert a Date, ISO string, or timestamp into local HTML datetime-local input string:
+ * YYYY-MM-DDTHH:mm using the browser's local timezone.
+ * DO NOT use toISOString().slice(0, 16).
+ */
+export function toLocalDateTimeInputValue(dateOrIso: Date | string | number = new Date()): string {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  if (isNaN(d.getTime())) {
+    const fallback = new Date();
+    const y = fallback.getFullYear();
+    const m = String(fallback.getMonth() + 1).padStart(2, '0');
+    const day = String(fallback.getDate()).padStart(2, '0');
+    const hh = String(fallback.getHours()).padStart(2, '0');
+    const mm = String(fallback.getMinutes()).padStart(2, '0');
+    return `${y}-${m}-${day}T${hh}:${mm}`;
+  }
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${m}-${day}T${hh}:${mm}`;
+}
+
+/**
+ * Convert local datetime-local value (YYYY-MM-DDTHH:mm or with seconds) to canonical ISO timestamp.
+ */
+export function localDateTimeInputToISO(value: string): string {
+  if (!value) return new Date().toISOString();
+  const [datePart, timePart = '00:00'] = value.split('T');
+  const [y, m, d] = datePart.split('-').map(Number);
+  const [hh, mm, ss = 0] = timePart.split(':').map(Number);
+  const localDate = new Date(y, m - 1, d, hh, mm, ss);
+  if (isNaN(localDate.getTime())) return new Date().toISOString();
+  return localDate.toISOString();
+}
+
+/**
+ * Get local calendar date key: YYYY-MM-DD based on local timezone.
+ */
+export function getLocalDateKey(dateOrIso: Date | string | number): string {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Get local calendar year-month: YYYY-MM based on local timezone.
+ */
+export function getLocalYearMonth(dateOrIso: Date | string | number): string {
+  const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+
+/**
+ * Check if a date falls into target yearMonth (YYYY-MM) in the local timezone.
+ */
+export function isDateInLocalYearMonth(dateOrIso: Date | string | number, yearMonth: string): boolean {
+  if (!dateOrIso || !yearMonth) return false;
+  return getLocalYearMonth(dateOrIso) === yearMonth;
+}
+
+/**
  * Standard Date & Time Helpers
  */
 export function getCurrentYearMonth(d: Date = new Date()): string {
@@ -76,7 +144,7 @@ export function formatMonthShortLabel(yearMonthStr: string): string {
 
 export function isDateInCurrentMonth(dateStr: string, currentYm: string = getCurrentYearMonth()): boolean {
   if (!dateStr) return false;
-  return dateStr.startsWith(currentYm);
+  return isDateInLocalYearMonth(dateStr, currentYm);
 }
 
 export { calculateFinancialSummary } from './domain-engine';
@@ -95,7 +163,7 @@ export function calculateBudgetStatuses(
   monthStr: string = getCurrentYearMonth()
 ): BudgetStatusItem[] {
   const currentMonthExpenses = transactions.filter(
-    (t) => t.type === 'EXPENSE' && t.date.startsWith(monthStr)
+    (t) => t.type === 'EXPENSE' && isDateInLocalYearMonth(t.date, monthStr)
   );
 
   const monthBudgets = budgets.filter((b) => b.month === monthStr);

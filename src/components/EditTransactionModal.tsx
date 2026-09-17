@@ -5,6 +5,7 @@ import { useApp } from '@/context/AppContext';
 import { Transaction, TransactionType } from '@/types';
 import { X, Upload, Trash2, Calendar, Tag, FileText, ArrowRightLeft, DollarSign } from 'lucide-react';
 import { POPULAR_TAGS } from '@/lib/constants';
+import { toLocalDateTimeInputValue, localDateTimeInputToISO } from '@/lib/utils';
 
 interface EditTransactionModalProps {
   isOpen: boolean;
@@ -38,7 +39,7 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
       setWalletId(transaction.walletId || (wallets[0]?.id ?? ''));
       setToWalletId(transaction.toWalletId || '');
       setFee(transaction.fee || 0);
-      setDate(transaction.date ? transaction.date.slice(0, 16) : new Date().toISOString().slice(0, 16));
+      setDate(transaction.date ? toLocalDateTimeInputValue(transaction.date) : toLocalDateTimeInputValue());
       setNote(transaction.note || '');
       setTags(transaction.tags || []);
       setReceiptImage(transaction.receiptImage);
@@ -93,7 +94,7 @@ export const EditTransactionModal: React.FC<EditTransactionModalProps> = ({
       toWalletId: type === 'TRANSFER' ? toWalletId : undefined,
       toWalletName: type === 'TRANSFER' ? selectedToWallet?.name : undefined,
       fee: type === 'TRANSFER' ? Number(fee) : 0,
-      date: new Date(date).toISOString(),
+      date: localDateTimeInputToISO(date),
       note,
       tags,
       receiptImage,

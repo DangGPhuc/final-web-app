@@ -39,8 +39,14 @@ import {
   applyEditWallet,
   applyAddWallet,
   validateTransferFee,
+  applyAddGoal,
+  applyAddBudget,
+  applyEditBudget,
+  applyDeleteBudget,
+  applyUpdatePlanner,
 } from '@/lib/domain-engine';
 import { getCurrentYearMonth } from '@/lib/utils';
+import { validateAndNormalizeAppSnapshot } from '@/lib/storage-schema';
 
 interface AppContextType {
   wallets: Wallet[];
@@ -116,19 +122,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [quickAddOpen, setQuickAddOpen] = useState<boolean>(false);
   const [quickAddDefaultType, setQuickAddDefaultType] = useState<'EXPENSE' | 'INCOME' | 'TRANSFER'>('EXPENSE');
 
+  // Rollover currentMonth on focus, visibility change, and interval
+  useEffect(() => {
+    const checkMonthRollover = () => {
+      const nowYm = getCurrentYearMonth();
+      setCurrentMonth((prev) => (prev !== nowYm ? nowYm : prev));
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        checkMonthRollover();
+      }
+    };
+
+    window.addEventListener('focus', checkMonthRollover);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    const intervalId = setInterval(checkMonthRollover, 60000);
+
+    return () => {
+      window.removeEventListener('focus', checkMonthRollover);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      clearInterval(intervalId);
+    };
+  }, []);
+
   // Load from local storage
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed.wallets) setWallets(parsed.wallets);
-        if (parsed.transactions) setTransactions(parsed.transactions);
-        if (parsed.categories) setCategories(parsed.categories);
-        if (parsed.budgets) setBudgets(parsed.budgets);
-        if (parsed.bills) setBills(parsed.bills);
-        if (parsed.goals) setGoals(parsed.goals);
-        if (parsed.planner) setPlanner(parsed.planner);
+        const res = validateAndNormalizeAppSnapshot(parsed);
+        if (res.ok) {
+          setWallets(res.data.wallets);
+          setTransactions(res.data.transactions);
+          setCategories(res.data.categories);
+          setBudgets(res.data.budgets);
+          setBills(res.data.bills);
+          setGoals(res.data.goals);
+          setPlanner(res.data.planner);
+        } else {
+          console.warn('Storage snapshot validation failed, using defaults:', res.error);
+        }
       }
     } catch (e) {
       console.error('Failed to load storage data:', e);
@@ -265,23 +300,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Budgets
   const addBudget = (budget: Omit<Budget, 'id'>) => {
-    const newBudget: Budget = {
-      ...budget,
-      id: `bud-${Date.now()}`,
-    };
-    setBudgets((prev) => [...prev, newBudget]);
+    const res = applyAddBudget(budgets, budget);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setBudgets(res.budgets);
   };
 
   const editBudget = (id: string, updated: Partial<Budget>) => {
-    setBudgets((prev) => prev.map((b) => (b.id === id ? { ...b, ...updated } : b)));
+    const res = applyEditBudget(budgets, id, updated);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setBudgets(res.budgets);
   };
 
   const deleteBudget = (id: string) => {
-    setBudgets((prev) => prev.filter((b) => b.id !== id));
+    const res = applyDeleteBudget(budgets, id);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setBudgets(res.budgets);
   };
 
   const updatePlanner = (newPlanner: IncomeBudgetPlanner) => {
-    setPlanner(newPlanner);
+    const res = applyUpdatePlanner(newPlanner);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setPlanner(res.planner);
   };
 
   // Bills
@@ -336,18 +387,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Goals
   const addGoal = (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => {
-    const target = typeof goal.targetAmount === 'number' && isFinite(goal.targetAmount) && goal.targetAmount > 0
-      ? goal.targetAmount
-      : 0;
-    const newGoal: SavingsGoal = {
-      ...goal,
-      targetAmount: target,
-      currentAmount: 0,
-      id: `goal-${Date.now()}`,
-      history: [],
-      createdAt: new Date().toISOString(),
-    };
-    setGoals((prev) => [...prev, newGoal]);
+    const res = applyAddGoal({ wallets, transactions, goals, bills }, goal);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setGoals(res.state.goals);
   };
 
   const editGoal = (id: string, updated: Partial<SavingsGoal>) => {
@@ -453,80 +498,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const importDatabaseJSON = (jsonStr: string): boolean => {
     try {
       const data = JSON.parse(jsonStr);
-      if (!data || typeof data !== 'object') {
-        console.error('Import failed: payload is not a valid JSON object');
+      const res = validateAndNormalizeAppSnapshot(data);
+      if (!res.ok) {
+        console.error('Import failed:', res.error);
+        alert(`Dữ liệu nhập không hợp lệ: ${res.error}`);
         return false;
       }
 
-      // Validate wallets structure
-      if (data.wallets) {
-        if (!Array.isArray(data.wallets)) return false;
-        const validWallets = data.wallets.every(
-          (w: any) =>
-            w &&
-            typeof w.id === 'string' &&
-            typeof w.name === 'string' &&
-            ['CASH', 'BANK', 'CREDIT', 'SAVINGS'].includes(w.type) &&
-            typeof w.balance === 'number' &&
-            isFinite(w.balance)
-        );
-        if (!validWallets) {
-          console.error('Import failed: invalid wallet structure');
-          return false;
-        }
-      }
-
-      // Validate transactions structure
-      if (data.transactions) {
-        if (!Array.isArray(data.transactions)) return false;
-        const validTxs = data.transactions.every(
-          (t: any) =>
-            t &&
-            typeof t.id === 'string' &&
-            ['EXPENSE', 'INCOME', 'TRANSFER'].includes(t.type) &&
-            typeof t.amount === 'number' &&
-            isFinite(t.amount) &&
-            t.amount > 0 &&
-            typeof t.walletId === 'string' &&
-            typeof t.date === 'string'
-        );
-        if (!validTxs) {
-          console.error('Import failed: invalid transaction structure');
-          return false;
-        }
-      }
-
-      // Validate goals structure
-      if (data.goals) {
-        if (!Array.isArray(data.goals)) return false;
-        const validGoals = data.goals.every(
-          (g: any) =>
-            g &&
-            typeof g.id === 'string' &&
-            typeof g.name === 'string' &&
-            typeof g.targetAmount === 'number' &&
-            isFinite(g.targetAmount) &&
-            typeof g.currentAmount === 'number' &&
-            isFinite(g.currentAmount) &&
-            Array.isArray(g.history)
-        );
-        if (!validGoals) {
-          console.error('Import failed: invalid savings goal structure');
-          return false;
-        }
-      }
-
-      // If all checks pass, apply updates
-      if (data.wallets && Array.isArray(data.wallets)) setWallets(data.wallets);
-      if (data.transactions && Array.isArray(data.transactions)) setTransactions(data.transactions);
-      if (data.categories && Array.isArray(data.categories)) setCategories(data.categories);
-      if (data.budgets && Array.isArray(data.budgets)) setBudgets(data.budgets);
-      if (data.bills && Array.isArray(data.bills)) setBills(data.bills);
-      if (data.goals && Array.isArray(data.goals)) setGoals(data.goals);
-      if (data.planner && typeof data.planner === 'object') setPlanner(data.planner);
+      setWallets(res.data.wallets);
+      setTransactions(res.data.transactions);
+      setCategories(res.data.categories);
+      setBudgets(res.data.budgets);
+      setBills(res.data.bills);
+      setGoals(res.data.goals);
+      setPlanner(res.data.planner);
       return true;
     } catch (e) {
       console.error('Import failed:', e);
+      alert('Tệp dữ liệu không phải định dạng JSON hợp lệ');
       return false;
     }
   };

@@ -5,6 +5,7 @@ import { useApp } from '@/context/AppContext';
 import { TransactionType } from '@/types';
 import { X, Upload, Plus, Calendar, Tag, FileText, ArrowRightLeft, DollarSign, Image as ImageIcon } from 'lucide-react';
 import { POPULAR_TAGS } from '@/lib/constants';
+import { toLocalDateTimeInputValue, localDateTimeInputToISO } from '@/lib/utils';
 import { IconHelper } from './IconHelper';
 
 export const QuickAddModal: React.FC = () => {
@@ -38,7 +39,7 @@ export const QuickAddModal: React.FC = () => {
       const otherWallet = wallets.find((w) => w.id !== wallets[0]?.id);
       setToWalletId(otherWallet?.id || '');
       setFee('0');
-      setDate(new Date().toISOString().slice(0, 16));
+      setDate(toLocalDateTimeInputValue());
       setNote('');
       setTags([]);
       setReceiptImage(undefined);
@@ -131,7 +132,7 @@ export const QuickAddModal: React.FC = () => {
       fee: type === 'TRANSFER' ? numFee : 0,
       transferKind: type === 'TRANSFER' ? (selectedToWallet?.type === 'CREDIT' ? 'CREDIT_PAYMENT' : 'WALLET_TRANSFER') : undefined,
       origin: 'MANUAL',
-      date: new Date(date || Date.now()).toISOString(),
+      date: localDateTimeInputToISO(date),
       note: note || (type === 'TRANSFER' ? (selectedToWallet?.type === 'CREDIT' ? `Thanh toán thẻ ${selectedToWallet?.name}` : `Chuyển sang ${selectedToWallet?.name}`) : selectedCategory?.name || 'Giao dịch'),
       tags,
       receiptImage,

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { INITIAL_TRANSACTIONS } from '@/lib/mock-data';
+import { isDateInLocalYearMonth } from '@/lib/utils';
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -8,7 +9,7 @@ export async function GET(req: Request) {
 
   let list = [...INITIAL_TRANSACTIONS];
   if (type) list = list.filter((t) => t.type === type);
-  if (month) list = list.filter((t) => t.date.startsWith(month));
+  if (month) list = list.filter((t) => isDateInLocalYearMonth(t.date, month));
 
   return NextResponse.json({
     success: true,

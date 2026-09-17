@@ -13,7 +13,7 @@ import {
   PiggyBank,
   Eye,
 } from 'lucide-react';
-import { formatCurrency, formatDate, calculateBudgetStatuses } from '@/lib/utils';
+import { formatCurrency, formatDate, calculateBudgetStatuses, getCurrentYearMonth, isDateInLocalYearMonth } from '@/lib/utils';
 import { ReceiptModal } from './ReceiptModal';
 import {
   BarChart,
@@ -40,7 +40,7 @@ export const DashboardView: React.FC = () => {
   const unpaidBills = bills.filter((b) => b.status === 'UNPAID');
 
   const barChartData = useMemo(() => {
-    const [currYearStr, currMonthStr] = (currentMonth || '2026-09').split('-');
+    const [currYearStr, currMonthStr] = (currentMonth || getCurrentYearMonth()).split('-');
     const currYear = parseInt(currYearStr, 10);
     const currMonthNum = parseInt(currMonthStr, 10);
 
@@ -53,7 +53,7 @@ export const DashboardView: React.FC = () => {
     }
 
     return months.map((m) => {
-      const monthTxs = transactions.filter((t) => t.date.startsWith(m));
+      const monthTxs = transactions.filter((t) => t.date && isDateInLocalYearMonth(t.date, m));
       const inc = monthTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0);
       const expTxs = monthTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
       const expFees = monthTxs
@@ -69,7 +69,7 @@ export const DashboardView: React.FC = () => {
   }, [transactions, currentMonth]);
 
   const currentMonthExpenses = transactions.filter(
-    (t) => t.date.startsWith(currentMonth) && (t.type === 'EXPENSE' || (t.type === 'TRANSFER' && typeof t.fee === 'number' && t.fee > 0))
+    (t) => t.date && isDateInLocalYearMonth(t.date, currentMonth) && (t.type === 'EXPENSE' || (t.type === 'TRANSFER' && typeof t.fee === 'number' && t.fee > 0))
   );
   const categoryExpensesMap: { [catName: string]: number } = {};
   currentMonthExpenses.forEach((t) => {

@@ -25,6 +25,8 @@ import {
   getCurrentYear,
   formatMonthLabel,
   formatMonthShortLabel,
+  isDateInLocalYearMonth,
+  getLocalDateKey,
 } from '@/lib/utils';
 import {
   ResponsiveContainer,
@@ -60,19 +62,20 @@ export const ReportsView: React.FC = () => {
   // Filter transactions according to selected period
   const filteredTxs = useMemo(() => {
     return transactions.filter((tx) => {
-      const txDate = tx.date.split('T')[0];
+      const localDateKey = getLocalDateKey(tx.date);
+      if (!localDateKey) return false;
       if (period === 'THIS_MONTH') {
-        return txDate.startsWith(activeYm);
+        return isDateInLocalYearMonth(tx.date, activeYm);
       }
       if (period === 'LAST_MONTH') {
-        return txDate.startsWith(previousYm);
+        return isDateInLocalYearMonth(tx.date, previousYm);
       }
       if (period === 'THIS_YEAR') {
-        return txDate.startsWith(activeYear);
+        return localDateKey.startsWith(activeYear);
       }
       if (period === 'CUSTOM') {
-        if (customStart && txDate < customStart) return false;
-        if (customEnd && txDate > customEnd) return false;
+        if (customStart && localDateKey < customStart) return false;
+        if (customEnd && localDateKey > customEnd) return false;
         return true;
       }
       return true;
@@ -142,7 +145,7 @@ export const ReportsView: React.FC = () => {
     }
 
     return months.map((m) => {
-      const monthTxs = transactions.filter((t) => t.date.startsWith(m));
+      const monthTxs = transactions.filter((t) => t.date && isDateInLocalYearMonth(t.date, m));
       const inc = monthTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0);
       const expTxs = monthTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
       const expFees = monthTxs

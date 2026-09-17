@@ -17,10 +17,32 @@ import {
   applyEditWallet,
   applyAddWallet,
   validateTransferFee,
+  applyAddGoal,
+  applyAddBudget,
+  applyEditBudget,
+  applyDeleteBudget,
+  applyUpdatePlanner,
   AppDomainState,
 } from '../src/lib/domain-engine';
-import { Wallet, SavingsGoal, RecurringBill, Budget } from '../src/types';
-import { calculateBudgetStatuses } from '../src/lib/utils';
+import { Wallet, SavingsGoal, RecurringBill, Budget, IncomeBudgetPlanner } from '../src/types';
+import {
+  calculateBudgetStatuses,
+  toLocalDateTimeInputValue,
+  localDateTimeInputToISO,
+  getLocalDateKey,
+  getLocalYearMonth,
+  isDateInLocalYearMonth,
+} from '../src/lib/utils';
+import {
+  INITIAL_WALLETS,
+  INITIAL_TRANSACTIONS,
+  INITIAL_BILLS,
+  INITIAL_BUDGETS,
+  INITIAL_GOALS,
+  INITIAL_PLANNER,
+} from '../src/lib/mock-data';
+import { DEFAULT_CATEGORIES } from '../src/lib/constants';
+import { validateAndNormalizeAppSnapshot } from '../src/lib/storage-schema';
 
 function createMockState(overrides?: Partial<AppDomainState>): AppDomainState {
   const defaultWallets: Wallet[] = [
@@ -1859,4 +1881,451 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     expect(updated?.frequency).toBe('QUARTERLY');
     expect(updated?.status).toBe('UNPAID');
   });
+
+  // =========================================================================
+  // CASE DD — Seed Bill Consistency
+  // =========================================================================
+  it('CASE DD — Seed Bill Consistency: INITIAL bill-rent has linked BILL_PAYMENT transaction, wallet consistency, generic protection, and unpay succeeds', () => {
+    // 1. Initial bill-rent must have status === PAID and walletId === 'wal-tcb'
+    const rentBill = INITIAL_BILLS.find((b) => b.id === 'bill-rent');
+    expect(rentBill).toBeDefined();
+    expect(rentBill?.status).toBe('PAID');
+    expect(rentBill?.walletId).toBe('wal-tcb');
+
+    // 2. Initial transactions must have an authoritative linked payment transaction
+    const linkedTx = INITIAL_TRANSACTIONS.find(
+      (t) => t.origin === 'BILL_PAYMENT' && t.originId === 'bill-rent'
+    );
+    expect(linkedTx).toBeDefined();
+    expect(linkedTx?.id).toBe('tx-003');
+    expect(linkedTx?.walletId).toBe('wal-tcb');
+    expect(linkedTx?.amount).toBe(6000000);
+
+    // 3. The transaction must be protected against generic edit and generic delete
+    const state: AppDomainState = {
+      wallets: [...INITIAL_WALLETS],
+      transactions: [...INITIAL_TRANSACTIONS],
+      goals: [...INITIAL_GOALS],
+      bills: [...INITIAL_BILLS],
+    };
+
+    const editRes = applyEditTransaction(state, 'tx-003', { amount: 7000000 });
+    expect(editRes.ok).toBe(false);
+    expect((editRes as { error: string }).error).toContain('Không thể chỉnh sửa trực tiếp giao dịch');
+
+    const deleteRes = applyDeleteTransaction(state, 'tx-003');
+    expect(deleteRes.ok).toBe(false);
+    expect((deleteRes as { error: string }).error).toContain('Không thể xóa trực tiếp giao dịch');
+
+    // 4. applyUnpayBill on the initial paid bill succeeds
+    const unpayRes = applyUnpayBill(state, 'bill-rent');
+    expect(unpayRes.ok).toBe(true);
+    if (!unpayRes.ok) return;
+
+    // Bill becomes UNPAID
+    const unpayRentBill = unpayRes.state.bills.find((b) => b.id === 'bill-rent');
+    expect(unpayRentBill?.status).toBe('UNPAID');
+
+    // Linked transaction is removed
+    const postLinkedTx = unpayRes.state.transactions.find((t) => t.id === 'tx-003');
+    expect(postLinkedTx).toBeUndefined();
+
+    // wal-tcb balance is restored (+6,000,000)
+    const initialTcb = INITIAL_WALLETS.find((w) => w.id === 'wal-tcb')!;
+    const postTcb = unpayRes.state.wallets.find((w) => w.id === 'wal-tcb')!;
+    expect(postTcb.balance).toBe(initialTcb.balance + 6000000);
+  });
+
+  // =========================================================================
+  // CASE EE — Local Date/Time Semantics and Calendar Grouping
+  // =========================================================================
+  it('CASE EE — Local Date/Time Semantics: proper local datetime-local formatting, ISO round-trip, and local calendar grouping', () => {
+    // 1. toLocalDateTimeInputValue produces local YYYY-MM-DDTHH:mm
+    const fixedLocal = new Date(2026, 8, 17, 14, 30, 0); // 2026-09-17 14:30 in local time
+    const inputVal = toLocalDateTimeInputValue(fixedLocal);
+    expect(inputVal).toBe('2026-09-17T14:30');
+
+    // Single-digit padding
+    const singleDigit = new Date(2026, 0, 5, 8, 5, 0); // 2026-01-05 08:05 in local time
+    expect(toLocalDateTimeInputValue(singleDigit)).toBe('2026-01-05T08:05');
+
+    // 2. localDateTimeInputToISO round-trip preserves local wall-clock time
+    const isoString = localDateTimeInputToISO('2026-09-17T14:30');
+    const backToLocal = toLocalDateTimeInputValue(isoString);
+    expect(backToLocal).toBe('2026-09-17T14:30');
+
+    // 3. getLocalDateKey and getLocalYearMonth
+    expect(getLocalDateKey(fixedLocal)).toBe('2026-09-17');
+    expect(getLocalYearMonth(fixedLocal)).toBe('2026-09');
+
+    // 4. isDateInLocalYearMonth checks local calendar
+    expect(isDateInLocalYearMonth(fixedLocal, '2026-09')).toBe(true);
+    expect(isDateInLocalYearMonth(fixedLocal, '2026-10')).toBe(false);
+
+    // 5. Month grouping in calculateFinancialSummary uses local calendar
+    const state = createMockState({
+      transactions: [
+        {
+          id: 'tx-sept',
+          type: 'EXPENSE',
+          amount: 500000,
+          walletId: 'wal-bank',
+          date: '2026-09-15T12:00:00',
+          note: '',
+          tags: [],
+          createdAt: '2026-09-15T12:00:00',
+        },
+        {
+          id: 'tx-oct',
+          type: 'EXPENSE',
+          amount: 800000,
+          walletId: 'wal-bank',
+          date: '2026-10-01T10:00:00',
+          note: '',
+          tags: [],
+          createdAt: '2026-10-01T10:00:00',
+        },
+      ],
+    });
+
+    const summarySept = calculateFinancialSummary(state.wallets, state.transactions, '2026-09');
+    expect(summarySept.monthlyExpense).toBe(500000);
+
+    const summaryOct = calculateFinancialSummary(state.wallets, state.transactions, '2026-10');
+    expect(summaryOct.monthlyExpense).toBe(800000);
+  });
+
+  // =========================================================================
+  // CASE FF — Domain-Safe Goal Creation (applyAddGoal)
+  // =========================================================================
+  it('CASE FF — Domain-Safe Goal Creation: validates name, amount, deadline and enforces initial invariants', () => {
+    const state = createMockState();
+
+    // 1. Empty or whitespace-only name rejected
+    const resEmptyName = applyAddGoal(state, {
+      name: '   ',
+      targetAmount: 10000000,
+      deadline: '2026-12-31',
+    });
+    expect(resEmptyName.ok).toBe(false);
+
+    // 2. targetAmount <= 0, NaN, Infinity rejected
+    const resZeroAmount = applyAddGoal(state, {
+      name: 'Du lịch',
+      targetAmount: 0,
+      deadline: '2026-12-31',
+    });
+    expect(resZeroAmount.ok).toBe(false);
+
+    const resNaNAmount = applyAddGoal(state, {
+      name: 'Du lịch',
+      targetAmount: NaN,
+      deadline: '2026-12-31',
+    });
+    expect(resNaNAmount.ok).toBe(false);
+
+    const resInfAmount = applyAddGoal(state, {
+      name: 'Du lịch',
+      targetAmount: Infinity,
+      deadline: '2026-12-31',
+    });
+    expect(resInfAmount.ok).toBe(false);
+
+    // 3. Invalid deadline rejected
+    const resBadDate = applyAddGoal(state, {
+      name: 'Du lịch',
+      targetAmount: 10000000,
+      deadline: 'invalid-date',
+    });
+    expect(resBadDate.ok).toBe(false);
+
+    // 4. Invariants enforced: caller cannot inject currentAmount or history
+    const resValid = applyAddGoal(state, {
+      name: ' Mua Macbook Pro ',
+      targetAmount: 45000000,
+      deadline: '2026-11-30',
+      color: '#3b82f6',
+      icon: 'Laptop',
+      currentAmount: 9999999, // Should be ignored and forced to 0
+      history: [{ id: 'fake', amount: 1000 }], // Should be ignored and forced to []
+    });
+
+    expect(resValid.ok).toBe(true);
+    if (!resValid.ok) return;
+
+    expect(resValid.newGoal.name).toBe('Mua Macbook Pro');
+    expect(resValid.newGoal.targetAmount).toBe(45000000);
+    expect(resValid.newGoal.currentAmount).toBe(0);
+    expect(resValid.newGoal.history).toEqual([]);
+    expect(resValid.newGoal.deadline).toBe('2026-11-30');
+    expect(resValid.newGoal.id).toMatch(/^goal-/);
+    expect(resValid.newGoal.createdAt).toBeDefined();
+    expect(resValid.state.goals).toContainEqual(resValid.newGoal);
+  });
+
+  // =========================================================================
+  // CASE GG — Domain-Safe Budget Operations (applyAddBudget, applyEditBudget, applyDeleteBudget)
+  // =========================================================================
+  it('CASE GG — Domain-Safe Budget Operations: validates budgets, prevents duplicates per category+month, protects immutability', () => {
+    const existingBudgets: Budget[] = [
+      {
+        id: 'bud-food-09',
+        categoryId: 'cat-food',
+        categoryName: 'Ăn uống',
+        amount: 5000000,
+        month: '2026-09',
+        alertThreshold80: true,
+        alertThreshold100: true,
+      },
+    ];
+
+    // 1. Rejects duplicate active budget for same categoryId + month
+    const dupRes = applyAddBudget(existingBudgets, {
+      categoryId: 'cat-food',
+      categoryName: 'Ăn uống',
+      amount: 6000000,
+      month: '2026-09',
+    });
+    expect(dupRes.ok).toBe(false);
+    expect((dupRes as { error: string }).error).toContain('đã tồn tại');
+
+    // 2. Allows same category in a DIFFERENT month
+    const nextMonthRes = applyAddBudget(existingBudgets, {
+      categoryId: 'cat-food',
+      categoryName: 'Ăn uống',
+      amount: 6000000,
+      month: '2026-10',
+    });
+    expect(nextMonthRes.ok).toBe(true);
+    if (!nextMonthRes.ok) return;
+    expect(nextMonthRes.budgets.length).toBe(2);
+
+    // 3. Rejects invalid budget data (amount <= 0, invalid month, empty category)
+    const zeroAmt = applyAddBudget(existingBudgets, {
+      categoryId: 'cat-bills',
+      categoryName: 'Hóa đơn',
+      amount: 0,
+      month: '2026-09',
+    });
+    expect(zeroAmt.ok).toBe(false);
+
+    const badMonth = applyAddBudget(existingBudgets, {
+      categoryId: 'cat-bills',
+      categoryName: 'Hóa đơn',
+      amount: 1000000,
+      month: '2026-13',
+    });
+    expect(badMonth.ok).toBe(false);
+
+    const emptyCat = applyAddBudget(existingBudgets, {
+      categoryId: '   ',
+      categoryName: '',
+      amount: 1000000,
+      month: '2026-09',
+    });
+    expect(emptyCat.ok).toBe(false);
+
+    // 4. applyEditBudget: month and id immutable
+    const editMonthRes = applyEditBudget(existingBudgets, 'bud-food-09', { month: '2026-11' });
+    expect(editMonthRes.ok).toBe(false);
+    expect((editMonthRes as { error: string }).error).toContain('Tháng áp dụng ngân sách không thể thay đổi');
+
+    // Valid edit
+    const validEdit = applyEditBudget(existingBudgets, 'bud-food-09', { amount: 5500000 });
+    expect(validEdit.ok).toBe(true);
+    if (!validEdit.ok) return;
+    expect(validEdit.updatedBudget.amount).toBe(5500000);
+    expect(validEdit.updatedBudget.month).toBe('2026-09');
+
+    // 5. applyDeleteBudget
+    const delRes = applyDeleteBudget(existingBudgets, 'bud-food-09');
+    expect(delRes.ok).toBe(true);
+    if (!delRes.ok) return;
+    expect(delRes.budgets.length).toBe(0);
+
+    const delNonExistent = applyDeleteBudget(existingBudgets, 'non-existent');
+    expect(delNonExistent.ok).toBe(false);
+  });
+
+  // =========================================================================
+  // CASE HH — Domain-Safe 50/30/20 Planner (applyUpdatePlanner)
+  // =========================================================================
+  it('CASE HH — Domain-Safe 50/30/20 Planner: validates income and total percentages equal exactly 100', () => {
+    // 1. Rejects negative income
+    const negIncome = applyUpdatePlanner({
+      monthlyIncome: -5000000,
+      needsPercent: 50,
+      wantsPercent: 30,
+      savingsPercent: 20,
+    });
+    expect(negIncome.ok).toBe(false);
+
+    // 2. Rejects total != 100
+    const not100 = applyUpdatePlanner({
+      monthlyIncome: 20000000,
+      needsPercent: 50,
+      wantsPercent: 30,
+      savingsPercent: 15, // Total = 95
+    });
+    expect(not100.ok).toBe(false);
+    expect((not100 as { error: string }).error).toContain('phải bằng 100%');
+
+    // 3. Rejects negative percentage or > 100
+    const negPercent = applyUpdatePlanner({
+      monthlyIncome: 20000000,
+      needsPercent: -10,
+      wantsPercent: 80,
+      savingsPercent: 30,
+    });
+    expect(negPercent.ok).toBe(false);
+
+    // 4. Accepts valid distribution
+    const validPlanner: IncomeBudgetPlanner = {
+      monthlyIncome: 30000000,
+      needsPercent: 60,
+      wantsPercent: 20,
+      savingsPercent: 20,
+      notes: 'Tháng này đầu tư nhiều hơn',
+    };
+    const validRes = applyUpdatePlanner(validPlanner);
+    expect(validRes.ok).toBe(true);
+    if (!validRes.ok) return;
+    expect(validRes.planner.needsPercent).toBe(60);
+    expect(validRes.planner.wantsPercent).toBe(20);
+    expect(validRes.planner.savingsPercent).toBe(20);
+  });
+
+  // =========================================================================
+  // CASE II — Storage Snapshot Validation & Referential Integrity
+  // =========================================================================
+  it('CASE II — Storage Snapshot Validation: validates full snapshot, detects orphan references and domain violations', () => {
+    // 1. Default mock data snapshot is valid
+    const defaultSnapshot = {
+      wallets: INITIAL_WALLETS,
+      transactions: INITIAL_TRANSACTIONS,
+      categories: DEFAULT_CATEGORIES,
+      budgets: INITIAL_BUDGETS,
+      bills: INITIAL_BILLS,
+      goals: INITIAL_GOALS,
+      planner: INITIAL_PLANNER,
+    };
+    const validRes = validateAndNormalizeAppSnapshot(defaultSnapshot);
+    expect(validRes.ok).toBe(true);
+
+    // 2. Rejects invalid non-object input
+    expect(validateAndNormalizeAppSnapshot(null).ok).toBe(false);
+    expect(validateAndNormalizeAppSnapshot('invalid-string').ok).toBe(false);
+
+    // 3. Rejects transaction with orphan walletId
+    const orphanTxSnapshot = {
+      ...defaultSnapshot,
+      transactions: [
+        ...INITIAL_TRANSACTIONS,
+        {
+          id: 'tx-orphan',
+          type: 'EXPENSE',
+          amount: 100000,
+          walletId: 'wal-ghost', // Does not exist
+          date: '2026-09-17T10:00:00',
+        },
+      ],
+    };
+    const orphanTxRes = validateAndNormalizeAppSnapshot(orphanTxSnapshot);
+    expect(orphanTxRes.ok).toBe(false);
+    expect((orphanTxRes as { error: string }).error).toContain('tham chiếu đến ví không tồn tại');
+
+    // 4. Rejects transfer where toWalletId does not exist or toWalletId === walletId
+    const invalidTransferSnapshot = {
+      ...defaultSnapshot,
+      transactions: [
+        ...INITIAL_TRANSACTIONS,
+        {
+          id: 'tx-bad-transfer',
+          type: 'TRANSFER',
+          amount: 100000,
+          walletId: 'wal-bank',
+          toWalletId: 'wal-bank', // same
+          date: '2026-09-17T10:00:00',
+        },
+      ],
+    };
+    const badTransferRes = validateAndNormalizeAppSnapshot(invalidTransferSnapshot);
+    expect(badTransferRes.ok).toBe(false);
+
+    // 5. Rejects budget with orphan categoryId
+    const orphanBudgetSnapshot = {
+      ...defaultSnapshot,
+      budgets: [
+        ...INITIAL_BUDGETS,
+        {
+          id: 'bud-orphan',
+          categoryId: 'cat-ghost', // Does not exist
+          categoryName: 'Ma',
+          amount: 1000000,
+          month: '2026-09',
+        },
+      ],
+    };
+    const orphanBudgetRes = validateAndNormalizeAppSnapshot(orphanBudgetSnapshot);
+    expect(orphanBudgetRes.ok).toBe(false);
+    expect((orphanBudgetRes as { error: string }).error).toContain('tham chiếu đến danh mục không tồn tại');
+
+    // 6. Rejects duplicate budget in same month for same category
+    const dupBudgetSnapshot = {
+      ...defaultSnapshot,
+      budgets: [
+        ...INITIAL_BUDGETS,
+        {
+          id: 'bud-dup',
+          categoryId: INITIAL_BUDGETS[0].categoryId,
+          categoryName: 'Trùng lặp',
+          amount: 2000000,
+          month: INITIAL_BUDGETS[0].month,
+        },
+      ],
+    };
+    const dupBudgetRes = validateAndNormalizeAppSnapshot(dupBudgetSnapshot);
+    expect(dupBudgetRes.ok).toBe(false);
+    expect((dupBudgetRes as { error: string }).error).toContain('Trùng lặp ngân sách');
+
+    // 7. Rejects PAID bill with no linked transaction
+    const orphanPaidBillSnapshot = {
+      ...defaultSnapshot,
+      bills: [
+        ...INITIAL_BILLS,
+        {
+          id: 'bill-unlinked-paid',
+          name: 'Hóa đơn ma đã thanh toán',
+          amount: 500000,
+          categoryId: 'cat-bills',
+          dueDay: 10,
+          frequency: 'MONTHLY',
+          status: 'PAID',
+        },
+      ],
+    };
+    const orphanPaidRes = validateAndNormalizeAppSnapshot(orphanPaidBillSnapshot);
+    expect(orphanPaidRes.ok).toBe(false);
+    expect((orphanPaidRes as { error: string }).error).toContain('không có giao dịch thanh toán liên kết');
+
+    // 8. Rejects CREDIT wallet where debt > creditLimit
+    const overlimitSnapshot = {
+      ...defaultSnapshot,
+      wallets: [
+        {
+          id: 'wal-overlimit',
+          name: 'Thẻ vượt hạn mức',
+          type: 'CREDIT',
+          balance: 60000000, // Dư nợ 60M
+          creditLimit: 50000000, // Hạn mức 50M
+        },
+      ],
+      transactions: [],
+      bills: [],
+    };
+    const overlimitRes = validateAndNormalizeAppSnapshot(overlimitSnapshot);
+    expect(overlimitRes.ok).toBe(false);
+    expect((overlimitRes as { error: string }).error).toContain('vượt quá hạn mức');
+  });
 });
+

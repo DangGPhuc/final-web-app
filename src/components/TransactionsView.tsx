@@ -21,7 +21,7 @@ import {
   FileCheck,
   X,
 } from 'lucide-react';
-import { formatCurrency, formatDate, exportToCSV, exportToExcel } from '@/lib/utils';
+import { formatCurrency, formatDate, exportToCSV, exportToExcel, getLocalDateKey } from '@/lib/utils';
 import { IconHelper } from './IconHelper';
 import { ReceiptModal } from './ReceiptModal';
 import { EditTransactionModal } from './EditTransactionModal';
@@ -68,14 +68,9 @@ export const TransactionsView: React.FC = () => {
       if (selectedTag !== 'ALL' && (!tx.tags || !tx.tags.includes(selectedTag))) return false;
 
       // Date Range
-      if (startDate) {
-        const txDate = tx.date.split('T')[0];
-        if (txDate < startDate) return false;
-      }
-      if (endDate) {
-        const txDate = tx.date.split('T')[0];
-        if (txDate > endDate) return false;
-      }
+      const localDateKey = getLocalDateKey(tx.date);
+      if (startDate && localDateKey < startDate) return false;
+      if (endDate && localDateKey > endDate) return false;
 
       // Search term
       if (searchTerm.trim()) {
@@ -111,7 +106,7 @@ export const TransactionsView: React.FC = () => {
   const groupedTransactions = useMemo(() => {
     const groups: { [dateKey: string]: Transaction[] } = {};
     filteredTransactions.forEach((tx) => {
-      const dateKey = tx.date.split('T')[0];
+      const dateKey = getLocalDateKey(tx.date);
       if (!groups[dateKey]) {
         groups[dateKey] = [];
       }
