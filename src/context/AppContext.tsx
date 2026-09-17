@@ -30,6 +30,9 @@ import {
   applyGoalWithdraw,
   applyDeleteGoal,
   applyEditGoal,
+  applyAddBill,
+  applyEditBill,
+  applyDeleteBill,
   applyPayBill,
   applyUnpayBill,
   applyDeleteWallet,
@@ -282,19 +285,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Bills
   const addBill = (bill: Omit<RecurringBill, 'id'>) => {
-    const newBill: RecurringBill = {
-      ...bill,
-      id: `bill-${Date.now()}`,
-    };
-    setBills((prev) => [...prev, newBill]);
+    const res = applyAddBill({ wallets, transactions, goals, bills }, bill);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setBills(res.state.bills);
   };
 
   const editBill = (id: string, updated: Partial<RecurringBill>) => {
-    setBills((prev) => prev.map((b) => (b.id === id ? { ...b, ...updated } : b)));
+    const res = applyEditBill({ wallets, transactions, goals, bills }, id, updated);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setBills(res.state.bills);
   };
 
   const deleteBill = (id: string) => {
-    setBills((prev) => prev.filter((b) => b.id !== id));
+    const res = applyDeleteBill({ wallets, transactions, goals, bills }, id);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setBills(res.state.bills);
   };
 
   const payBill = (billId: string, walletId: string) => {

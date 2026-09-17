@@ -280,7 +280,12 @@ export const BillsView: React.FC = () => {
                   {/* Edit / Delete */}
                   <div className="flex items-center space-x-1">
                     <button
+                      disabled={isPaid}
                       onClick={() => {
+                        if (isPaid) {
+                          alert('Không thể chỉnh sửa hóa đơn đã thanh toán. Vui lòng hoàn tác thanh toán (Đặt lại) trước.');
+                          return;
+                        }
                         setEditingBill(bill);
                         setBillName(bill.name);
                         setBillAmount(String(bill.amount));
@@ -290,17 +295,32 @@ export const BillsView: React.FC = () => {
                         setBillNote(bill.note || '');
                         setBillModalOpen(true);
                       }}
-                      className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg transition-colors"
+                      className={`p-1.5 rounded-lg transition-colors ${
+                        isPaid
+                          ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed'
+                          : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40'
+                      }`}
+                      title={isPaid ? 'Hoàn tác thanh toán trước khi chỉnh sửa' : 'Chỉnh sửa'}
                     >
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
                     <button
+                      disabled={isPaid}
                       onClick={() => {
+                        if (isPaid) {
+                          alert('Không thể xóa hóa đơn đã thanh toán. Vui lòng hoàn tác thanh toán (Đặt lại) trước.');
+                          return;
+                        }
                         if (confirm(`Xác nhận xóa hóa đơn ${bill.name}?`)) {
                           deleteBill(bill.id);
                         }
                       }}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors"
+                      className={`p-1.5 rounded-lg transition-colors ${
+                        isPaid
+                          ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed'
+                          : 'text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40'
+                      }`}
+                      title={isPaid ? 'Hoàn tác thanh toán trước khi xóa' : 'Xóa'}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

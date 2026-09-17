@@ -10,6 +10,8 @@ import {
   applyEditGoal,
   applyPayBill,
   applyUnpayBill,
+  applyEditBill,
+  applyDeleteBill,
   applyDeleteWallet,
   applyEditWallet,
   validateTransferFee,
@@ -1290,5 +1292,128 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     expect(editedGoal?.name).toBe('Quỹ Dự Phòng Đổi Tên');
     expect(editedGoal?.targetAmount).toBe(30000000);
     expect(editedGoal?.color).toBe('#f59e0b');
+  });
+
+  // =========================================================================
+  // CASE T — Paid Bill Cannot Be Edited
+  // =========================================================================
+  it('CASE T — Paid Bill Cannot Be Edited: editing a PAID or linked bill is rejected', () => {
+    const state = createMockState({
+      bills: [
+        {
+          id: 'bill-t',
+          name: 'Tiền Internet T',
+          amount: 350000,
+          categoryId: 'cat-bills',
+          dueDay: 15,
+          frequency: 'MONTHLY',
+          status: 'UNPAID',
+        },
+      ],
+      wallets: [
+        {
+          id: 'wal-bank',
+          name: 'Ngân hàng Chính',
+          type: 'BANK',
+          balance: 10000000,
+          initialBalance: 10000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          createdAt: '2026-01-01',
+        },
+      ],
+      transactions: [],
+    });
+
+    // 1. Pay bill successfully
+    const payRes = applyPayBill(state, 'bill-t', 'wal-bank');
+    expect(payRes.ok).toBe(true);
+    if (!payRes.ok) return;
+
+    // 2. Attempt to edit amount, category, or dueDay while PAID
+    const editRes = applyEditBill(payRes.state, 'bill-t', {
+      amount: 500000,
+      dueDay: 20,
+      name: 'Internet Nâng Cấp',
+    });
+
+    expect(editRes.ok).toBe(false);
+    if (!editRes.ok) {
+      expect(editRes.error).toMatch(/đã thanh toán|liên kết/i);
+    }
+
+    // Expected: bill unchanged, linked payment unchanged
+    const bill = payRes.state.bills.find((b) => b.id === 'bill-t');
+    expect(bill?.amount).toBe(350000);
+    expect(bill?.dueDay).toBe(15);
+    expect(bill?.status).toBe('PAID');
+
+    const linkedTx = payRes.state.transactions.find(
+      (t) => t.origin === 'BILL_PAYMENT' && t.originId === 'bill-t'
+    );
+    expect(linkedTx).toBeDefined();
+    expect(linkedTx?.amount).toBe(350000);
+  });
+
+  // =========================================================================
+  // CASE U — Paid Bill Cannot Be Deleted
+  // =========================================================================
+  it('CASE U — Paid Bill Cannot Be Deleted: delete rejected while PAID; succeeds after unpay', () => {
+    const state = createMockState({
+      bills: [
+        {
+          id: 'bill-u',
+          name: 'Tiền Điện U',
+          amount: 500000,
+          categoryId: 'cat-bills',
+          dueDay: 12,
+          frequency: 'MONTHLY',
+          status: 'UNPAID',
+        },
+      ],
+      wallets: [
+        {
+          id: 'wal-bank',
+          name: 'Ngân hàng Chính',
+          type: 'BANK',
+          balance: 10000000,
+          initialBalance: 10000000,
+          currency: 'VND',
+          color: '#0ea5e9',
+          icon: 'Building2',
+          createdAt: '2026-01-01',
+        },
+      ],
+      transactions: [],
+    });
+
+    // 1. Pay bill successfully
+    const payRes = applyPayBill(state, 'bill-u', 'wal-bank');
+    expect(payRes.ok).toBe(true);
+    if (!payRes.ok) return;
+
+    // 2. Attempt delete while PAID
+    const deleteRes = applyDeleteBill(payRes.state, 'bill-u');
+    expect(deleteRes.ok).toBe(false);
+    if (!deleteRes.ok) {
+      expect(deleteRes.error).toMatch(/đã thanh toán|liên kết/i);
+    }
+
+    // Expected: bill remains, BILL_PAYMENT transaction remains
+    expect(payRes.state.bills.some((b) => b.id === 'bill-u')).toBe(true);
+    expect(payRes.state.transactions.some((t) => t.originId === 'bill-u')).toBe(true);
+
+    // 3. Unpay bill
+    const unpayRes = applyUnpayBill(payRes.state, 'bill-u');
+    expect(unpayRes.ok).toBe(true);
+    if (!unpayRes.ok) return;
+
+    // 4. Delete after unpay
+    const deleteAfterUnpay = applyDeleteBill(unpayRes.state, 'bill-u');
+    expect(deleteAfterUnpay.ok).toBe(true);
+    if (deleteAfterUnpay.ok) {
+      expect(deleteAfterUnpay.state.bills.some((b) => b.id === 'bill-u')).toBe(false);
+    }
   });
 });

@@ -731,6 +731,171 @@ export function applyDeleteGoal(state: AppDomainState, goalId: string): DomainRe
 }
 
 /**
+ * Validate recurring bill fields:
+ * - name: non-empty string after trim
+ * - amount: finite number > 0
+ * - dueDay: integer between 1 and 31
+ * - frequency: 'MONTHLY' | 'QUARTERLY' | 'YEARLY'
+ */
+export function validateBillData(data: Partial<RecurringBill>): { valid: boolean; error?: string } {
+  if (data.name !== undefined && !data.name.trim()) {
+    return { valid: false, error: 'Tên hóa đơn không được để trống' };
+  }
+
+  if (data.amount !== undefined) {
+    if (typeof data.amount !== 'number' || isNaN(data.amount) || !isFinite(data.amount) || data.amount <= 0) {
+      return { valid: false, error: 'Số tiền hóa đơn không hợp lệ (phải là số hữu hạn > 0)' };
+    }
+  }
+
+  if (data.dueDay !== undefined) {
+    if (
+      typeof data.dueDay !== 'number' ||
+      !Number.isInteger(data.dueDay) ||
+      isNaN(data.dueDay) ||
+      data.dueDay < 1 ||
+      data.dueDay > 31
+    ) {
+      return { valid: false, error: 'Ngày đến hạn phải là số nguyên từ 1 đến 31' };
+    }
+  }
+
+  if (data.frequency !== undefined) {
+    const validFrequencies = ['MONTHLY', 'QUARTERLY', 'YEARLY'];
+    if (!validFrequencies.includes(data.frequency)) {
+      return { valid: false, error: 'Tần suất hóa đơn không hợp lệ' };
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Add a recurring bill with domain validation.
+ */
+export function applyAddBill(
+  state: AppDomainState,
+  billInput: Omit<RecurringBill, 'id'>
+): DomainResult<{ state: AppDomainState; newBill: RecurringBill }> {
+  if (!billInput.name || !billInput.name.trim()) {
+    return { ok: false, error: 'Tên hóa đơn không được để trống' };
+  }
+
+  const valCheck = validateBillData(billInput);
+  if (!valCheck.valid) {
+    return { ok: false, error: valCheck.error || 'Dữ liệu hóa đơn không hợp lệ' };
+  }
+
+  const id = `bill-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const newBill: RecurringBill = {
+    ...billInput,
+    id,
+    name: billInput.name.trim(),
+    status: 'UNPAID',
+    lastPaidDate: undefined,
+  };
+
+  return {
+    ok: true,
+    state: {
+      ...state,
+      bills: [...state.bills, newBill],
+    },
+    newBill,
+  };
+}
+
+/**
+ * Edit an existing bill safely.
+ * Invariant: If bill.status === 'PAID' or a linked BILL_PAYMENT transaction exists,
+ * generic edit must be rejected. The user must unpay / undo payment first.
+ */
+export function applyEditBill(
+  state: AppDomainState,
+  billId: string,
+  updates: Partial<RecurringBill>
+): DomainResult<{ state: AppDomainState; updatedBill: RecurringBill }> {
+  const bill = state.bills.find((b) => b.id === billId);
+  if (!bill) {
+    return { ok: false, error: 'Không tìm thấy hóa đơn' };
+  }
+
+  const hasLinkedTx = state.transactions.some(
+    (t) => t.origin === 'BILL_PAYMENT' && t.originId === billId
+  );
+
+  if (bill.status === 'PAID' || hasLinkedTx) {
+    return {
+      ok: false,
+      error: 'Không thể chỉnh sửa hóa đơn đã thanh toán hoặc có giao dịch liên kết. Vui lòng hoàn tác thanh toán (Đặt lại) trước khi chỉnh sửa.',
+    };
+  }
+
+  const valCheck = validateBillData(updates);
+  if (!valCheck.valid) {
+    return { ok: false, error: valCheck.error || 'Dữ liệu chỉnh sửa hóa đơn không hợp lệ' };
+  }
+
+  const {
+    id: _ignoredId,
+    status: _ignoredStatus,
+    lastPaidDate: _ignoredLastPaidDate,
+    ...allowedUpdates
+  } = updates;
+
+  const updatedBill: RecurringBill = {
+    ...bill,
+    ...allowedUpdates,
+    id: bill.id,
+    status: 'UNPAID',
+    name: allowedUpdates.name ? allowedUpdates.name.trim() : bill.name,
+  };
+
+  return {
+    ok: true,
+    state: {
+      ...state,
+      bills: state.bills.map((b) => (b.id === billId ? updatedBill : b)),
+    },
+    updatedBill,
+  };
+}
+
+/**
+ * Delete a recurring bill safely.
+ * Invariant: If bill.status === 'PAID' or a linked BILL_PAYMENT transaction exists,
+ * generic delete must be rejected. The user must unpay / undo payment first.
+ */
+export function applyDeleteBill(
+  state: AppDomainState,
+  billId: string
+): DomainResult<{ state: AppDomainState }> {
+  const bill = state.bills.find((b) => b.id === billId);
+  if (!bill) {
+    return { ok: false, error: 'Không tìm thấy hóa đơn cần xóa' };
+  }
+
+  const hasLinkedTx = state.transactions.some(
+    (t) => t.origin === 'BILL_PAYMENT' && t.originId === billId
+  );
+
+  if (bill.status === 'PAID' || hasLinkedTx) {
+    return {
+      ok: false,
+      error: 'Không thể xóa hóa đơn đã thanh toán hoặc có giao dịch thanh toán liên kết. Vui lòng hoàn tác thanh toán (Đặt lại) trước khi xóa.',
+    };
+  }
+
+  return {
+    ok: true,
+    state: {
+      ...state,
+      bills: state.bills.filter((b) => b.id !== billId),
+    },
+  };
+}
+
+/**
  * Pay a recurring bill:
  * - Validates target wallet and amount
  * - Marks bill PAID
