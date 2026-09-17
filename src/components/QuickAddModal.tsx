@@ -90,21 +90,34 @@ export const QuickAddModal: React.FC = () => {
       return;
     }
 
-    const numFee = typeof fee === 'string' && Number(fee) > 0 ? Number(fee) : 0;
+    const selectedToWallet = wallets.find((w) => w.id === toWalletId);
+    const selectedCategory = categories.find((c) => c.id === categoryId);
 
+    const feeParsed = Number(fee);
     if (type === 'TRANSFER') {
       if (!toWalletId || toWalletId === walletId) {
         alert('Vui lòng chọn ví nhận khác ví chuyển');
         return;
       }
-      if (selectedWallet.balance < numAmount + numFee) {
+      if (selectedWallet.type === 'CREDIT') {
+        alert('Không hỗ trợ rút tiền mặt hoặc chuyển tiền từ thẻ tín dụng (Cash advance)');
+        return;
+      }
+      if (isNaN(feeParsed) || !isFinite(feeParsed) || feeParsed < 0) {
+        alert('Phí chuyển khoản không hợp lệ (phải là số >= 0)');
+        return;
+      }
+      if (selectedWallet.balance < numAmount + feeParsed) {
         alert('Số dư ví nguồn không đủ để thực hiện chuyển khoản');
+        return;
+      }
+      if (selectedToWallet && selectedToWallet.type === 'CREDIT' && numAmount > selectedToWallet.balance) {
+        alert('Số tiền thanh toán vượt quá dư nợ hiện tại của thẻ tín dụng');
         return;
       }
     }
 
-    const selectedToWallet = wallets.find((w) => w.id === toWalletId);
-    const selectedCategory = categories.find((c) => c.id === categoryId);
+    const numFee = typeof fee === 'string' && Number(fee) > 0 && isFinite(Number(fee)) ? Number(fee) : 0;
 
     addTransaction({
       type,
@@ -115,9 +128,11 @@ export const QuickAddModal: React.FC = () => {
       walletName: selectedWallet?.name,
       toWalletId: type === 'TRANSFER' ? toWalletId : undefined,
       toWalletName: type === 'TRANSFER' ? selectedToWallet?.name : undefined,
-      fee: type === 'TRANSFER' ? Number(fee) : 0,
+      fee: type === 'TRANSFER' ? numFee : 0,
+      transferKind: type === 'TRANSFER' ? (selectedToWallet?.type === 'CREDIT' ? 'CREDIT_PAYMENT' : 'WALLET_TRANSFER') : undefined,
+      origin: 'MANUAL',
       date: new Date(date || Date.now()).toISOString(),
-      note: note || (type === 'TRANSFER' ? `Chuyển sang ${selectedToWallet?.name}` : selectedCategory?.name || 'Giao dịch'),
+      note: note || (type === 'TRANSFER' ? (selectedToWallet?.type === 'CREDIT' ? `Thanh toán thẻ ${selectedToWallet?.name}` : `Chuyển sang ${selectedToWallet?.name}`) : selectedCategory?.name || 'Giao dịch'),
       tags,
       receiptImage,
     });
