@@ -74,7 +74,7 @@ export const BudgetsView: React.FC = () => {
 
   // Calculate budget statuses
   const budgetStatuses = calculateBudgetStatuses(budgets, transactions, currentMonth);
-  const totalBudgetLimit = budgets.reduce((sum, b) => sum + b.amount, 0);
+  const totalBudgetLimit = budgetStatuses.reduce((sum, b) => sum + b.budget.amount, 0);
   const totalBudgetSpent = budgetStatuses.reduce((sum, b) => sum + b.spent, 0);
   const totalBudgetRemaining = totalBudgetLimit - totalBudgetSpent;
 
@@ -250,7 +250,7 @@ export const BudgetsView: React.FC = () => {
               : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
           }`}
         >
-          Hạn mức theo Danh mục ({budgets.length})
+          Hạn mức theo Danh mục ({budgetStatuses.length})
         </button>
 
         <button

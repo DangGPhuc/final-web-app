@@ -14,7 +14,8 @@ import {
   validateTransferFee,
   AppDomainState,
 } from '../src/lib/domain-engine';
-import { Wallet, SavingsGoal, RecurringBill } from '../src/types';
+import { Wallet, SavingsGoal, RecurringBill, Budget } from '../src/types';
+import { calculateBudgetStatuses } from '../src/lib/utils';
 
 function createMockState(overrides?: Partial<AppDomainState>): AppDomainState {
   const defaultWallets: Wallet[] = [
@@ -1114,5 +1115,72 @@ describe('Domain Financial Integrity Tests — FinTrack Pro v2', () => {
     expect(bank?.balance).toBe(8000000);
     expect(credit?.balance).toBe(1000000);
     expect(transferRes.newTx.transferKind).toBe('CREDIT_PAYMENT');
+  });
+
+  // =========================================================================
+  // CASE R — Budget Month Isolation
+  // =========================================================================
+  it('CASE R — Budget Month Isolation: calculating budget statuses for a month only includes budgets of that month', () => {
+    const budgets: Budget[] = [
+      {
+        id: 'bud-food-sep',
+        categoryId: 'cat-food',
+        categoryName: 'Ăn uống',
+        amount: 4000000,
+        month: '2026-09',
+      },
+      {
+        id: 'bud-food-oct',
+        categoryId: 'cat-food',
+        categoryName: 'Ăn uống',
+        amount: 5000000,
+        month: '2026-10',
+      },
+    ];
+
+    const transactions = [
+      {
+        id: 'tx-oct-food',
+        type: 'EXPENSE' as const,
+        amount: 2000000,
+        categoryId: 'cat-food',
+        categoryName: 'Ăn uống',
+        walletId: 'wal-bank',
+        date: '2026-10-05T12:00:00',
+        note: 'Tiệc liên hoan tháng 10',
+        tags: [],
+        createdAt: '2026-10-05T12:00:00',
+      },
+      {
+        id: 'tx-sep-food',
+        type: 'EXPENSE' as const,
+        amount: 1500000,
+        categoryId: 'cat-food',
+        categoryName: 'Ăn uống',
+        walletId: 'wal-bank',
+        date: '2026-09-15T12:00:00',
+        note: 'Ăn uống tháng 9',
+        tags: [],
+        createdAt: '2026-09-15T12:00:00',
+      },
+    ];
+
+    // Calculate budget status for October ('2026-10')
+    const octStatuses = calculateBudgetStatuses(budgets, transactions, '2026-10');
+
+    // Expected: Exactly 1 budget status (October Food budget)
+    expect(octStatuses.length).toBe(1);
+
+    const octBudgetStatus = octStatuses[0];
+    expect(octBudgetStatus.budget.id).toBe('bud-food-oct');
+    expect(octBudgetStatus.budget.month).toBe('2026-10');
+    expect(octBudgetStatus.budget.amount).toBe(5000000);
+    expect(octBudgetStatus.spent).toBe(2000000);
+    expect(octBudgetStatus.remaining).toBe(3000000);
+    expect(octBudgetStatus.percentage).toBe(40);
+
+    // September budget must NOT appear in October results
+    expect(octStatuses.some((b) => b.budget.id === 'bud-food-sep')).toBe(false);
+    expect(octStatuses.some((b) => b.budget.month === '2026-09')).toBe(false);
   });
 });

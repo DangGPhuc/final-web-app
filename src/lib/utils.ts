@@ -98,7 +98,9 @@ export function calculateBudgetStatuses(
     (t) => t.type === 'EXPENSE' && t.date.startsWith(monthStr)
   );
 
-  return budgets.map((b) => {
+  const monthBudgets = budgets.filter((b) => b.month === monthStr);
+
+  return monthBudgets.map((b) => {
     const spent = currentMonthExpenses
       .filter((t) => t.categoryId === b.categoryId)
       .reduce((sum, t) => sum + t.amount, 0);
