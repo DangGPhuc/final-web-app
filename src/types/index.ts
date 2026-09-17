@@ -27,6 +27,9 @@ export interface Category {
   color: string;
 }
 
+export type TransactionOrigin = 'MANUAL' | 'GOAL' | 'BILL_PAYMENT';
+export type TransferKind = 'WALLET_TRANSFER' | 'GOAL_DEPOSIT' | 'GOAL_WITHDRAWAL' | 'CREDIT_PAYMENT';
+
 export interface Transaction {
   id: string;
   type: TransactionType;
@@ -43,6 +46,11 @@ export interface Transaction {
   tags: string[];
   receiptImage?: string; // Data URL
   createdAt: string;
+  origin?: TransactionOrigin;
+  originId?: string;
+  transferKind?: TransferKind;
+  goalId?: string;
+  goalName?: string;
 }
 
 export interface Budget {
@@ -102,9 +110,11 @@ export interface SavingsGoal {
 }
 
 export interface FinancialSummary {
-  totalAssets: number; // Cash + Bank + Savings - Credit Card Debt
+  totalAssets: number; // Cash + Bank + Savings (wallets + goals) - Credit Card Debt
   availableBalance: number; // Cash + Bank
   totalCreditDebt: number;
+  walletSavings: number;
+  goalSavings: number;
   totalSavings: number;
   monthlyIncome: number;
   monthlyExpense: number;

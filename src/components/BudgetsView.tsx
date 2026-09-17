@@ -739,11 +739,16 @@ export const BudgetsView: React.FC = () => {
 
                     <button
                       onClick={() => {
+                        if (g.currentAmount > 0) {
+                          alert('Không thể xóa mục tiêu tích lũy khi số dư lớn hơn 0. Vui lòng rút hết tiền về ví trước khi xóa.');
+                          return;
+                        }
                         if (confirm(`Bạn có chắc muốn xóa hũ ${g.name}?`)) {
                           deleteGoal(g.id);
                         }
                       }}
                       className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-xl transition-colors"
+                      title={g.currentAmount > 0 ? "Cần rút hết tiền trước khi xóa" : "Xóa mục tiêu"}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>

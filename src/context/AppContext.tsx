@@ -21,7 +21,20 @@ import {
   INITIAL_PLANNER,
 } from '@/lib/mock-data';
 import { DEFAULT_CATEGORIES } from '@/lib/constants';
-import { calculateFinancialSummary, getCurrentYearMonth } from '@/lib/utils';
+import {
+  calculateFinancialSummary,
+  applyAddTransaction,
+  applyEditTransaction,
+  applyDeleteTransaction,
+  applyGoalDeposit,
+  applyGoalWithdraw,
+  applyDeleteGoal,
+  applyPayBill,
+  applyUnpayBill,
+  applyDeleteWallet,
+  validateTransferFee,
+} from '@/lib/domain-engine';
+import { getCurrentYearMonth } from '@/lib/utils';
 
 interface AppContextType {
   wallets: Wallet[];
@@ -62,6 +75,7 @@ interface AppContextType {
   editBill: (id: string, bill: Partial<RecurringBill>) => void;
   deleteBill: (id: string) => void;
   payBill: (billId: string, walletId: string) => void;
+  unpayBill: (billId: string) => void;
 
   // Goals
   addGoal: (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => void;
@@ -141,163 +155,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Financial summary
-  const financialSummary = calculateFinancialSummary(wallets, transactions, currentMonth);
+  const financialSummary = calculateFinancialSummary(wallets, transactions, currentMonth, goals);
 
   // Add Transaction
   const addTransaction = (tx: Omit<Transaction, 'id' | 'createdAt'>) => {
-    // Validate amount
-    if (typeof tx.amount !== 'number' || isNaN(tx.amount) || !isFinite(tx.amount) || tx.amount <= 0) {
-      console.warn('addTransaction: Số tiền không hợp lệ (> 0 và hữu hạn)', tx.amount);
+    const res = applyAddTransaction({ wallets, transactions, goals, bills }, tx);
+    if (!res.ok) {
+      alert(res.error);
       return;
     }
-
-    // Validate wallet existence
-    const sourceWallet = wallets.find((w) => w.id === tx.walletId);
-    if (!sourceWallet) {
-      console.warn('addTransaction: Ví nguồn không tồn tại', tx.walletId);
-      return;
-    }
-
-    // Validate transfer specifics
-    const fee = typeof tx.fee === 'number' && isFinite(tx.fee) && tx.fee >= 0 ? tx.fee : 0;
-    if (tx.type === 'TRANSFER') {
-      if (!tx.toWalletId || tx.toWalletId === tx.walletId) {
-        alert('Ví nhận phải khác ví chuyển');
-        return;
-      }
-      const destWallet = wallets.find((w) => w.id === tx.toWalletId);
-      if (!destWallet) {
-        console.warn('addTransaction: Ví đích không tồn tại', tx.toWalletId);
-        return;
-      }
-      if (sourceWallet.balance < tx.amount + fee) {
-        alert('Số dư ví nguồn không đủ để thực hiện chuyển khoản!');
-        return;
-      }
-    }
-
-    const id = `tx-${Date.now()}`;
-    const createdAt = new Date().toISOString();
-    const newTx: Transaction = {
-      ...tx,
-      fee,
-      id,
-      createdAt,
-    };
-
-    // Update wallet balances
-    setWallets((prevWallets) =>
-      prevWallets.map((w) => {
-        if (tx.type === 'EXPENSE' && w.id === tx.walletId) {
-          return { ...w, balance: w.balance - tx.amount };
-        }
-        if (tx.type === 'INCOME' && w.id === tx.walletId) {
-          return { ...w, balance: w.balance + tx.amount };
-        }
-        if (tx.type === 'TRANSFER') {
-          if (w.id === tx.walletId) {
-            return { ...w, balance: w.balance - (tx.amount + fee) };
-          }
-          if (w.id === tx.toWalletId) {
-            return { ...w, balance: w.balance + tx.amount };
-          }
-        }
-        return w;
-      })
-    );
-
-    setTransactions((prev) => [newTx, ...prev]);
+    setWallets(res.state.wallets);
+    setTransactions(res.state.transactions);
   };
 
   // Edit Transaction
   const editTransaction = (id: string, updated: Partial<Transaction>) => {
-    const oldTx = transactions.find((t) => t.id === id);
-    if (!oldTx) return;
-
-    if (updated.amount !== undefined) {
-      if (typeof updated.amount !== 'number' || isNaN(updated.amount) || !isFinite(updated.amount) || updated.amount <= 0) {
-        console.warn('editTransaction: Số tiền không hợp lệ');
-        return;
-      }
-    }
-
-    const newTx: Transaction = { ...oldTx, ...updated };
-    if (newTx.type === 'TRANSFER' && newTx.toWalletId && newTx.walletId === newTx.toWalletId) {
-      alert('Ví nhận phải khác ví chuyển');
+    const res = applyEditTransaction({ wallets, transactions, goals, bills }, id, updated);
+    if (!res.ok) {
+      alert(res.error);
       return;
     }
-
-    // Rollback old transaction on wallets
-    let adjustedWallets = [...wallets];
-    adjustedWallets = adjustedWallets.map((w) => {
-      if (oldTx.type === 'EXPENSE' && w.id === oldTx.walletId) {
-        return { ...w, balance: w.balance + oldTx.amount };
-      }
-      if (oldTx.type === 'INCOME' && w.id === oldTx.walletId) {
-        return { ...w, balance: w.balance - oldTx.amount };
-      }
-      if (oldTx.type === 'TRANSFER') {
-        if (w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance + (oldTx.amount + (oldTx.fee || 0)) };
-        }
-        if (w.id === oldTx.toWalletId) {
-          return { ...w, balance: w.balance - oldTx.amount };
-        }
-      }
-      return w;
-    });
-
-    // Apply new transaction to wallets
-    const fee = typeof newTx.fee === 'number' && isFinite(newTx.fee) && newTx.fee >= 0 ? newTx.fee : 0;
-    adjustedWallets = adjustedWallets.map((w) => {
-      if (newTx.type === 'EXPENSE' && w.id === newTx.walletId) {
-        return { ...w, balance: w.balance - newTx.amount };
-      }
-      if (newTx.type === 'INCOME' && w.id === newTx.walletId) {
-        return { ...w, balance: w.balance + newTx.amount };
-      }
-      if (newTx.type === 'TRANSFER') {
-        if (w.id === newTx.walletId) {
-          return { ...w, balance: w.balance - (newTx.amount + fee) };
-        }
-        if (w.id === newTx.toWalletId) {
-          return { ...w, balance: w.balance + newTx.amount };
-        }
-      }
-      return w;
-    });
-
-    setWallets(adjustedWallets);
-    setTransactions((prev) => prev.map((t) => (t.id === id ? newTx : t)));
+    setWallets(res.state.wallets);
+    setTransactions(res.state.transactions);
   };
 
   // Delete Transaction
   const deleteTransaction = (id: string) => {
-    const oldTx = transactions.find((t) => t.id === id);
-    if (!oldTx) return;
-
-    // Rollback wallet balance
-    setWallets((prevWallets) =>
-      prevWallets.map((w) => {
-        if (oldTx.type === 'EXPENSE' && w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance + oldTx.amount };
-        }
-        if (oldTx.type === 'INCOME' && w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance - oldTx.amount };
-        }
-        if (oldTx.type === 'TRANSFER') {
-          if (w.id === oldTx.walletId) {
-            return { ...w, balance: w.balance + (oldTx.amount + (oldTx.fee || 0)) };
-          }
-          if (w.id === oldTx.toWalletId) {
-            return { ...w, balance: w.balance - oldTx.amount };
-          }
-        }
-        return w;
-      })
-    );
-
-    setTransactions((prev) => prev.filter((t) => t.id !== id));
+    const res = applyDeleteTransaction({ wallets, transactions, goals, bills }, id);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setWallets(res.state.wallets);
+    setTransactions(res.state.transactions);
   };
 
   // Wallets
@@ -324,7 +214,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteWallet = (id: string) => {
-    setWallets((prev) => prev.filter((w) => w.id !== id));
+    const res = applyDeleteWallet({ wallets, transactions, goals, bills }, id);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setWallets(res.state.wallets);
   };
 
   const transferFunds = (
@@ -334,37 +229,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     fee: number,
     note?: string
   ) => {
-    if (typeof amount !== 'number' || isNaN(amount) || !isFinite(amount) || amount <= 0) {
-      alert('Số tiền chuyển phải lớn hơn 0');
-      return;
-    }
-    if (fromWalletId === toWalletId) {
-      alert('Ví nhận phải khác ví chuyển');
-      return;
-    }
     const fromW = wallets.find((w) => w.id === fromWalletId);
     const toW = wallets.find((w) => w.id === toWalletId);
     if (!fromW || !toW) {
       alert('Không tìm thấy thông tin ví');
       return;
     }
-    const validFee = typeof fee === 'number' && isFinite(fee) && fee >= 0 ? fee : 0;
-    if (fromW.balance < amount + validFee) {
-      alert('Số dư ví nguồn không đủ để thực hiện chuyển khoản');
+
+    const feeCheck = validateTransferFee(fee);
+    if (!feeCheck.valid) {
+      alert(feeCheck.error || 'Phí chuyển khoản không hợp lệ');
       return;
     }
 
     addTransaction({
       type: 'TRANSFER',
       amount,
-      fee: validFee,
+      fee: feeCheck.fee,
       walletId: fromWalletId,
       walletName: fromW.name,
       toWalletId,
       toWalletName: toW.name,
       date: new Date().toISOString(),
-      note: note || `Chuyển khoản từ ${fromW.name} sang ${toW.name}`,
-      tags: ['Chuyển khoản nội bộ'],
+      note: note || (toW.type === 'CREDIT' ? `Thanh toán dư nợ thẻ ${toW.name}` : `Chuyển khoản từ ${fromW.name} sang ${toW.name}`),
+      tags: [toW.type === 'CREDIT' ? 'Thanh toán thẻ tín dụng' : 'Chuyển khoản nội bộ'],
+      transferKind: toW.type === 'CREDIT' ? 'CREDIT_PAYMENT' : 'WALLET_TRANSFER',
+      origin: 'MANUAL',
     });
   };
 
@@ -407,53 +297,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const payBill = (billId: string, walletId: string) => {
-    const bill = bills.find((b) => b.id === billId);
-    if (!bill) return;
-
-    const targetWallet = wallets.find((w) => w.id === walletId) || wallets[0];
-    if (!targetWallet) {
-      alert('Không tìm thấy ví thanh toán');
+    const res = applyPayBill({ wallets, transactions, goals, bills }, billId, walletId);
+    if (!res.ok) {
+      alert(res.error);
       return;
     }
+    setWallets(res.state.wallets);
+    setBills(res.state.bills);
+    setTransactions(res.state.transactions);
+  };
 
-    if (typeof bill.amount !== 'number' || isNaN(bill.amount) || !isFinite(bill.amount) || bill.amount <= 0) {
-      alert('Số tiền hóa đơn không hợp lệ');
+  const unpayBill = (billId: string) => {
+    const res = applyUnpayBill({ wallets, transactions, goals, bills }, billId);
+    if (!res.ok) {
+      alert(res.error);
       return;
     }
-
-    if (targetWallet.type !== 'CREDIT' && targetWallet.balance < bill.amount) {
-      alert('Số dư ví không đủ để thanh toán hóa đơn này');
-      return;
-    }
-
-    const billCategory = categories.find((c) => c.id === bill.categoryId);
-
-    // 1. Mark bill as PAID
-    setBills((prev) =>
-      prev.map((b) =>
-        b.id === billId
-          ? {
-              ...b,
-              status: 'PAID',
-              lastPaidDate: new Date().toISOString().split('T')[0],
-              walletId: targetWallet.id,
-            }
-          : b
-      )
-    );
-
-    // 2. Automatically record transaction
-    addTransaction({
-      type: 'EXPENSE',
-      amount: bill.amount,
-      categoryId: bill.categoryId,
-      categoryName: billCategory?.name || bill.categoryName || 'Hóa đơn',
-      walletId: targetWallet.id,
-      walletName: targetWallet.name,
-      date: new Date().toISOString(),
-      note: `Thanh toán hóa đơn: ${bill.name}`,
-      tags: ['Hóa đơn định kỳ'],
-    });
+    setWallets(res.state.wallets);
+    setBills(res.state.bills);
+    setTransactions(res.state.transactions);
   };
 
   // Goals
@@ -477,115 +339,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteGoal = (id: string) => {
-    setGoals((prev) => prev.filter((g) => g.id !== id));
+    const res = applyDeleteGoal({ wallets, transactions, goals, bills }, id);
+    if (!res.ok) {
+      alert(res.error);
+      return;
+    }
+    setGoals(res.state.goals);
   };
 
   const depositToGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
-    if (typeof amount !== 'number' || isNaN(amount) || !isFinite(amount) || amount <= 0) {
-      alert('Số tiền nạp vào mục tiêu phải lớn hơn 0');
+    const res = applyGoalDeposit({ wallets, transactions, goals, bills }, goalId, walletId, amount, note);
+    if (!res.ok) {
+      alert(res.error);
       return;
     }
-
-    const goal = goals.find((g) => g.id === goalId);
-    const wallet = wallets.find((w) => w.id === walletId);
-    if (!goal || !wallet) {
-      alert('Không tìm thấy mục tiêu tích lũy hoặc ví');
-      return;
-    }
-
-    if (wallet.balance < amount) {
-      alert('Số dư ví không đủ để nạp vào mục tiêu tích lũy!');
-      return;
-    }
-
-    // Add to goal history & update current amount
-    const newHistoryItem = {
-      id: `gh-${Date.now()}`,
-      date: new Date().toISOString().split('T')[0],
-      amount,
-      type: 'DEPOSIT' as const,
-      walletId,
-      note: note || `Nạp từ ${wallet.name}`,
-    };
-
-    setGoals((prev) =>
-      prev.map((g) =>
-        g.id === goalId
-          ? {
-              ...g,
-              currentAmount: g.currentAmount + amount,
-              history: [newHistoryItem, ...g.history],
-            }
-          : g
-      )
-    );
-
-    // addTransaction is the single authoritative mutator for wallet balance (-amount)
-    addTransaction({
-      type: 'EXPENSE',
-      amount,
-      categoryId: 'cat-invest-exp',
-      categoryName: 'Đầu tư & Tích lũy',
-      walletId,
-      walletName: wallet.name,
-      date: new Date().toISOString(),
-      note: `Tích lũy vào hũ: ${goal.name}`,
-      tags: ['Tích lũy mục tiêu'],
-    });
+    setWallets(res.state.wallets);
+    setGoals(res.state.goals);
+    setTransactions(res.state.transactions);
   };
 
   const withdrawFromGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
-    if (typeof amount !== 'number' || isNaN(amount) || !isFinite(amount) || amount <= 0) {
-      alert('Số tiền rút khỏi mục tiêu phải lớn hơn 0');
+    const res = applyGoalWithdraw({ wallets, transactions, goals, bills }, goalId, walletId, amount, note);
+    if (!res.ok) {
+      alert(res.error);
       return;
     }
-
-    const goal = goals.find((g) => g.id === goalId);
-    const wallet = wallets.find((w) => w.id === walletId);
-    if (!goal || !wallet) {
-      alert('Không tìm thấy mục tiêu tích lũy hoặc ví');
-      return;
-    }
-
-    if (goal.currentAmount < amount) {
-      alert('Số tiền rút vượt quá số dư hiện có trong mục tiêu tích lũy!');
-      return;
-    }
-
-    // Deduct from goal
-    const newHistoryItem = {
-      id: `gh-${Date.now()}`,
-      date: new Date().toISOString().split('T')[0],
-      amount,
-      type: 'WITHDRAW' as const,
-      walletId,
-      note: note || `Rút về ${wallet.name}`,
-    };
-
-    setGoals((prev) =>
-      prev.map((g) =>
-        g.id === goalId
-          ? {
-              ...g,
-              currentAmount: Math.max(0, g.currentAmount - amount),
-              history: [newHistoryItem, ...g.history],
-            }
-          : g
-      )
-    );
-
-    // addTransaction is the single authoritative mutator for wallet balance (+amount)
-    addTransaction({
-      type: 'INCOME',
-      amount,
-      categoryId: 'cat-other-inc',
-      categoryName: 'Thu nhập khác',
-      walletId,
-      walletName: wallet.name,
-      date: new Date().toISOString(),
-      note: `Rút từ hũ tích lũy: ${goal.name}`,
-      tags: ['Rút hũ tiết kiệm'],
-    });
+    setWallets(res.state.wallets);
+    setGoals(res.state.goals);
+    setTransactions(res.state.transactions);
   };
 
   // Backup & Reset
@@ -762,6 +543,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         editBill,
         deleteBill,
         payBill,
+        unpayBill,
         addGoal,
         editGoal,
         deleteGoal,

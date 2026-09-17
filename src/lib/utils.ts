@@ -79,54 +79,7 @@ export function isDateInCurrentMonth(dateStr: string, currentYm: string = getCur
   return dateStr.startsWith(currentYm);
 }
 
-export function calculateFinancialSummary(
-  wallets: Wallet[],
-  transactions: Transaction[],
-  monthStr: string = getCurrentYearMonth()
-): FinancialSummary {
-  // Available balance: Cash + Bank
-  const availableBalance = wallets
-    .filter((w) => w.type === 'CASH' || w.type === 'BANK')
-    .reduce((sum, w) => sum + w.balance, 0);
-
-  // Credit Card debt
-  const totalCreditDebt = wallets
-    .filter((w) => w.type === 'CREDIT')
-    .reduce((sum, w) => sum + w.balance, 0);
-
-  // Savings
-  const totalSavings = wallets
-    .filter((w) => w.type === 'SAVINGS')
-    .reduce((sum, w) => sum + w.balance, 0);
-
-  // Net assets (Tổng tài sản) = Tiền mặt + Ngân hàng + Tiết kiệm - Dư nợ thẻ
-  const totalAssets = availableBalance + totalSavings - totalCreditDebt;
-
-  // Monthly transactions
-  const currentMonthTxs = transactions.filter((t) => t.date.startsWith(monthStr));
-
-  const monthlyIncome = currentMonthTxs
-    .filter((t) => t.type === 'INCOME')
-    .reduce((sum, t) => sum + t.amount, 0);
-
-  const monthlyExpense = currentMonthTxs
-    .filter((t) => t.type === 'EXPENSE')
-    .reduce((sum, t) => sum + t.amount, 0);
-
-  const netSavingsThisMonth = monthlyIncome - monthlyExpense;
-  const savingsRate = monthlyIncome > 0 ? Math.max(0, Math.round((netSavingsThisMonth / monthlyIncome) * 100)) : 0;
-
-  return {
-    totalAssets,
-    availableBalance,
-    totalCreditDebt,
-    totalSavings,
-    monthlyIncome,
-    monthlyExpense,
-    netSavingsThisMonth,
-    savingsRate,
-  };
-}
+export { calculateFinancialSummary } from './domain-engine';
 
 export interface BudgetStatusItem {
   budget: Budget;
