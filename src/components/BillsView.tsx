@@ -45,7 +45,7 @@ export const BillsView: React.FC = () => {
   const [payWalletId, setPayWalletId] = useState(wallets[0]?.id || '');
 
   // Current day in month
-  const today = 6; // Current date 06/09/2026
+  const today = new Date().getDate();
 
   // KPI Calculations
   const totalBillsAmount = bills.reduce((sum, b) => sum + b.amount, 0);
@@ -143,7 +143,7 @@ export const BillsView: React.FC = () => {
         </div>
 
         <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm">
-          <span className="text-xs font-semibold text-slate-400 uppercase">Đã thanh toán tháng 9</span>
+          <span className="text-xs font-semibold text-slate-400 uppercase">Đã thanh toán tháng {new Date().getMonth() + 1}</span>
           <p className="text-2xl font-black text-emerald-600 dark:text-emerald-400 mt-1">
             {formatCurrency(totalPaid)}
           </p>
@@ -174,7 +174,9 @@ export const BillsView: React.FC = () => {
             <CalendarCheck className="w-5 h-5 text-blue-500" />
             <span>Lịch nhắc thanh toán trong tháng</span>
           </h3>
-          <span className="text-xs text-slate-400">Hôm nay là ngày 06/09/2026</span>
+          <span className="text-xs text-slate-400">
+            Hôm nay là ngày {new Date().toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+          </span>
         </div>
 
         <div className="divide-y divide-slate-100 dark:divide-slate-800">

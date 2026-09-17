@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useApp } from '@/context/AppContext';
 import {
   Wallet,
@@ -30,23 +30,42 @@ import {
 const pieChartColors = ['#f97316', '#ec4899', '#8b5cf6', '#0ea5e9', '#eab308', '#10b981', '#64748b'];
 
 export const DashboardView: React.FC = () => {
-  const { financialSummary, transactions, budgets, bills, openQuickAdd, setActiveTab } = useApp();
+  const { financialSummary, transactions, budgets, bills, openQuickAdd, setActiveTab, currentMonth } = useApp();
   const [selectedReceipt, setSelectedReceipt] = useState<string | null>(null);
   const [showBalance, setShowBalance] = useState(true);
 
-  const budgetStatuses = calculateBudgetStatuses(budgets, transactions);
+  const budgetStatuses = calculateBudgetStatuses(budgets, transactions, currentMonth);
   const exceededBudgets = budgetStatuses.filter((b) => b.status === 'EXCEEDED');
   const warningBudgets = budgetStatuses.filter((b) => b.status === 'WARNING');
   const unpaidBills = bills.filter((b) => b.status === 'UNPAID');
 
-  const barChartData = [
-    { month: 'T7', Thu: 32000000, Chi: 14500000 },
-    { month: 'T8', Thu: 34000000, Chi: 14450000 },
-    { month: 'T9', Thu: financialSummary.monthlyIncome, Chi: financialSummary.monthlyExpense },
-  ];
+  const barChartData = useMemo(() => {
+    const [currYearStr, currMonthStr] = (currentMonth || '2026-09').split('-');
+    const currYear = parseInt(currYearStr, 10);
+    const currMonthNum = parseInt(currMonthStr, 10);
+
+    const months: string[] = [];
+    for (let i = 2; i >= 0; i--) {
+      const d = new Date(currYear, currMonthNum - 1 - i, 1);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      months.push(`${y}-${m}`);
+    }
+
+    return months.map((m) => {
+      const monthTxs = transactions.filter((t) => t.date.startsWith(m));
+      const inc = monthTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0);
+      const exp = monthTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
+      return {
+        month: `T${parseInt(m.slice(5), 10)}`,
+        Thu: inc,
+        Chi: exp,
+      };
+    });
+  }, [transactions, currentMonth]);
 
   const currentMonthExpenses = transactions.filter(
-    (t) => t.type === 'EXPENSE' && t.date.startsWith('2026-09')
+    (t) => t.type === 'EXPENSE' && t.date.startsWith(currentMonth)
   );
   const categoryExpensesMap: { [catName: string]: number } = {};
   currentMonthExpenses.forEach((t) => {

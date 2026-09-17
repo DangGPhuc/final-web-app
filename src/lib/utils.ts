@@ -39,10 +39,50 @@ export function formatDate(dateString: string, type: 'short' | 'full' | 'time' |
   }
 }
 
+/**
+ * Standard Date & Time Helpers
+ */
+export function getCurrentYearMonth(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
+
+export function getCurrentYear(d: Date = new Date()): string {
+  return String(d.getFullYear());
+}
+
+export function getPreviousYearMonth(d: Date = new Date()): string {
+  const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  return getCurrentYearMonth(prev);
+}
+
+export function getCurrentMonthLabel(d: Date = new Date()): string {
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  return `Tháng ${month}/${d.getFullYear()}`;
+}
+
+export function formatMonthLabel(yearMonthStr: string): string {
+  if (!yearMonthStr || !yearMonthStr.includes('-')) return yearMonthStr;
+  const parts = yearMonthStr.split('-');
+  return `Tháng ${parts[1]}/${parts[0]}`;
+}
+
+export function formatMonthShortLabel(yearMonthStr: string): string {
+  if (!yearMonthStr || !yearMonthStr.includes('-')) return yearMonthStr;
+  const parts = yearMonthStr.split('-');
+  return `T${parseInt(parts[1], 10)}/${parts[0]}`;
+}
+
+export function isDateInCurrentMonth(dateStr: string, currentYm: string = getCurrentYearMonth()): boolean {
+  if (!dateStr) return false;
+  return dateStr.startsWith(currentYm);
+}
+
 export function calculateFinancialSummary(
   wallets: Wallet[],
   transactions: Transaction[],
-  monthStr: string = '2026-09'
+  monthStr: string = getCurrentYearMonth()
 ): FinancialSummary {
   // Available balance: Cash + Bank
   const availableBalance = wallets
@@ -99,7 +139,7 @@ export interface BudgetStatusItem {
 export function calculateBudgetStatuses(
   budgets: Budget[],
   transactions: Transaction[],
-  monthStr: string = '2026-09'
+  monthStr: string = getCurrentYearMonth()
 ): BudgetStatusItem[] {
   const currentMonthExpenses = transactions.filter(
     (t) => t.type === 'EXPENSE' && t.date.startsWith(monthStr)

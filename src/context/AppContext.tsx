@@ -21,7 +21,7 @@ import {
   INITIAL_PLANNER,
 } from '@/lib/mock-data';
 import { DEFAULT_CATEGORIES } from '@/lib/constants';
-import { calculateFinancialSummary } from '@/lib/utils';
+import { calculateFinancialSummary, getCurrentYearMonth } from '@/lib/utils';
 
 interface AppContextType {
   wallets: Wallet[];
@@ -90,7 +90,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [bills, setBills] = useState<RecurringBill[]>(INITIAL_BILLS);
   const [goals, setGoals] = useState<SavingsGoal[]>(INITIAL_GOALS);
   const [planner, setPlanner] = useState<IncomeBudgetPlanner>(INITIAL_PLANNER);
-  const [currentMonth, setCurrentMonth] = useState<string>('2026-09');
+  const [currentMonth, setCurrentMonth] = useState<string>(getCurrentYearMonth());
 
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [quickAddOpen, setQuickAddOpen] = useState<boolean>(false);

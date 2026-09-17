@@ -20,6 +20,11 @@ import {
   formatDate,
   exportToCSV,
   exportToExcel,
+  getCurrentYearMonth,
+  getPreviousYearMonth,
+  getCurrentYear,
+  formatMonthLabel,
+  formatMonthShortLabel,
 } from '@/lib/utils';
 import {
   ResponsiveContainer,
@@ -38,24 +43,32 @@ import {
 import { IconHelper } from './IconHelper';
 
 export const ReportsView: React.FC = () => {
-  const { transactions, budgets, wallets, financialSummary } = useApp();
+  const { transactions, budgets, wallets, financialSummary, currentMonth } = useApp();
+
+  const activeYm = currentMonth || getCurrentYearMonth();
+  const previousYm = getPreviousYearMonth(new Date(activeYm + '-01'));
+  const activeYear = activeYm.split('-')[0] || getCurrentYear();
 
   const [period, setPeriod] = useState<'THIS_MONTH' | 'LAST_MONTH' | 'THIS_YEAR' | 'CUSTOM'>('THIS_MONTH');
-  const [customStart, setCustomStart] = useState('2026-09-01');
-  const [customEnd, setCustomEnd] = useState('2026-09-30');
+  const [customStart, setCustomStart] = useState(`${activeYm}-01`);
+  const [customEnd, setCustomEnd] = useState(() => {
+    const [y, m] = activeYm.split('-');
+    const lastDay = new Date(parseInt(y, 10), parseInt(m, 10), 0).getDate();
+    return `${activeYm}-${String(lastDay).padStart(2, '0')}`;
+  });
 
   // Filter transactions according to selected period
   const filteredTxs = useMemo(() => {
     return transactions.filter((tx) => {
       const txDate = tx.date.split('T')[0];
       if (period === 'THIS_MONTH') {
-        return txDate.startsWith('2026-09');
+        return txDate.startsWith(activeYm);
       }
       if (period === 'LAST_MONTH') {
-        return txDate.startsWith('2026-08');
+        return txDate.startsWith(previousYm);
       }
       if (period === 'THIS_YEAR') {
-        return txDate.startsWith('2026');
+        return txDate.startsWith(activeYear);
       }
       if (period === 'CUSTOM') {
         if (customStart && txDate < customStart) return false;
@@ -64,7 +77,7 @@ export const ReportsView: React.FC = () => {
       }
       return true;
     });
-  }, [transactions, period, customStart, customEnd]);
+  }, [transactions, period, activeYm, previousYm, activeYear, customStart, customEnd]);
 
   // Aggregate totals
   const totalIncome = useMemo(
@@ -188,7 +201,7 @@ export const ReportsView: React.FC = () => {
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200'
             }`}
           >
-            Tháng này (T9/2026)
+            Tháng này ({formatMonthShortLabel(activeYm)})
           </button>
 
           <button
@@ -199,7 +212,7 @@ export const ReportsView: React.FC = () => {
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200'
             }`}
           >
-            Tháng trước (T8/2026)
+            Tháng trước ({formatMonthShortLabel(previousYm)})
           </button>
 
           <button
@@ -210,7 +223,7 @@ export const ReportsView: React.FC = () => {
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200'
             }`}
           >
-            Cả năm 2026
+            Cả năm {activeYear}
           </button>
 
           <button
@@ -249,7 +262,7 @@ export const ReportsView: React.FC = () => {
         <div className="hidden print:block pb-4 mb-4 border-b">
           <h2 className="text-xl font-bold text-slate-900">BÁO CÁO TỔNG HỢP TÀI CHÍNH CHI TIÊU</h2>
           <p className="text-xs text-slate-500">
-            Kỳ báo cáo: {period === 'THIS_MONTH' ? 'Tháng 09/2026' : period === 'LAST_MONTH' ? 'Tháng 08/2026' : 'Năm 2026'} • Tạo ngày: {formatDate(new Date().toISOString(), 'full')}
+            Kỳ báo cáo: {period === 'THIS_MONTH' ? formatMonthLabel(activeYm) : period === 'LAST_MONTH' ? formatMonthLabel(previousYm) : period === 'THIS_YEAR' ? `Năm ${activeYear}` : `Từ ${formatDate(customStart, 'dateOnly')} đến ${formatDate(customEnd, 'dateOnly')}`} • Tạo ngày: {formatDate(new Date().toISOString(), 'full')}
           </p>
         </div>
 

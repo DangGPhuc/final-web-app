@@ -23,7 +23,7 @@ import {
   X,
   Target,
 } from 'lucide-react';
-import { formatCurrency, calculateBudgetStatuses } from '@/lib/utils';
+import { formatCurrency, calculateBudgetStatuses, formatMonthLabel, getCurrentYearMonth } from '@/lib/utils';
 import { IconHelper } from './IconHelper';
 import confetti from 'canvas-confetti';
 
@@ -36,6 +36,7 @@ export const BudgetsView: React.FC = () => {
     wallets,
     bills,
     planner,
+    currentMonth,
     addBudget,
     editBudget,
     deleteBudget,
@@ -72,7 +73,7 @@ export const BudgetsView: React.FC = () => {
   const [isDepositMode, setIsDepositMode] = useState(true); // true = deposit, false = withdraw
 
   // Calculate budget statuses
-  const budgetStatuses = calculateBudgetStatuses(budgets, transactions);
+  const budgetStatuses = calculateBudgetStatuses(budgets, transactions, currentMonth);
   const totalBudgetLimit = budgets.reduce((sum, b) => sum + b.amount, 0);
   const totalBudgetSpent = budgetStatuses.reduce((sum, b) => sum + b.spent, 0);
   const totalBudgetRemaining = totalBudgetLimit - totalBudgetSpent;
@@ -107,7 +108,7 @@ export const BudgetsView: React.FC = () => {
         categoryId: budgetCategoryId,
         categoryName: cat?.name || 'Khác',
         amount: amountNum,
-        month: '2026-09',
+        month: currentMonth || getCurrentYearMonth(),
         alertThreshold80: true,
         alertThreshold100: true,
       });
@@ -125,11 +126,13 @@ export const BudgetsView: React.FC = () => {
       return;
     }
 
+    const defaultDeadline = `${new Date().getFullYear()}-12-31`;
+
     if (editingGoal) {
       editGoal(editingGoal.id, {
         name: goalName,
         targetAmount: targetNum,
-        deadline: goalDeadline,
+        deadline: goalDeadline || defaultDeadline,
         color: goalColor,
       });
     } else {
@@ -137,7 +140,7 @@ export const BudgetsView: React.FC = () => {
         name: goalName,
         targetAmount: targetNum,
         currentAmount: 0,
-        deadline: goalDeadline || '2026-12-31',
+        deadline: goalDeadline || defaultDeadline,
         color: goalColor,
         icon: 'PiggyBank',
       });
@@ -225,7 +228,7 @@ export const BudgetsView: React.FC = () => {
                 setEditingGoal(null);
                 setGoalName('');
                 setGoalTarget('');
-                setGoalDeadline('2026-12-31');
+                setGoalDeadline(`${new Date().getFullYear()}-12-31`);
                 setGoalModalOpen(true);
               }}
               className="flex items-center space-x-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
@@ -285,7 +288,7 @@ export const BudgetsView: React.FC = () => {
               <p className="text-2xl font-black text-slate-800 dark:text-white mt-1">
                 {formatCurrency(totalBudgetLimit)}
               </p>
-              <span className="text-[11px] text-slate-400">Áp dụng cho tháng 09/2026</span>
+              <span className="text-[11px] text-slate-400">Áp dụng cho {formatMonthLabel(currentMonth)}</span>
             </div>
 
             <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm">
@@ -343,7 +346,7 @@ export const BudgetsView: React.FC = () => {
                         <h3 className="text-sm font-bold text-slate-800 dark:text-white">
                           {budget.categoryName}
                         </h3>
-                        <span className="text-[11px] text-slate-400">Tháng 09/2026</span>
+                        <span className="text-[11px] text-slate-400">{formatMonthLabel(budget.month || currentMonth)}</span>
                       </div>
                     </div>
 
