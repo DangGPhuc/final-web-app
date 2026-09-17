@@ -18,14 +18,62 @@ export function database() {
   }
   return pool;
 }
+export async function resetPoolForTesting(): Promise<void> {
+  if (pool) {
+    const p = pool;
+    pool = undefined;
+    await p.end();
+  }
+}
+
 export async function transaction<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
   const c = await database().connect();
   let broken = false;
   try {
     await c.query('BEGIN');
-    // Prevent a mistakenly configured elevated credential from silently bypassing RLS.
-    const role = await c.query(`SELECT rolsuper, rolbypassrls, current_user AS name FROM pg_roles WHERE rolname=current_user`);
-    if (role.rows[0]?.name !== 'fintrack_runtime' || role.rows[0]?.rolsuper || role.rows[0]?.rolbypassrls) throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
+    await c.query('SET LOCAL ROLE fintrack_runtime');
+
+    const expectedLoginRole = process.env.EXPECTED_LOGIN_ROLE || 'fintrack_app_login';
+    const roleRes = await c.query(`
+      SELECT
+        s.rolname AS session_name,
+        s.rolsuper AS session_super,
+        s.rolbypassrls AS session_bypassrls,
+        s.rolcreatedb AS session_createdb,
+        s.rolcreaterole AS session_createrole,
+        u.rolname AS current_name,
+        u.rolsuper AS current_super,
+        u.rolbypassrls AS current_bypassrls,
+        u.rolcreatedb AS current_createdb,
+        u.rolcreaterole AS current_createrole
+      FROM pg_roles s, pg_roles u
+      WHERE s.rolname = session_user AND u.rolname = current_user
+    `);
+    const r = roleRes.rows[0];
+    if (
+      !r ||
+      r.session_name !== expectedLoginRole ||
+      r.current_name !== 'fintrack_runtime' ||
+      r.session_super ||
+      r.session_bypassrls ||
+      r.session_createdb ||
+      r.session_createrole ||
+      r.current_super ||
+      r.current_bypassrls ||
+      r.current_createdb ||
+      r.current_createrole
+    ) {
+      throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
+    }
+
+    const tableOwnerRes = await c.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM pg_tables WHERE schemaname = 'fintrack' AND tableowner = $1`,
+      [r.session_name]
+    );
+    if (parseInt(tableOwnerRes.rows[0]?.count ?? '0', 10) > 0) {
+      throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
+    }
+
     await c.query("SET LOCAL lock_timeout = '3s'");
     const result = await run(c);
     await c.query('COMMIT');
