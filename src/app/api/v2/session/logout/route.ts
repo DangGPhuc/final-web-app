@@ -20,7 +20,8 @@ export async function POST(req: Request) {
       return { revoked: true };
     },
     {
-      customHeaders: {
+      successStatus: 200,
+      successOnlyHeaders: {
         'Set-Cookie': clearSessionCookieHeader(),
       },
     }
