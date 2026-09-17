@@ -12,6 +12,7 @@ import { ReportsView } from '@/components/ReportsView';
 import { WalletsView } from '@/components/WalletsView';
 import { SettingsView } from '@/components/SettingsView';
 import { QuickAddModal } from '@/components/QuickAddModal';
+import { StorageStatusBanner } from '@/components/StorageStatusBanner';
 
 function MainContent() {
   const { activeTab } = useApp();
@@ -19,6 +20,7 @@ function MainContent() {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
       <Navigation />
+      <StorageStatusBanner />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 lg:pt-6 pb-24 lg:pb-6">
         {activeTab === 'dashboard' && <DashboardView />}

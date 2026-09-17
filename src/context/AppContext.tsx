@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
   Wallet,
   Transaction,
@@ -10,7 +10,6 @@ import {
   SavingsGoal,
   IncomeBudgetPlanner,
   FinancialSummary,
-  FilterPeriod,
 } from '@/types';
 import {
   INITIAL_WALLETS,
@@ -46,7 +45,13 @@ import {
   applyUpdatePlanner,
 } from '@/lib/domain-engine';
 import { getCurrentYearMonth } from '@/lib/utils';
-import { validateAndNormalizeAppSnapshot } from '@/lib/storage-schema';
+import {
+  validateAndNormalizeAppSnapshot,
+  StorageStatus,
+  SCHEMA_VERSION,
+  MAX_IMPORT_BYTES,
+} from '@/lib/storage-schema';
+import { safeErrorMessage } from '@/lib/error';
 
 interface AppContextType {
   wallets: Wallet[];
@@ -64,6 +69,13 @@ interface AppContextType {
   quickAddDefaultType: 'EXPENSE' | 'INCOME' | 'TRANSFER';
   openQuickAdd: (type?: 'EXPENSE' | 'INCOME' | 'TRANSFER') => void;
   financialSummary: FinancialSummary;
+
+  /** Storage lifecycle status — exposed to UI for banners/warnings */
+  storageStatus: StorageStatus;
+  /** Human-readable storage error, set when storageStatus is RECOVERY_REQUIRED or SAVE_ERROR */
+  storageError: string | undefined;
+  /** Retry last failed save */
+  retrySave: () => void;
 
   // Transactions
   addTransaction: (tx: Omit<Transaction, 'id' | 'createdAt'>) => void;
@@ -101,6 +113,10 @@ interface AppContextType {
   clearAllData: () => void;
   exportDatabaseJSON: () => void;
   importDatabaseJSON: (jsonStr: string) => boolean;
+
+  // Domain error — shown by UI without blocking (replaces alert())
+  lastDomainError: string | undefined;
+  clearDomainError: () => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -122,23 +138,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [quickAddOpen, setQuickAddOpen] = useState<boolean>(false);
   const [quickAddDefaultType, setQuickAddDefaultType] = useState<'EXPENSE' | 'INCOME' | 'TRANSFER'>('EXPENSE');
 
+  // Storage lifecycle
+  const [storageStatus, setStorageStatus] = useState<StorageStatus>('LOADING');
+  const [storageError, setStorageError] = useState<string | undefined>(undefined);
+
+  // Domain error (non-blocking, replaces alert())
+  const [lastDomainError, setLastDomainError] = useState<string | undefined>(undefined);
+  const clearDomainError = useCallback(() => setLastDomainError(undefined), []);
+
+  const reportDomainError = useCallback((msg: string) => {
+    setLastDomainError(msg);
+    // Also keep legacy alert for now — will be fully replaced once StorageStatusBanner is wired
+    alert(msg);
+  }, []);
+
   // Rollover currentMonth on focus, visibility change, and interval
   useEffect(() => {
     const checkMonthRollover = () => {
       const nowYm = getCurrentYearMonth();
       setCurrentMonth((prev) => (prev !== nowYm ? nowYm : prev));
     };
-
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        checkMonthRollover();
-      }
+      if (document.visibilityState === 'visible') checkMonthRollover();
     };
-
     window.addEventListener('focus', checkMonthRollover);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     const intervalId = setInterval(checkMonthRollover, 60000);
-
     return () => {
       window.removeEventListener('focus', checkMonthRollover);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -146,12 +171,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  // Load from local storage
+  // ── Load from localStorage (safe recovery) ───────────────────────────────
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          // Unparseable — preserve raw bytes, enter RECOVERY_REQUIRED
+          const recoveryKey = `fintrack_recovery_corrupt_${Date.now()}`;
+          try { localStorage.setItem(recoveryKey, raw); } catch { /* ignore quota */ }
+          setStorageStatus('RECOVERY_REQUIRED');
+          setStorageError('Dữ liệu lưu trữ không thể đọc được (JSON không hợp lệ). Bản sao phục hồi đã được lưu.');
+          setMounted(true);
+          return;
+        }
+
         const res = validateAndNormalizeAppSnapshot(parsed);
         if (res.ok) {
           setWallets(res.data.wallets);
@@ -161,34 +198,74 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setBills(res.data.bills);
           setGoals(res.data.goals);
           setPlanner(res.data.planner);
+          setStorageStatus('OK');
         } else {
-          console.warn('Storage snapshot validation failed, using defaults:', res.error);
+          // Validation failed — NEVER overwrite the original raw data automatically.
+          // Preserve a recovery copy under a timestamped key.
+          const recoveryKey = `fintrack_recovery_corrupt_${Date.now()}`;
+          try { localStorage.setItem(recoveryKey, raw); } catch { /* ignore quota */ }
+          setStorageStatus('RECOVERY_REQUIRED');
+          setStorageError(`Dữ liệu không vượt qua kiểm tra tính toàn vẹn: ${res.error}. Bản sao phục hồi đã được lưu. Ứng dụng đang chạy với dữ liệu mặc định — dữ liệu sẽ KHÔNG bị ghi đè cho đến khi bạn xác nhận.`);
+          // Load defaults in memory only — do NOT save yet
+          setMounted(true);
+          return;
         }
+      } else {
+        // No stored data — fresh start
+        setStorageStatus('OK');
       }
     } catch (e) {
-      console.error('Failed to load storage data:', e);
+      console.error('[AppContext] Failed to load storage data:', safeErrorMessage(e));
+      setStorageStatus('RECOVERY_REQUIRED');
+      setStorageError('Không thể đọc dữ liệu từ bộ nhớ cục bộ.');
     }
     setMounted(true);
   }, []);
 
-  // Save to local storage
+  // ── Save to localStorage ──────────────────────────────────────────────────
+  const buildPayload = useCallback(() => ({
+    schemaVersion: SCHEMA_VERSION,
+    exportedAt: new Date().toISOString(),
+    wallets,
+    transactions,
+    categories,
+    budgets,
+    bills,
+    goals,
+    planner,
+  }), [wallets, transactions, categories, budgets, bills, goals, planner]);
+
+  const saveToStorage = useCallback(() => {
+    if (!mounted) return;
+    // Do NOT save if we are in RECOVERY_REQUIRED — user must explicitly confirm
+    if (storageStatus === 'RECOVERY_REQUIRED') return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPayload()));
+      setStorageStatus('OK');
+      setStorageError(undefined);
+    } catch (e) {
+      console.error('[AppContext] Failed to save to localStorage:', safeErrorMessage(e));
+      setStorageStatus('SAVE_ERROR');
+      setStorageError('Không thể lưu dữ liệu vào bộ nhớ. Hãy xuất bản sao lưu để tránh mất dữ liệu.');
+    }
+  }, [mounted, storageStatus, buildPayload]);
+
   useEffect(() => {
+    saveToStorage();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted, wallets, transactions, categories, budgets, bills, goals, planner]);
+
+  const retrySave = useCallback(() => {
     if (!mounted) return;
     try {
-      const payload = {
-        wallets,
-        transactions,
-        categories,
-        budgets,
-        bills,
-        goals,
-        planner,
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(buildPayload()));
+      setStorageStatus('OK');
+      setStorageError(undefined);
     } catch (e) {
-      console.error('Failed to save to localStorage:', e);
+      setStorageStatus('SAVE_ERROR');
+      setStorageError('Thử lại lưu thất bại. Vui lòng xuất bản sao lưu thủ công.');
     }
-  }, [mounted, wallets, transactions, categories, budgets, bills, goals, planner]);
+  }, [mounted, buildPayload]);
 
   const openQuickAdd = (type: 'EXPENSE' | 'INCOME' | 'TRANSFER' = 'EXPENSE') => {
     setQuickAddDefaultType(type);
@@ -201,10 +278,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Add Transaction
   const addTransaction = (tx: Omit<Transaction, 'id' | 'createdAt'>) => {
     const res = applyAddTransaction({ wallets, transactions, goals, bills }, tx);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
     setTransactions(res.state.transactions);
   };
@@ -212,10 +286,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Edit Transaction
   const editTransaction = (id: string, updated: Partial<Transaction>) => {
     const res = applyEditTransaction({ wallets, transactions, goals, bills }, id, updated);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
     setTransactions(res.state.transactions);
   };
@@ -223,42 +294,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Delete Transaction
   const deleteTransaction = (id: string) => {
     const res = applyDeleteTransaction({ wallets, transactions, goals, bills }, id);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
     setTransactions(res.state.transactions);
   };
 
   // Wallets
   const addWallet = (wallet: Omit<Wallet, 'id' | 'createdAt'>) => {
-    const res = applyAddWallet(
-      { transactions, wallets, goals, bills },
-      wallet
-    );
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    const res = applyAddWallet({ transactions, wallets, goals, bills }, wallet);
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
   };
 
   const editWallet = (id: string, updated: Partial<Wallet>) => {
     const res = applyEditWallet({ wallets, transactions, goals, bills }, id, updated);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
   };
 
   const deleteWallet = (id: string) => {
     const res = applyDeleteWallet({ wallets, transactions, goals, bills }, id);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
   };
 
@@ -271,16 +327,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ) => {
     const fromW = wallets.find((w) => w.id === fromWalletId);
     const toW = wallets.find((w) => w.id === toWalletId);
-    if (!fromW || !toW) {
-      alert('Không tìm thấy thông tin ví');
-      return;
-    }
+    if (!fromW || !toW) { reportDomainError('Không tìm thấy thông tin ví'); return; }
 
     const feeCheck = validateTransferFee(fee);
-    if (!feeCheck.valid) {
-      alert(feeCheck.error || 'Phí chuyển khoản không hợp lệ');
-      return;
-    }
+    if (!feeCheck.valid) { reportDomainError(feeCheck.error || 'Phí chuyển khoản không hợp lệ'); return; }
 
     addTransaction({
       type: 'TRANSFER',
@@ -298,77 +348,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // Budgets
+  // Budgets — pass categories for §5 validation
   const addBudget = (budget: Omit<Budget, 'id'>) => {
-    const res = applyAddBudget(budgets, budget);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    const res = applyAddBudget(budgets, budget, categories);
+    if (!res.ok) { reportDomainError(res.error); return; }
     setBudgets(res.budgets);
   };
 
   const editBudget = (id: string, updated: Partial<Budget>) => {
-    const res = applyEditBudget(budgets, id, updated);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    const res = applyEditBudget(budgets, id, updated, categories);
+    if (!res.ok) { reportDomainError(res.error); return; }
     setBudgets(res.budgets);
   };
 
   const deleteBudget = (id: string) => {
     const res = applyDeleteBudget(budgets, id);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setBudgets(res.budgets);
   };
 
   const updatePlanner = (newPlanner: IncomeBudgetPlanner) => {
     const res = applyUpdatePlanner(newPlanner);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setPlanner(res.planner);
   };
 
   // Bills
   const addBill = (bill: Omit<RecurringBill, 'id'>) => {
     const res = applyAddBill({ wallets, transactions, goals, bills }, bill);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setBills(res.state.bills);
   };
 
   const editBill = (id: string, updated: Partial<RecurringBill>) => {
     const res = applyEditBill({ wallets, transactions, goals, bills }, id, updated);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setBills(res.state.bills);
   };
 
   const deleteBill = (id: string) => {
     const res = applyDeleteBill({ wallets, transactions, goals, bills }, id);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setBills(res.state.bills);
   };
 
   const payBill = (billId: string, walletId: string) => {
     const res = applyPayBill({ wallets, transactions, goals, bills }, billId, walletId);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
     setBills(res.state.bills);
     setTransactions(res.state.transactions);
@@ -376,10 +402,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const unpayBill = (billId: string) => {
     const res = applyUnpayBill({ wallets, transactions, goals, bills }, billId);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
     setBills(res.state.bills);
     setTransactions(res.state.transactions);
@@ -388,37 +411,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Goals
   const addGoal = (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => {
     const res = applyAddGoal({ wallets, transactions, goals, bills }, goal);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setGoals(res.state.goals);
   };
 
   const editGoal = (id: string, updated: Partial<SavingsGoal>) => {
     const res = applyEditGoal({ wallets, transactions, goals, bills }, id, updated);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setGoals(res.state.goals);
   };
 
   const deleteGoal = (id: string) => {
     const res = applyDeleteGoal({ wallets, transactions, goals, bills }, id);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setGoals(res.state.goals);
   };
 
   const depositToGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
     const res = applyGoalDeposit({ wallets, transactions, goals, bills }, goalId, walletId, amount, note);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
     setGoals(res.state.goals);
     setTransactions(res.state.transactions);
@@ -426,10 +437,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const withdrawFromGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
     const res = applyGoalWithdraw({ wallets, transactions, goals, bills }, goalId, walletId, amount, note);
-    if (!res.ok) {
-      alert(res.error);
-      return;
-    }
+    if (!res.ok) { reportDomainError(res.error); return; }
     setWallets(res.state.wallets);
     setGoals(res.state.goals);
     setTransactions(res.state.transactions);
@@ -445,6 +453,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setGoals(INITIAL_GOALS);
     setPlanner(INITIAL_PLANNER);
     localStorage.removeItem(STORAGE_KEY);
+    setStorageStatus('OK');
+    setStorageError(undefined);
   };
 
   const clearAllData = () => {
@@ -465,16 +475,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setBudgets([]);
     setBills([]);
     setGoals([]);
-    setPlanner({
-      monthlyIncome: 0,
-      needsPercent: 50,
-      wantsPercent: 30,
-      savingsPercent: 20,
-    });
+    setPlanner({ monthlyIncome: 0, needsPercent: 50, wantsPercent: 30, savingsPercent: 20 });
   };
 
   const exportDatabaseJSON = () => {
     const data = {
+      schemaVersion: SCHEMA_VERSION,
+      applicationVersion: '2.0.0',
+      exportedAt: new Date().toISOString(),
       wallets,
       transactions,
       categories,
@@ -482,42 +490,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       bills,
       goals,
       planner,
-      exportedAt: new Date().toISOString(),
-      version: '2.0',
     };
     const jsonStr = JSON.stringify(data, null, 2);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `quan-ly-chi-tieu-backup-${new Date().toISOString().split('T')[0]}.json`;
+    const dateStr = new Date().toISOString().slice(0, 10);
+    link.download = `fintrack-backup-${dateStr}.json`;
     link.click();
     URL.revokeObjectURL(url);
   };
 
   const importDatabaseJSON = (jsonStr: string): boolean => {
-    try {
-      const data = JSON.parse(jsonStr);
-      const res = validateAndNormalizeAppSnapshot(data);
-      if (!res.ok) {
-        console.error('Import failed:', res.error);
-        alert(`Dữ liệu nhập không hợp lệ: ${res.error}`);
-        return false;
-      }
-
-      setWallets(res.data.wallets);
-      setTransactions(res.data.transactions);
-      setCategories(res.data.categories);
-      setBudgets(res.data.budgets);
-      setBills(res.data.bills);
-      setGoals(res.data.goals);
-      setPlanner(res.data.planner);
-      return true;
-    } catch (e) {
-      console.error('Import failed:', e);
-      alert('Tệp dữ liệu không phải định dạng JSON hợp lệ');
+    // Reject oversized payloads before parsing
+    if (jsonStr.length > MAX_IMPORT_BYTES) {
+      reportDomainError(`Tệp dữ liệu quá lớn (${(jsonStr.length / 1024 / 1024).toFixed(1)} MB). Giới hạn là ${MAX_IMPORT_BYTES / 1024 / 1024} MB.`);
       return false;
     }
+
+    let data: unknown;
+    try {
+      data = JSON.parse(jsonStr);
+    } catch {
+      reportDomainError('Tệp dữ liệu không phải định dạng JSON hợp lệ');
+      return false;
+    }
+
+    // Full migration + validation — existing state is NOT touched until this passes
+    const res = validateAndNormalizeAppSnapshot(data);
+    if (!res.ok) {
+      console.error('[AppContext] Import failed:', res.error);
+      reportDomainError(`Dữ liệu nhập không hợp lệ: ${res.error}`);
+      return false;
+    }
+
+    // Atomic swap — only executed after successful validation
+    setWallets(res.data.wallets);
+    setTransactions(res.data.transactions);
+    setCategories(res.data.categories);
+    setBudgets(res.data.budgets);
+    setBills(res.data.bills);
+    setGoals(res.data.goals);
+    setPlanner(res.data.planner);
+    setStorageStatus('OK');
+    setStorageError(undefined);
+    return true;
   };
 
   return (
@@ -538,6 +556,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         quickAddDefaultType,
         openQuickAdd,
         financialSummary,
+        storageStatus,
+        storageError,
+        retrySave,
         addTransaction,
         editTransaction,
         deleteTransaction,
@@ -563,6 +584,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         clearAllData,
         exportDatabaseJSON,
         importDatabaseJSON,
+        lastDomainError,
+        clearDomainError,
       }}
     >
       {children}
