@@ -5,6 +5,20 @@ import { transferBalances } from './domain';
 import type { parseWallet, parseTransfer } from './domain';
 
 export const MAX_WALLETS_PER_USER = 100;
+export const MAX_TRANSFERS_PER_USER_PER_DAY = 1000;
+
+export function getMaxTransfersPerUserPerDay(): number {
+  const parsed = parseInt(process.env.MAX_TRANSFERS_PER_USER_PER_DAY || '1000', 10);
+  return Number.isNaN(parsed) || parsed <= 0 ? 1000 : parsed;
+}
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateRequestId(requestId: string): void {
+  if (!requestId || typeof requestId !== 'string' || !UUID_REGEX.test(requestId)) {
+    throw new ApiError(400, 'INVALID_REQUEST_ID');
+  }
+}
 
 export type RateLimitScope = 'global' | 'wallet:create' | 'transfer:create';
 
@@ -31,8 +45,10 @@ export async function createWallet(
   c: PoolClient,
   user: string,
   input: ReturnType<typeof parseWallet>,
-  requestId?: string
+  requestId: string
 ) {
+  validateRequestId(requestId);
+
   // Concurrency-safe quota check: serialize wallet creation per-user using advisory xact lock
   await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [user + ':wallet-create']);
 
@@ -55,7 +71,7 @@ export async function createWallet(
 
   await c.query(
     "INSERT INTO fintrack.audit_events(user_id, action, resource_id, request_id) VALUES ($1, 'WALLET_CREATED', $2, $3)",
-    [user, row.id, requestId ?? null]
+    [user, row.id, requestId]
   );
 
   return row;
@@ -65,8 +81,26 @@ export async function createTransfer(
   c: PoolClient,
   user: string,
   input: ReturnType<typeof parseTransfer>,
-  requestId?: string
+  requestId: string
 ) {
+  validateRequestId(requestId);
+
+  // Concurrency-safe daily transfer security quota check per user per UTC calendar day
+  const utcDate = new Date().toISOString().slice(0, 10);
+  await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+    user + ':transfer-daily:' + utcDate,
+  ]);
+
+  const dailyCountRes = await c.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+     FROM fintrack.transfers
+     WHERE user_id = $1 AND created_at >= $2::timestamptz`,
+    [user, `${utcDate}T00:00:00.000Z`]
+  );
+  if (parseInt(dailyCountRes.rows[0]?.count ?? '0', 10) >= getMaxTransfersPerUserPerDay()) {
+    throw new ApiError(422, 'TRANSFER_DAILY_LIMIT_REACHED');
+  }
+
   // Lock in stable UUID order to avoid opposite-direction transfer deadlocks.
   const rows = (
     await c.query<{ id: string; balance: string }>(
@@ -111,7 +145,7 @@ export async function createTransfer(
 
   await c.query(
     "INSERT INTO fintrack.audit_events(user_id, action, resource_id, request_id) VALUES ($1, 'TRANSFER_CREATED', $2, $3)",
-    [user, row.id, requestId ?? null]
+    [user, row.id, requestId]
   );
 
   return row;

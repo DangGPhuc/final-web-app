@@ -18,6 +18,8 @@ export interface RouteContext {
 export interface HandleOptions {
   rateLimitScope?: RateLimitScope;
   customHeaders?: Record<string, string>;
+  successOnlyHeaders?: Record<string, string>;
+  successStatus?: number;
 }
 
 export async function body(req: Request) {
@@ -33,12 +35,15 @@ export async function handle(
 ) {
   const requestId = randomUUID();
   const timestamp = new Date().toISOString();
-  const headers: Record<string, string> = {
+  const commonHeaders: Record<string, string> = {
     'Cache-Control': 'no-store',
     'X-Request-Id': requestId,
     Vary: 'Cookie',
     ...(options?.customHeaders ?? {}),
   };
+  // Defensive: ensure common headers do not contain Set-Cookie
+  delete commonHeaders['Set-Cookie'];
+  delete commonHeaders['set-cookie'];
 
   let authenticatedUserId: string | undefined;
 
@@ -54,12 +59,24 @@ export async function handle(
 
     const hash = sessionHash(req);
 
-    // Rate-limiting check in separate isolated transaction to ensure rate-limiting counts persist even on error
-    const scope = options?.rateLimitScope ?? 'global';
+    // Rate-limiting check in separate isolated transaction to ensure counts persist even on error
+    const businessScope = options?.rateLimitScope;
     const allowed = await transaction(async c => {
       const user = await authenticate(c, hash);
       authenticatedUserId = user;
-      return rateLimit(c, user, scope);
+      // Stacked rate limits: every authenticated request consumes 'global'
+      const globalAllowed = await rateLimit(c, user, 'global');
+      if (!globalAllowed) {
+        return false;
+      }
+      // Mutating or sensitive operations also consume their specific business scope
+      if (businessScope && businessScope !== 'global') {
+        const businessAllowed = await rateLimit(c, user, businessScope);
+        if (!businessAllowed) {
+          return false;
+        }
+      }
+      return true;
     });
 
     if (!allowed) {
@@ -76,9 +93,15 @@ export async function handle(
       return run(c, user, { requestId, hash, input });
     });
 
+    const status = options?.successStatus ?? (req.method === 'POST' ? 201 : 200);
+    const successHeaders: Record<string, string> = {
+      ...commonHeaders,
+      ...(options?.successOnlyHeaders ?? {}),
+    };
+
     return Response.json(
       { success: true, data: result },
-      { status: req.method === 'POST' ? 201 : 200, headers }
+      { status, headers: successHeaders }
     );
   } catch (error) {
     const known = error instanceof ApiError;
@@ -108,7 +131,7 @@ export async function handle(
         timestamp,
         userId: authenticatedUserId,
       });
-    } else if (errorCode === 'WALLET_LIMIT_REACHED') {
+    } else if (errorCode === 'WALLET_LIMIT_REACHED' || errorCode === 'TRANSFER_DAILY_LIMIT_REACHED') {
       logSecurityEvent({
         event: 'SECURITY_QUOTA_EXCEEDED',
         requestId,
@@ -125,14 +148,18 @@ export async function handle(
       });
     }
 
+    const errorHeaders: Record<string, string> = {
+      ...commonHeaders,
+      ...(status === 429 ? { 'Retry-After': '60' } : {}),
+    };
+    delete errorHeaders['Set-Cookie'];
+    delete errorHeaders['set-cookie'];
+
     return Response.json(
       { success: false, code: errorCode, requestId },
       {
         status,
-        headers: {
-          ...headers,
-          ...(status === 429 ? { 'Retry-After': '60' } : {}),
-        },
+        headers: errorHeaders,
       }
     );
   }
