@@ -90,6 +90,9 @@ Financial data cannot be recreated from memory. The core storage engine enforces
 > **Database-Level Restore Only**: FinTrack's automated drill (`scripts/backup-restore-drill.sh`) performs a **Database-Level Logical Restore**, not a fresh-cluster disaster recovery. PostgreSQL `pg_dump` exports schema and table objects for a specific database but **DOES NOT serialize cluster-wide global objects** such as roles (`pg_roles`).
 > On a newly instantiated, blank PostgreSQL cluster/container, disaster recovery procedures MUST first run the version-controlled migration/bootstrap scripts (`001_backend_foundation.sql` through `003_backend_deployment_closure.sql`) to provision the cluster-level roles (`fintrack_runtime`, `fintrack_app_login`) before restoring database dumps.
 
+> [!WARNING]
+> **Legacy Baseline Adoption Unsupported**: Automatic manufacturing of migration history for un-checksummed schemas is **NOT SUPPORTED**. The migration runner fails closed (`LEGACY_SCHEMA_ADOPTION_UNSUPPORTED`) if existing tables lack authentic `schema_migrations` tracking. Restoring from a trusted backup with authentic migration history or executing an explicit, reviewed one-off migration plan is required.
+
 ### Security Invariants Validated on Restore
 Every logical restore drill verifies:
 1. **Cluster Role Dependency**: Validates that backup files do not contain cluster-global role declarations, requiring operator bootstrap.

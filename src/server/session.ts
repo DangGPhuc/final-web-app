@@ -31,15 +31,14 @@ export async function authenticate(c: PoolClient, hash: string, options?: { forM
   return result.rows[0].user_id;
 }
 
-export async function revokeCurrentSession(c: PoolClient): Promise<string> {
-  // Runtime role is granted UPDATE(revoked_at) and restricted by RLS to only its own active session
+export async function revokeCurrentSession(c: PoolClient): Promise<void> {
+  // Runtime role is granted UPDATE(revoked_at) and restricted by monotonic RLS to only its own active session
   const result = await c.query(
-    "UPDATE fintrack.sessions SET revoked_at = now() WHERE token_hash = nullif(current_setting('app.session_hash', true), '') AND revoked_at IS NULL RETURNING user_id"
+    "UPDATE fintrack.sessions SET revoked_at = now() WHERE token_hash = nullif(current_setting('app.session_hash', true), '') AND revoked_at IS NULL"
   );
-  if (result.rows.length !== 1) {
+  if (result.rowCount !== 1) {
     throw new ApiError(401, 'UNAUTHENTICATED');
   }
-  return result.rows[0].user_id;
 }
 
 export function clearSessionCookieHeader(): string {

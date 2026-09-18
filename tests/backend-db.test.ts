@@ -15,8 +15,7 @@ import {
 import { transaction, resetPoolForTesting } from '../src/server/database';
 import { runMaintenance } from '../scripts/backend-maintenance.mjs';
 import { runMigrations, computeFileChecksum, prepareMigrationForExecution } from '../scripts/migrate.mjs';
-import { baselineLegacyDatabase } from '../scripts/baseline-migrations.mjs';
-import { validateTestDbUrls } from '../scripts/validate-test-db.mjs';
+import { validateTestDbUrls, verifyDedicatedCluster, quoteIdentifier } from '../scripts/validate-test-db.mjs';
 import { verifyMigrationHistory } from '../scripts/verify-migration-history.mjs';
 import { assertSafeTestDatabaseUrl } from './helpers/test-db-guard';
 import { handle } from '../src/server/http';
@@ -214,14 +213,18 @@ describe('PostgreSQL schema and security hardening integration', () => {
   });
 
   it('expired/revoked sessions fail closed', async () => {
-    await db.query('UPDATE fintrack.sessions SET revoked_at=now() WHERE token_hash=$1', [bobHash]);
-    await expect(asUser(bobHash, async () => true)).rejects.toThrow('UNAUTHENTICATED');
-    await db.query(
-      "UPDATE fintrack.sessions SET revoked_at=NULL,expires_at=now()-interval '1 second' WHERE token_hash=$1",
-      [bobHash]
-    );
-    await expect(asUser(bobHash, async () => true)).rejects.toThrow('UNAUTHENTICATED');
-    await expect(asUser('0'.repeat(64), async () => true)).rejects.toThrow('UNAUTHENTICATED');
+    try {
+      await db.query('UPDATE fintrack.sessions SET revoked_at=now() WHERE token_hash=$1', [bobHash]);
+      await expect(asUser(bobHash, async () => true)).rejects.toThrow('UNAUTHENTICATED');
+      await db.query(
+        "UPDATE fintrack.sessions SET revoked_at=NULL,expires_at=now()-interval '1 second' WHERE token_hash=$1",
+        [bobHash]
+      );
+      await expect(asUser(bobHash, async () => true)).rejects.toThrow('UNAUTHENTICATED');
+      await expect(asUser('0'.repeat(64), async () => true)).rejects.toThrow('UNAUTHENTICATED');
+    } finally {
+      await db.query("UPDATE fintrack.sessions SET revoked_at=NULL, expires_at=now()+interval '1 hour' WHERE token_hash=$1", [bobHash]);
+    }
   });
 
   it('(E) rate-limit row count remains bounded across time buckets and scopes', async () => {
@@ -671,12 +674,12 @@ describe('PostgreSQL schema and security hardening integration', () => {
     const adminClient = new Client({ connectionString: realUrl });
     await adminClient.connect();
 
-    // Create trigger that fails during checksum insertion of '005_atomicity_probe.sql'
+    // Create trigger that fails during checksum insertion of '006_atomicity_probe.sql'
     await adminClient.query(`
       CREATE OR REPLACE FUNCTION fintrack.fail_on_atomicity_test()
       RETURNS trigger AS $$
       BEGIN
-        IF NEW.version = '005_atomicity_probe.sql' THEN
+        IF NEW.version = '006_atomicity_probe.sql' THEN
           RAISE EXCEPTION 'SIMULATED_CHECKSUM_FAILURE_TRIGGERED';
         END IF;
         RETURN NEW;
@@ -689,7 +692,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
       FOR EACH ROW EXECUTE FUNCTION fintrack.fail_on_atomicity_test();
     `);
 
-    const probeFile = 'db/migrations/005_atomicity_probe.sql';
+    const probeFile = 'db/migrations/006_atomicity_probe.sql';
     writeFileSync(probeFile, 'CREATE TABLE fintrack.atomicity_probe_table (id int);');
 
     try {
@@ -704,9 +707,9 @@ describe('PostgreSQL schema and security hardening integration', () => {
       `);
       expect(tableCheck.rows[0].exists).toBe(false);
 
-      // And schema_migrations does not have entry for 005
+      // And schema_migrations does not have entry for 006
       const migCheck = await adminClient.query(
-        "SELECT 1 FROM fintrack.schema_migrations WHERE version = '005_atomicity_probe.sql'"
+        "SELECT 1 FROM fintrack.schema_migrations WHERE version = '006_atomicity_probe.sql'"
       );
       expect(migCheck.rows.length).toBe(0);
     } finally {
@@ -746,7 +749,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
     }
   });
 
-  it.skipIf(!realUrl)('(AH) legacy schema without migration history fails closed and requires baseline workflow', async () => {
+  it.skipIf(!realUrl)('(AH) legacy schema without migration history fails closed with LEGACY_SCHEMA_ADOPTION_UNSUPPORTED', async () => {
     const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
     const rootClient = new Client({ connectionString: rootUrl });
     await rootClient.connect();
@@ -769,32 +772,15 @@ describe('PostgreSQL schema and security hardening integration', () => {
     await legacyClient.query("CREATE FUNCTION fintrack.current_session_user_id() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $$;");
     await legacyClient.end();
 
-    // 1. runMigrations on legacy schema without schema_migrations must fail closed
-    await expect(runMigrations(legacyUrl)).rejects.toThrow(/LEGACY_SCHEMA_WITHOUT_MIGRATION_HISTORY/);
-
-    // 2. Calling baseline without ALLOW_LEGACY_BASELINE fails closed
-    const prevBaseline = process.env.ALLOW_LEGACY_BASELINE;
-    delete process.env.ALLOW_LEGACY_BASELINE;
-    await expect(baselineLegacyDatabase(legacyUrl, '003_backend_deployment_closure.sql')).rejects.toThrow(
-      /ALLOW_LEGACY_BASELINE=I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR/
-    );
-
-    // 3. Calling baseline on incomplete legacy schema (missing idempotency, RLS, etc.) MUST FAIL!
-    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
     try {
-      await expect(baselineLegacyDatabase(legacyUrl, '003_backend_deployment_closure.sql')).rejects.toThrow(
-        /INCOMPLETE_LEGACY_SCHEMA/
-      );
+      // runMigrations on legacy schema without schema_migrations must fail closed
+      await expect(runMigrations(legacyUrl)).rejects.toThrow(/LEGACY_SCHEMA_ADOPTION_UNSUPPORTED/);
     } finally {
-      if (prevBaseline !== undefined) process.env.ALLOW_LEGACY_BASELINE = prevBaseline;
-      else delete process.env.ALLOW_LEGACY_BASELINE;
+      const cleanRoot = new Client({ connectionString: rootUrl });
+      await cleanRoot.connect();
+      await cleanRoot.query('DROP DATABASE IF EXISTS fintrack_legacy_test');
+      await cleanRoot.end();
     }
-
-    // Cleanup
-    const cleanRoot = new Client({ connectionString: rootUrl });
-    await cleanRoot.connect();
-    await cleanRoot.query('DROP DATABASE IF EXISTS fintrack_legacy_test');
-    await cleanRoot.end();
   });
 
   it('(AI) npm test with NO PostgreSQL environment does not attempt any TCP/database connection', () => {
@@ -1036,7 +1022,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
     expect(content).toContain('"fix/**"');
   });
 
-  it.skipIf(!realUrl)('(AV) incomplete legacy schema baseline is rejected', async () => {
+  it.skipIf(!realUrl)('(AV) legacy schema without migration history is rejected by normal migration runner', async () => {
     const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
     const rootClient = new Client({ connectionString: rootUrl });
     await rootClient.connect();
@@ -1048,22 +1034,15 @@ describe('PostgreSQL schema and security hardening integration', () => {
     const incClient = new Client({ connectionString: incUrl });
     await incClient.connect();
     await incClient.query('CREATE SCHEMA fintrack');
-    // Incomplete schema: missing idempotency table and missing RLS
     await incClient.query('CREATE TABLE fintrack.users (id uuid PRIMARY KEY)');
-    await incClient.query('CREATE TABLE fintrack.sessions (token_hash text PRIMARY KEY, user_id uuid, expires_at timestamptz)');
-    await incClient.query('CREATE TABLE fintrack.wallets (id uuid PRIMARY KEY, user_id uuid, name text, type text, opening_balance bigint, balance bigint)');
-    await incClient.query('CREATE TABLE fintrack.transfers (id uuid PRIMARY KEY, user_id uuid, from_wallet_id uuid, to_wallet_id uuid, amount bigint, fee bigint)');
+    await incClient.query('CREATE TABLE fintrack.wallets (id uuid PRIMARY KEY)');
     await incClient.end();
 
-    const prev = process.env.ALLOW_LEGACY_BASELINE;
-    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
     try {
-      await expect(baselineLegacyDatabase(incUrl, '001_backend_foundation.sql')).rejects.toThrow(
-        /INCOMPLETE_LEGACY_SCHEMA/
+      await expect(runMigrations(incUrl)).rejects.toThrow(
+        /LEGACY_SCHEMA_ADOPTION_UNSUPPORTED/
       );
     } finally {
-      if (prev !== undefined) process.env.ALLOW_LEGACY_BASELINE = prev;
-      else delete process.env.ALLOW_LEGACY_BASELINE;
       const cleanClient = new Client({ connectionString: rootUrl });
       await cleanClient.connect();
       await cleanClient.query('DROP DATABASE IF EXISTS fintrack_av_test');
@@ -1071,115 +1050,15 @@ describe('PostgreSQL schema and security hardening integration', () => {
     }
   });
 
-  it.skipIf(!realUrl)('(AW) trusted baseline + subsequent runMigrations succeeds', async () => {
-    const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
-    const rootClient = new Client({ connectionString: rootUrl });
-    await rootClient.connect();
-    await rootClient.query('DROP DATABASE IF EXISTS fintrack_aw_test');
-    await rootClient.query('CREATE DATABASE fintrack_aw_test');
-    await rootClient.end();
-
-    const testUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'fintrack_aw_test';
-    const c = new Client({ connectionString: testUrl });
-    await c.connect();
-    // Apply migrations 001, 002, 003 directly without schema_migrations
-    const sql001 = readFileSync('db/migrations/001_backend_foundation.sql', 'utf8')
-      .replace(
-        'CREATE ROLE fintrack_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;',
-        '-- role fintrack_runtime already exists'
-      );
-    const sql002 = readFileSync('db/migrations/002_backend_security_hardening.sql', 'utf8');
-    const sql003 = readFileSync('db/migrations/003_backend_deployment_closure.sql', 'utf8');
-    await c.query(sql001);
-    await c.query(sql002);
-    await c.query(sql003);
-    await c.end();
-
-    const prev = process.env.ALLOW_LEGACY_BASELINE;
-    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
-    try {
-      // Baseline up to 003
-      const baselineRes = await baselineLegacyDatabase(testUrl, '003_backend_deployment_closure.sql');
-      expect(baselineRes.success).toBe(true);
-      expect(baselineRes.baselinedCount).toBe(3);
-
-      // Now run normal migration runner; should apply 004 successfully!
-      const migrateRes = await runMigrations(testUrl);
-      expect(migrateRes.appliedCount).toBe(1);
-
-      // Subsequent runMigrations: 0 pending
-      const noPendingRes = await runMigrations(testUrl);
-      expect(noPendingRes.appliedCount).toBe(0);
-    } finally {
-      if (prev !== undefined) process.env.ALLOW_LEGACY_BASELINE = prev;
-      else delete process.env.ALLOW_LEGACY_BASELINE;
-      const cleanClient = new Client({ connectionString: rootUrl });
-      await cleanClient.connect();
-      await cleanClient.query('DROP DATABASE IF EXISTS fintrack_aw_test');
-      await cleanClient.end();
-    }
-  });
-
-  it.skipIf(!realUrl)('(AX) baseline cannot rewrite existing checksum history', async () => {
-    const prev = process.env.ALLOW_LEGACY_BASELINE;
-    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
-    try {
-      await expect(baselineLegacyDatabase(realUrl!, '003_backend_deployment_closure.sql')).rejects.toThrow(
-        /BASELINE_HISTORY_EXISTS/
-      );
-    } finally {
-      if (prev !== undefined) process.env.ALLOW_LEGACY_BASELINE = prev;
-      else delete process.env.ALLOW_LEGACY_BASELINE;
-    }
-  });
-
-  it.skipIf(!realUrl)('(AY) baseline rollback leaves no partial schema_migrations metadata', async () => {
-    const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
-    const rootClient = new Client({ connectionString: rootUrl });
-    await rootClient.connect();
-    await rootClient.query('DROP DATABASE IF EXISTS fintrack_ay_test');
-    await rootClient.query('CREATE DATABASE fintrack_ay_test');
-    await rootClient.end();
-
-    const testUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'fintrack_ay_test';
-    const c = new Client({ connectionString: testUrl });
-    await c.connect();
-    await c.query('CREATE SCHEMA fintrack');
-    // Only 1 table, incomplete
-    await c.query('CREATE TABLE fintrack.users (id uuid PRIMARY KEY)');
-    await c.end();
-
-    const prev = process.env.ALLOW_LEGACY_BASELINE;
-    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
-    try {
-      await expect(baselineLegacyDatabase(testUrl, '001_backend_foundation.sql')).rejects.toThrow();
-
-      // Verify fintrack.schema_migrations does not exist
-      const checkClient = new Client({ connectionString: testUrl });
-      await checkClient.connect();
-      const res = await checkClient.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'fintrack' AND table_name = 'schema_migrations'"
-      );
-      expect(res.rows.length).toBe(0);
-      await checkClient.end();
-    } finally {
-      if (prev !== undefined) process.env.ALLOW_LEGACY_BASELINE = prev;
-      else delete process.env.ALLOW_LEGACY_BASELINE;
-      const cleanClient = new Client({ connectionString: rootUrl });
-      await cleanClient.connect();
-      await cleanClient.query('DROP DATABASE IF EXISTS fintrack_ay_test');
-      await cleanClient.end();
-    }
-  });
-
   it.skipIf(!realUrl)('(AZ) backup source contains complete migration checksum history', async () => {
     const history = await verifyMigrationHistory(realUrl!);
-    expect(history.total).toBe(4);
+    expect(history.total).toBe(5);
     expect(history.versions).toEqual([
       '001_backend_foundation.sql',
       '002_backend_security_hardening.sql',
       '003_backend_deployment_closure.sql',
       '004_runtime_role_hardening.sql',
+      '005_session_revocation_hardening.sql',
     ]);
   });
 
@@ -1199,7 +1078,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
 
       // Verify all rows in schema_migrations survived restore
       const history = await verifyMigrationHistory(restoreUrl);
-      expect(history.total).toBe(4);
+      expect(history.total).toBe(5);
 
       // Verify migration runner accepts restored DB with 0 pending
       const res = await runMigrations(restoreUrl);
@@ -1304,7 +1183,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
     delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
     try {
       expect(() =>
-        validateTestDbUrls('postgres://host/fintrack_test', 'postgres://host/fintrack_restore')
+        validateTestDbUrls('postgres://127.0.0.1:5432/fintrack_test', 'postgres://127.0.0.1:5432/fintrack_restore')
       ).toThrow(/ALLOW_DESTRUCTIVE_DB_TESTS=true is strictly required/);
     } finally {
       if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
@@ -1316,16 +1195,16 @@ describe('PostgreSQL schema and security hardening integration', () => {
     process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
     try {
       expect(() =>
-        validateTestDbUrls('postgres://host/postgres', 'postgres://host/fintrack_restore')
+        validateTestDbUrls('postgres://127.0.0.1:5432/postgres', 'postgres://127.0.0.1:5432/fintrack_restore')
       ).toThrow(/forbidden/);
       expect(() =>
-        validateTestDbUrls('postgres://host/fintrack', 'postgres://host/fintrack_restore')
+        validateTestDbUrls('postgres://127.0.0.1:5432/fintrack', 'postgres://127.0.0.1:5432/fintrack_restore')
       ).toThrow(/forbidden/);
       expect(() =>
-        validateTestDbUrls('postgres://host/production', 'postgres://host/fintrack_restore')
+        validateTestDbUrls('postgres://127.0.0.1:5432/production', 'postgres://127.0.0.1:5432/fintrack_restore')
       ).toThrow(/forbidden/);
       expect(() =>
-        validateTestDbUrls('postgres://host/my_custom_db', 'postgres://host/fintrack_restore')
+        validateTestDbUrls('postgres://127.0.0.1:5432/my_custom_db', 'postgres://127.0.0.1:5432/fintrack_restore')
       ).toThrow(/pattern/);
     } finally {
       if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
@@ -1338,7 +1217,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
     process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
     try {
       expect(() =>
-        validateTestDbUrls('postgres://host/fintrack_test', 'postgres://host/fintrack_test')
+        validateTestDbUrls('postgres://127.0.0.1:5432/fintrack_test', 'postgres://127.0.0.1:5432/fintrack_test')
       ).toThrow(/must be distinct/);
     } finally {
       if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
@@ -1434,6 +1313,358 @@ describe('PostgreSQL schema and security hardening integration', () => {
     } finally {
       process.env.DATABASE_URL = prevUrl;
       await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(BM) active current session may be revoked exactly once', async () => {
+    const rawToken = 'test-token-bm-active-session-1234567890123456';
+    const hash = createHash('sha256').update(rawToken).digest('hex');
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+
+    await client.query(
+      "INSERT INTO fintrack.sessions (token_hash, user_id, expires_at, revoked_at) VALUES ($1, $2, now() + interval '1 hour', NULL) ON CONFLICT (token_hash) DO UPDATE SET revoked_at = NULL, expires_at = now() + interval '1 hour'",
+      [hash, alice]
+    );
+
+    // Switch to fintrack_runtime
+    await client.query("SET ROLE fintrack_runtime");
+    await client.query("SELECT set_config('app.session_hash', $1, false)", [hash]);
+
+    // First revocation: succeeds
+    await expect(revokeCurrentSession(client as unknown as PoolClient)).resolves.toBeUndefined();
+
+    // Verify in DB that revoked_at IS NOT NULL
+    await client.query("RESET ROLE");
+    const checkRes = await client.query("SELECT revoked_at FROM fintrack.sessions WHERE token_hash = $1", [hash]);
+    expect(checkRes.rows[0].revoked_at).not.toBeNull();
+
+    // Second revocation: fails with 401 UNAUTHENTICATED
+    await client.query("SET ROLE fintrack_runtime");
+    await client.query("SELECT set_config('app.session_hash', $1, false)", [hash]);
+    await expect(revokeCurrentSession(client as unknown as PoolClient)).rejects.toThrow(/UNAUTHENTICATED/);
+
+    await client.query("RESET ROLE");
+    await client.query("DELETE FROM fintrack.sessions WHERE token_hash = $1", [hash]);
+    await client.end();
+  });
+
+  it.skipIf(!realUrl)('(BN) revoked session cannot be set back to revoked_at = NULL by fintrack_runtime', async () => {
+    const rawToken = 'test-token-bn-revoked-session-123456789012345';
+    const hash = createHash('sha256').update(rawToken).digest('hex');
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+
+    // Insert already revoked session
+    await client.query(
+      "INSERT INTO fintrack.sessions (token_hash, user_id, expires_at, revoked_at) VALUES ($1, $2, now() + interval '1 hour', now() - interval '5 minutes') ON CONFLICT (token_hash) DO UPDATE SET revoked_at = now() - interval '5 minutes'",
+      [hash, alice]
+    );
+
+    // Attempt reactivating as fintrack_runtime
+    await client.query("SET ROLE fintrack_runtime");
+    await client.query("SELECT set_config('app.session_hash', $1, false)", [hash]);
+
+    // Monotonic policy USING blocks update of already-revoked session (0 rows affected)
+    const updateRes = await client.query("UPDATE fintrack.sessions SET revoked_at = NULL WHERE token_hash = $1", [hash]);
+    expect(updateRes.rowCount).toBe(0);
+
+    // Verify session remains revoked
+    await client.query("RESET ROLE");
+    const checkRes = await client.query("SELECT revoked_at FROM fintrack.sessions WHERE token_hash = $1", [hash]);
+    expect(checkRes.rows[0].revoked_at).not.toBeNull();
+
+    await client.query("DELETE FROM fintrack.sessions WHERE token_hash = $1", [hash]);
+    await client.end();
+  });
+
+  it.skipIf(!realUrl)('(BO) expired session cannot be revoked/reactivated through runtime role', async () => {
+    const rawToken = 'test-token-bo-expired-session-123456789012345';
+    const hash = createHash('sha256').update(rawToken).digest('hex');
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+
+    // Insert expired session
+    await client.query(
+      "INSERT INTO fintrack.sessions (token_hash, user_id, expires_at, revoked_at) VALUES ($1, $2, now() - interval '10 minutes', NULL) ON CONFLICT (token_hash) DO UPDATE SET expires_at = now() - interval '10 minutes', revoked_at = NULL",
+      [hash, alice]
+    );
+
+    // Under runtime role, attempt to revoke or update expired session
+    await client.query("SET ROLE fintrack_runtime");
+    await client.query("SELECT set_config('app.session_hash', $1, false)", [hash]);
+
+    // Cannot revoke expired session (0 rows match USING policy -> throws 401)
+    await expect(revokeCurrentSession(client as unknown as PoolClient)).rejects.toThrow(/UNAUTHENTICATED/);
+
+    // Cannot extend expiry (runtime role has no UPDATE grant on expires_at and USING rejects expired)
+    await expect(
+      client.query("UPDATE fintrack.sessions SET expires_at = now() + interval '1 day' WHERE token_hash = $1", [hash])
+    ).rejects.toThrow();
+
+    await client.query("RESET ROLE");
+    await client.query("DELETE FROM fintrack.sessions WHERE token_hash = $1", [hash]);
+    await client.end();
+  });
+
+  it.skipIf(!realUrl)('(BP) a different session token cannot update another session', async () => {
+    const tokenA = 'test-token-bp-token-a-12345678901234567890123';
+    const tokenB = 'test-token-bp-token-b-12345678901234567890123';
+    const hashA = createHash('sha256').update(tokenA).digest('hex');
+    const hashB = createHash('sha256').update(tokenB).digest('hex');
+
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+
+    // Insert active sessions A and B
+    await client.query(
+      "INSERT INTO fintrack.sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour') ON CONFLICT (token_hash) DO UPDATE SET revoked_at = NULL",
+      [hashA, alice]
+    );
+    await client.query(
+      "INSERT INTO fintrack.sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour') ON CONFLICT (token_hash) DO UPDATE SET revoked_at = NULL",
+      [hashB, '22222222-2222-4222-8222-222222222222']
+    );
+
+    // Set context to token A, try to update token B
+    await client.query("SET ROLE fintrack_runtime");
+    await client.query("SELECT set_config('app.session_hash', $1, false)", [hashA]);
+
+    const updateRes = await client.query(
+      "UPDATE fintrack.sessions SET revoked_at = now() WHERE token_hash = $1",
+      [hashB]
+    );
+    expect(updateRes.rowCount).toBe(0);
+
+    // Verify token B is still active
+    await client.query("RESET ROLE");
+    const checkB = await client.query("SELECT revoked_at FROM fintrack.sessions WHERE token_hash = $1", [hashB]);
+    expect(checkB.rows[0].revoked_at).toBeNull();
+
+    await client.query("DELETE FROM fintrack.sessions WHERE token_hash IN ($1, $2)", [hashA, hashB]);
+    await client.end();
+  });
+
+  it.skipIf(!realUrl)('(BQ) revoked session receives 401 through authentication', async () => {
+    const rawToken = 'test-token-bq-auth-revoked-123456789012345678';
+    const hash = createHash('sha256').update(rawToken).digest('hex');
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+
+    // Seed revoked session
+    await client.query(
+      "INSERT INTO fintrack.sessions (token_hash, user_id, expires_at, revoked_at) VALUES ($1, $2, now() + interval '1 hour', now() - interval '1 minute') ON CONFLICT (token_hash) DO UPDATE SET revoked_at = now()",
+      [hash, alice]
+    );
+
+    // Authenticate with revoked session hash throws 401 UNAUTHENTICATED
+    await client.query("SET ROLE fintrack_runtime");
+    await expect(authenticate(client as unknown as PoolClient, hash)).rejects.toThrow(/UNAUTHENTICATED/);
+
+    await client.query("RESET ROLE");
+    await client.query("DELETE FROM fintrack.sessions WHERE token_hash = $1", [hash]);
+    await client.end();
+  });
+
+  it.skipIf(!realUrl)('(BR) logout still commits revocation and clears cookie correctly', async () => {
+    const rawToken = 'c'.repeat(43);
+    const hash = createHash('sha256').update(rawToken).digest('hex');
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+
+    await client.query(
+      "INSERT INTO fintrack.sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour') ON CONFLICT (token_hash) DO UPDATE SET revoked_at = NULL",
+      [hash, alice]
+    );
+    await client.end();
+
+    const prevOrigin = process.env.APP_ORIGIN;
+    const prevEnabled = process.env.ENABLE_BACKEND_API;
+    const prevDbUrl = process.env.DATABASE_URL;
+
+    process.env.APP_ORIGIN = 'https://fintrack.example';
+    process.env.ENABLE_BACKEND_API = 'true';
+    process.env.DATABASE_URL = process.env.DATABASE_APP_TEST_URL || realUrl!.replace(/\/\/[^:]+:[^@]+@/, '//fintrack_app_login:test-login-password@');
+    delete process.env.EXPECTED_LOGIN_ROLE;
+    await resetPoolForTesting();
+
+    try {
+      const logoutReq = new Request('https://fintrack.example/api/v2/session/logout', {
+        method: 'POST',
+        headers: {
+          origin: 'https://fintrack.example',
+          'sec-fetch-site': 'same-origin',
+          cookie: `__Host-fintrack_session=${rawToken}`,
+        },
+      });
+
+      const { POST } = await import('../src/app/api/v2/session/logout/route');
+      const res = await POST(logoutReq);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.success).toBe(true);
+      expect(data.data.revoked).toBe(true);
+
+      const setCookie = res.headers.get('set-cookie') || '';
+      expect(setCookie).toContain('Max-Age=0');
+      expect(setCookie).toContain('__Host-fintrack_session=');
+
+      // Check DB directly
+      const verifyClient = new Client({ connectionString: realUrl });
+      await verifyClient.connect();
+      const dbRow = await verifyClient.query("SELECT revoked_at FROM fintrack.sessions WHERE token_hash = $1", [hash]);
+      expect(dbRow.rows[0].revoked_at).not.toBeNull();
+      await verifyClient.query("DELETE FROM fintrack.sessions WHERE token_hash = $1", [hash]);
+      await verifyClient.end();
+    } finally {
+      if (prevOrigin !== undefined) process.env.APP_ORIGIN = prevOrigin;
+      else delete process.env.APP_ORIGIN;
+      if (prevEnabled !== undefined) process.env.ENABLE_BACKEND_API = prevEnabled;
+      else delete process.env.ENABLE_BACKEND_API;
+      if (prevDbUrl !== undefined) process.env.DATABASE_URL = prevDbUrl;
+      else delete process.env.DATABASE_URL;
+      await resetPoolForTesting();
+    }
+  });
+
+  it('(BS) remote hostname with customer_test is rejected without danger gate', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@prod.example.com:5432/customer_test',
+          'postgres://user:pw@prod.example.com:5432/customer_restore'
+        )
+      ).toThrow(/Remote source host "prod.example.com" is forbidden/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    }
+  });
+
+  it('(BT) semicolon / SQL-shaped database identifier is rejected', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/evil;SELECT(1);--_test',
+          'postgres://user:pw@127.0.0.1:5432/fintrack_restore'
+        )
+      ).toThrow(/strict identifier grammar/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    }
+  });
+
+  it('(BU) database name with whitespace is rejected', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/foo%20bar_test',
+          'postgres://user:pw@127.0.0.1:5432/fintrack_restore'
+        )
+      ).toThrow(/suspicious percent-encoding/);
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/foo bar_test',
+          'postgres://user:pw@127.0.0.1:5432/fintrack_restore'
+        )
+      ).toThrow(/whitespace|grammar/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    }
+  });
+
+  it('(BV) percent-encoded suspicious database path is rejected', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/%66intrack_test',
+          'postgres://user:pw@127.0.0.1:5432/fintrack_restore'
+        )
+      ).toThrow(/suspicious percent-encoding/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    }
+  });
+
+  it.skipIf(!realUrl)('(BW) shared cluster containing an unexpected application database is rejected', async () => {
+    const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
+    const client = new Client({ connectionString: rootUrl });
+    await client.connect();
+    await client.query('DROP DATABASE IF EXISTS unexpected_app_db');
+    await client.query('CREATE DATABASE unexpected_app_db');
+    try {
+      await expect(
+        verifyDedicatedCluster(rootUrl, ['fintrack_test', 'fintrack_restore'])
+      ).rejects.toThrow(/UNSAFE_SHARED_DATABASE_CLUSTER/);
+    } finally {
+      await client.query('DROP DATABASE IF EXISTS unexpected_app_db');
+      await client.end();
+    }
+  });
+
+  it('(BX) source and restore on different hosts/clusters is rejected', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/fintrack_test',
+          'postgres://user:pw@127.0.0.1:5433/fintrack_restore'
+        )
+      ).toThrow(/same PostgreSQL test cluster/);
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/fintrack_test',
+          'postgres://user:pw@localhost:5432/fintrack_restore'
+        )
+      ).toThrow(/same PostgreSQL test cluster/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    }
+  });
+
+  it('(BY) missing ALLOW_DESTRUCTIVE_DB_TESTS is rejected', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    try {
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/fintrack_test',
+          'postgres://user:pw@127.0.0.1:5432/fintrack_restore'
+        )
+      ).toThrow(/ALLOW_DESTRUCTIVE_DB_TESTS=true is strictly required/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+    }
+  });
+
+  it('(BZ) valid localhost disposable source/restore pair succeeds', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      const res = validateTestDbUrls(
+        'postgres://postgres:pw@127.0.0.1:5432/fintrack_test',
+        'postgres://postgres:pw@127.0.0.1:5432/fintrack_restore'
+      );
+      expect(res.sourceDb).toBe('fintrack_test');
+      expect(res.restoreDb).toBe('fintrack_restore');
+      expect(res.sourceQuoted).toBe('"fintrack_test"');
+      expect(res.restoreQuoted).toBe('"fintrack_restore"');
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
     }
   });
 });

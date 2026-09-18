@@ -15,12 +15,13 @@ if [ -z "${DATABASE_TEST_URL:-}" ] || [ -z "${DATABASE_RESTORE_URL:-}" ]; then
   exit 1
 fi
 
-# Strict safety validation before any destructive command
-node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL"
+# Strict safety validation and dedicated cluster verification before any destructive command
+node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL" "${DATABASE_MAINTENANCE_URL:-${DATABASE_TEST_URL%/*}/postgres}"
 
 BASE_URL="$DATABASE_TEST_URL"
 RESTORE_URL="$DATABASE_RESTORE_URL"
-RESTORE_DB="$(node -e 'try { const u = new URL(process.argv[1]); console.log(u.pathname.replace(/^\//, "")) } catch { const p = process.argv[1].split("/"); console.log(p[p.length - 1]); }' "$RESTORE_URL")"
+RESTORE_DB="$(node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL" --print-restore-name)"
+RESTORE_DB_QUOTED="$(node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL" --print-quoted-restore-name)"
 
 # Enforce secure temporary file creation with owner-only permissions (0600)
 umask 077
@@ -30,7 +31,7 @@ BACKUP_FILE="$(mktemp -t fintrack_logical_backup_XXXXXX.sql)"
 cleanup() {
   echo "=== [Cleanup] Removing temporary backup file & cleaning disposable databases ==="
   rm -f "$BACKUP_FILE"
-  psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS ${RESTORE_DB};" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;" >/dev/null 2>&1 || true
+  psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};" -c "DROP DATABASE IF EXISTS \"fintrack_upgrade_test\";" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -43,7 +44,7 @@ fi
 echo "Verified: Temporary backup file created with owner-only permissions (0600)."
 
 echo "=== [1/8] Initializing source database via production migration runner ==="
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB};" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;"
+psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};" -c "DROP DATABASE IF EXISTS \"fintrack_upgrade_test\";"
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS fintrack CASCADE; DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime') THEN DROP OWNED BY fintrack_runtime; DROP ROLE fintrack_runtime; END IF; IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_app_login') THEN DROP OWNED BY fintrack_app_login; DROP ROLE fintrack_app_login; END IF; END \$\$;"
 
 # Initialize source database using PRODUCTION migration runner (not direct psql -f)
@@ -93,8 +94,8 @@ fi
 echo "Verified: Logical backup does NOT carry cluster-global roles (bootstrap required on new clusters)."
 
 echo "=== [4/8] Creating fresh isolated restore database ==="
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB};"
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${RESTORE_DB};"
+psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};"
+psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${RESTORE_DB_QUOTED};"
 
 echo "=== [5/8] Restoring logical backup into isolated database ==="
 psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_FILE"

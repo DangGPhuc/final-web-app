@@ -94,6 +94,7 @@ DATABASE_MAINTENANCE_URL=postgres://postgres:ci-only-disposable-password@localho
 | Hạng mục | Trạng thái | Ghi chú minh chứng |
 |---|---|---|
 | **Database-level logical restore** | **IMPLEMENTED** | Diễn tập tự động qua `scripts/backup-restore-drill.sh` với `umask 077`, `mktemp`, kiểm tra 6 bảng bảo mật có `ENABLE + FORCE RLS`, cách ly tenant, bảo toàn lịch sử `schema_migrations`, và xác minh qua runner `migrate.mjs`. |
+| **Legacy automatic baseline adoption** | **NOT SUPPORTED** | FinTrack không có database legacy trước hệ thống migration checksum. Tự động sinh lịch sử migration bị từ chối (`LEGACY_SCHEMA_ADOPTION_UNSUPPORTED`). Khôi phục DB cũ bắt buộc dùng bản sao lưu tin cậy hoặc migration script chuyên dụng đã qua review. |
 | **Fresh-cluster disaster recovery** | **PARTIAL / PLANNED** | Phục hồi logical DB đã kiểm chứng. Khởi tạo roles trên cluster mới đòi hỏi bootstrap có kiểm soát phiên bản trước khi restore. |
 | **Authentication** | **PARTIAL / PLANNED** | Xác thực session, băm an toàn, thu hồi session phía server đã hoàn thành. OAuth / passwordless login dự kiến ở iteration kế tiếp. |
 | **Centralized monitoring + alerting** | **PARTIAL / PLANNED** | Structured security logging với `request_id` hoàn chỉnh qua `src/server/logger.ts`. Alerting và ngưỡng cảnh báo tập trung (Prometheus/Slack) là PLANNED. |

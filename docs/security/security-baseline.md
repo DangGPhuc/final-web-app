@@ -136,6 +136,7 @@
 | Capability | Status | Implementation Evidence / Notes |
 |---|---|---|
 | Database-level logical restore | **IMPLEMENTED** | Verified automated script `scripts/backup-restore-drill.sh` testing data restoration, balance invariants, all 6 security tables with ENABLE + FORCE RLS, tenant isolation, full `schema_migrations` history preservation, and subsequent migration runner acceptance. |
+| Legacy automatic baseline adoption | **NOT SUPPORTED** | FinTrack has not deployed a pre-migration production backend. Automatic legacy baseline adoption is unsupported and fails closed (`LEGACY_SCHEMA_ADOPTION_UNSUPPORTED`). Recovery of historical schemas requires restoring trusted backups with authentic migration history or an explicit, reviewed one-off migration plan. |
 | Fresh-cluster disaster recovery | **PARTIAL / PLANNED** | Database logical restore verified. Provisioning cluster-level roles (`fintrack_runtime`, `fintrack_app_login`) on a blank cluster requires version-controlled bootstrap prior to restore. Full fresh-cluster disaster recovery orchestration is PLANNED. |
 | Authentication | **PARTIAL / PLANNED** | Session verification, constant-time hashing, and server-side revocation implemented. Real identity issuance, passwordless/OAuth login planned for next iteration. |
 | Centralized monitoring + alerting | **PARTIAL / PLANNED** | Structured security logging with UUID `request_id` implemented in `src/server/logger.ts`. Centralized metric aggregation (Prometheus/Datadog) and alerting rules are planned. |

@@ -116,7 +116,7 @@ export async function runMigrations(connectionString) {
       `);
       if (existingTables.rows[0]?.count > 0) {
         throw new Error(
-          'LEGACY_SCHEMA_WITHOUT_MIGRATION_HISTORY: Existing fintrack tables detected without schema_migrations table. Run scripts/baseline-migrations.mjs to establish trusted baseline.'
+          'LEGACY_SCHEMA_ADOPTION_UNSUPPORTED: Existing fintrack tables detected without schema_migrations table. Legacy schema adoption is unsupported. Restore from a trusted backup with authentic migration history or execute a reviewed dedicated migration plan.'
         );
       }
     }

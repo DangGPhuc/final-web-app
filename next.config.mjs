@@ -22,9 +22,9 @@ const __dirname = path.dirname(__filename);
  *   - X-Content-Type-Options: nosniff → prevents MIME sniffing attacks
  *   - Referrer-Policy            → limits information leakage in Referer header
  *   - Permissions-Policy         → disables sensitive browser APIs not needed by app
+ *   - Strict-Transport-Security (HSTS) → max-age=31536000 in production
  *
  * NOT implemented yet:
- *   - Strict-Transport-Security (HSTS) — requires HTTPS deployment; add at reverse proxy level
  *   - Nonce-based CSP            — future improvement
  *   - Cross-Origin-Opener-Policy  — evaluate before adding to avoid breaking OAuth popups
  *

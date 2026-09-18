@@ -7,9 +7,9 @@ import pg from 'pg';
 const MIGRATIONS_DIR = path.resolve(process.cwd(), 'db/migrations');
 
 export async function verifyMigrationHistory(dbUrl) {
-  const targetUrl = dbUrl || process.env.DATABASE_MAINTENANCE_URL || process.env.DATABASE_URL;
+  const targetUrl = dbUrl || process.env.DATABASE_MAINTENANCE_URL || process.env.DATABASE_ADMIN_URL;
   if (!targetUrl) {
-    throw new Error('verifyMigrationHistory requires a target database URL.');
+    throw new Error('verifyMigrationHistory requires an operator target database URL (DATABASE_MAINTENANCE_URL or DATABASE_ADMIN_URL).');
   }
 
   const pool = new pg.Pool({
@@ -64,7 +64,7 @@ export async function verifyMigrationHistory(dbUrl) {
 }
 
 if (process.argv[1] && process.argv[1].endsWith('verify-migration-history.mjs')) {
-  const url = process.argv[2] || process.env.DATABASE_MAINTENANCE_URL;
+  const url = process.argv[2] || process.env.DATABASE_MAINTENANCE_URL || process.env.DATABASE_ADMIN_URL;
   verifyMigrationHistory(url)
     .then(({ total, versions }) => {
       console.log(`[verify-migration-history] Verified all ${total} migration checksums match repository files exactly: ${versions.join(', ')}`);
