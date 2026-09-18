@@ -2,9 +2,9 @@ name: "CodeQL Static Security Analysis"
 
 on:
   push:
-    branches: [dev/fintrack-v2, feature/backend-foundation-v2, fix/backend-security-hardening-v2]
+    branches: [main, dev/fintrack-v2, "feature/**", "fix/**"]
   pull_request:
-    branches: [dev/fintrack-v2, feature/backend-foundation-v2, fix/backend-security-hardening-v2]
+    branches: [main, dev/fintrack-v2, "feature/**", "fix/**"]
   schedule:
     - cron: '0 3 * * 1'
 
