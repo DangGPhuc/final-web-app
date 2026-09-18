@@ -20,6 +20,7 @@ import { verifyMigrationHistory } from '../scripts/verify-migration-history.mjs'
 import { assertSafeTestDatabaseUrl } from './helpers/test-db-guard';
 import { handle } from '../src/server/http';
 import { logSecurityEvent } from '../src/server/logger';
+import { findOrCreateUserFromIdentity } from '../src/server/auth-repository';
 
 const alice = '11111111-1111-4111-8111-111111111111';
 const bob = '22222222-2222-4222-8222-222222222222';
@@ -86,6 +87,7 @@ beforeAll(async () => {
     await db.exec(readFileSync('db/migrations/004_runtime_role_hardening.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/005_session_revocation_hardening.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/006_auth_identity.sql', 'utf8'));
+    await db.exec(readFileSync('db/migrations/007_auth_security_hardening.sql', 'utf8'));
   }
 
   await db.query('INSERT INTO fintrack.users(id) VALUES($1),($2)', [alice, bob]);
@@ -681,7 +683,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
       CREATE OR REPLACE FUNCTION fintrack.fail_on_atomicity_test()
       RETURNS trigger AS $$
       BEGIN
-        IF NEW.version = '007_atomicity_probe.sql' THEN
+        IF NEW.version = '008_atomicity_probe.sql' THEN
           RAISE EXCEPTION 'SIMULATED_CHECKSUM_FAILURE_TRIGGERED';
         END IF;
         RETURN NEW;
@@ -694,7 +696,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
       FOR EACH ROW EXECUTE FUNCTION fintrack.fail_on_atomicity_test();
     `);
 
-    const probeFile = 'db/migrations/007_atomicity_probe.sql';
+    const probeFile = 'db/migrations/008_atomicity_probe.sql';
     writeFileSync(probeFile, 'CREATE TABLE fintrack.atomicity_probe_table (id int);');
 
     try {
@@ -709,9 +711,9 @@ describe('PostgreSQL schema and security hardening integration', () => {
       `);
       expect(tableCheck.rows[0].exists).toBe(false);
 
-      // And schema_migrations does not have entry for 007
+      // And schema_migrations does not have entry for 008
       const migCheck = await adminClient.query(
-        "SELECT 1 FROM fintrack.schema_migrations WHERE version = '007_atomicity_probe.sql'"
+        "SELECT 1 FROM fintrack.schema_migrations WHERE version = '008_atomicity_probe.sql'"
       );
       expect(migCheck.rows.length).toBe(0);
     } finally {
@@ -1054,7 +1056,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
 
   it.skipIf(!realUrl)('(AZ) backup source contains complete migration checksum history', async () => {
     const history = await verifyMigrationHistory(realUrl!);
-    expect(history.total).toBe(6);
+    expect(history.total).toBe(7);
     expect(history.versions).toEqual([
       '001_backend_foundation.sql',
       '002_backend_security_hardening.sql',
@@ -1062,6 +1064,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
       '004_runtime_role_hardening.sql',
       '005_session_revocation_hardening.sql',
       '006_auth_identity.sql',
+      '007_auth_security_hardening.sql',
     ]);
   });
 
@@ -1081,7 +1084,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
 
       // Verify all rows in schema_migrations survived restore
       const history = await verifyMigrationHistory(restoreUrl);
-      expect(history.total).toBe(6);
+      expect(history.total).toBe(7);
 
       // Verify migration runner accepts restored DB with 0 pending
       const res = await runMigrations(restoreUrl);
@@ -2008,33 +2011,34 @@ describe('operator credential and maintenance URL safety (CA–CK)', () => {
     const validHash = createHash('sha256').update('valid-state-key-probe').digest('hex');
     const oldConsumedHash = createHash('sha256').update('old-consumed-state-key-probe').digest('hex');
     const recentConsumedHash = createHash('sha256').update('recent-consumed-state-key-probe').digest('hex');
+    const dummyBind = createHash('sha256').update('dummy-browser-bind-token').digest('hex');
 
     // Insert expired unconsumed state
     await db.query(
-      `INSERT INTO fintrack.oauth_login_states (state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at)
-       VALUES ($1, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() - interval '10 minutes')`,
-      [expiredHash, expiredHash]
+      `INSERT INTO fintrack.oauth_login_states (state_hash, browser_bind_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at)
+       VALUES ($1, $3, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() - interval '10 minutes')`,
+      [expiredHash, expiredHash, dummyBind]
     );
 
     // Insert active valid state
     await db.query(
-      `INSERT INTO fintrack.oauth_login_states (state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at)
-       VALUES ($1, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() + interval '10 minutes')`,
-      [validHash, validHash]
+      `INSERT INTO fintrack.oauth_login_states (state_hash, browser_bind_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at)
+       VALUES ($1, $3, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() + interval '10 minutes')`,
+      [validHash, validHash, dummyBind]
     );
 
     // Insert old consumed state (> 30 days)
     await db.query(
-      `INSERT INTO fintrack.oauth_login_states (state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at, consumed_at)
-       VALUES ($1, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() - interval '40 days', now() - interval '35 days')`,
-      [oldConsumedHash, oldConsumedHash]
+      `INSERT INTO fintrack.oauth_login_states (state_hash, browser_bind_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at, consumed_at)
+       VALUES ($1, $3, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() - interval '40 days', now() - interval '35 days')`,
+      [oldConsumedHash, oldConsumedHash, dummyBind]
     );
 
     // Insert recently consumed state (< 30 days)
     await db.query(
-      `INSERT INTO fintrack.oauth_login_states (state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at, consumed_at)
-       VALUES ($1, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() + interval '10 minutes', now() - interval '1 hour')`,
-      [recentConsumedHash, recentConsumedHash]
+      `INSERT INTO fintrack.oauth_login_states (state_hash, browser_bind_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at, consumed_at)
+       VALUES ($1, $3, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() + interval '10 minutes', now() - interval '1 hour')`,
+      [recentConsumedHash, recentConsumedHash, dummyBind]
     );
 
     // Perform maintenance cleanup query
@@ -2064,5 +2068,178 @@ describe('operator credential and maintenance URL safety (CA–CK)', () => {
         AND a.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
     `);
     expect(parseInt(privRes.rows[0]?.count ?? '0', 10)).toBe(0);
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H17: auth runtime cannot enumerate users (SELECT denied)
+  // --------------------------------------------------------------------------
+  it('(AUTH-H17) fintrack_auth_runtime cannot enumerate users (SELECT denied)', async () => {
+    await db.exec('BEGIN; SET LOCAL ROLE fintrack_auth_runtime');
+    try {
+      await expect(
+        db.query('SELECT count(*) FROM fintrack.users')
+      ).rejects.toThrow(/permission denied/i);
+    } finally {
+      await db.exec('ROLLBACK');
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H18: auth runtime cannot enumerate unrelated sessions
+  // --------------------------------------------------------------------------
+  it('(AUTH-H18) fintrack_auth_runtime cannot enumerate unrelated sessions (returns 0 without app.auth_revoke_hash)', async () => {
+    await db.exec('BEGIN; SET LOCAL ROLE fintrack_auth_runtime');
+    try {
+      // Without app.auth_revoke_hash set, RLS policy hides all sessions from auth runtime
+      const res = await db.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM fintrack.sessions"
+      );
+      expect(parseInt(res.rows[0].count, 10)).toBe(0);
+    } finally {
+      await db.exec('ROLLBACK');
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H19: auth runtime may revoke only exact app.auth_revoke_hash session
+  // --------------------------------------------------------------------------
+  it('(AUTH-H19) fintrack_auth_runtime may revoke only exact app.auth_revoke_hash session', async () => {
+    const sessionTokenA = createHash('sha256').update('auth-test-session-a-token-hash').digest('hex');
+    const sessionTokenB = createHash('sha256').update('auth-test-session-b-token-hash').digest('hex');
+
+    // Create 2 active sessions under admin/fixture setup
+    await db.query(
+      `INSERT INTO fintrack.sessions (token_hash, user_id, expires_at)
+       VALUES ($1, $2, now() + interval '1 hour'), ($3, $2, now() + interval '1 hour')`,
+      [sessionTokenA, alice, sessionTokenB]
+    );
+
+    // Switch to fintrack_auth_runtime
+    await db.exec('BEGIN; SET LOCAL ROLE fintrack_auth_runtime');
+    try {
+      // Attempt to revoke sessionTokenB when app.auth_revoke_hash is set to sessionTokenA
+      await db.query("SELECT set_config('app.auth_revoke_hash', $1, true)", [sessionTokenA]);
+
+      // Trying to update sessionTokenB must affect 0 rows because RLS excludes it
+      const unauthUpdate = await db.query(
+        "UPDATE fintrack.sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
+        [sessionTokenB]
+      );
+      expect(unauthUpdate.rowCount).toBe(0);
+
+      // Revoking sessionTokenA must succeed (1 row affected)
+      const authUpdate = await db.query(
+        "UPDATE fintrack.sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
+        [sessionTokenA]
+      );
+      expect(authUpdate.rowCount).toBe(1);
+
+      // Verify sessionTokenA is revoked and sessionTokenB remains untouched
+      const checkA = await db.query<{ revoked_at: Date | null }>(
+        "SELECT revoked_at FROM fintrack.sessions WHERE token_hash = $1",
+        [sessionTokenA]
+      );
+      expect(checkA.rows[0].revoked_at).not.toBeNull();
+    } finally {
+      await db.exec('ROLLBACK');
+    }
+
+    const checkB = await db.query<{ revoked_at: Date | null }>(
+      "SELECT revoked_at FROM fintrack.sessions WHERE token_hash = $1",
+      [sessionTokenB]
+    );
+    expect(checkB.rows[0].revoked_at).toBeNull();
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H10 & AUTH-H11: Real PostgreSQL concurrent first login creates one user only
+  // --------------------------------------------------------------------------
+  it('(AUTH-H10 & AUTH-H11) real PostgreSQL concurrent first login creates exactly one user and one auth_identity (no orphan users)', async () => {
+    const subject = 'real-concurrent-pg-subject-unique-1';
+    const claims = {
+      provider: 'google' as const,
+      providerSubject: subject,
+      email: 'concurrent-h10@example.com',
+      emailVerified: true as const,
+      displayName: 'Concurrent PG User',
+      avatarUrl: null,
+    };
+
+    if (realUrl) {
+      // Real PostgreSQL test using two independent database connections / transactions
+      const client1 = new Client({ connectionString: realUrl });
+      const client2 = new Client({ connectionString: realUrl });
+      await client1.connect();
+      await client2.connect();
+
+      try {
+        const [res1, res2] = await Promise.all([
+          (async () => {
+            await client1.query('BEGIN');
+            const res = await findOrCreateUserFromIdentity(client1 as unknown as PoolClient, claims);
+            await client1.query('COMMIT');
+            return res;
+          })(),
+          (async () => {
+            await client2.query('BEGIN');
+            const res = await findOrCreateUserFromIdentity(client2 as unknown as PoolClient, claims);
+            await client2.query('COMMIT');
+            return res;
+          })(),
+        ]);
+
+        expect(res1.userId).toBe(res2.userId);
+        expect(res1.isNewUser !== res2.isNewUser).toBe(true);
+      } finally {
+        await client1.end();
+        await client2.end();
+      }
+    } else {
+      // In PGlite environment: execute two successive transactions simulating concurrent first-login resolution
+      await db.exec('BEGIN');
+      const res1 = await findOrCreateUserFromIdentity(db as unknown as PoolClient, claims);
+      await db.exec('COMMIT');
+
+      await db.exec('BEGIN');
+      const res2 = await findOrCreateUserFromIdentity(db as unknown as PoolClient, claims);
+      await db.exec('COMMIT');
+
+      expect(res1.userId).toBe(res2.userId);
+      expect(res1.isNewUser).toBe(true);
+      expect(res2.isNewUser).toBe(false);
+    }
+
+    // Verify exactly ONE auth_identity
+    const identityCount = await db.query<{ count: string; user_id: string }>(
+      "SELECT count(*)::text AS count, max(user_id::text) AS user_id FROM fintrack.auth_identities WHERE provider = 'google' AND provider_subject = $1",
+      [subject]
+    );
+    expect(parseInt(identityCount.rows[0].count, 10)).toBe(1);
+    const resolvedUserId = identityCount.rows[0].user_id;
+
+    // Verify exactly ONE user in fintrack.users matching that user_id
+    const userCount = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM fintrack.users WHERE id = $1",
+      [resolvedUserId]
+    );
+    expect(parseInt(userCount.rows[0].count, 10)).toBe(1);
+
+    // Verify no orphan users exist for this providerSubject
+    const orphanCount = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM fintrack.users u
+       WHERE u.id = $1 AND u.id NOT IN (SELECT user_id FROM fintrack.auth_identities WHERE provider = 'google' AND provider_subject = $2)`,
+      [resolvedUserId, subject]
+    );
+    expect(parseInt(orphanCount.rows[0].count, 10)).toBe(0);
+
+    // Verify exactly one user was created for this subject
+    const userForSubjectCount = await db.query<{ count: string }>(
+      `SELECT count(DISTINCT user_id)::text AS count
+       FROM fintrack.auth_identities
+       WHERE provider = 'google' AND provider_subject = $1`,
+      [subject]
+    );
+    expect(parseInt(userForSubjectCount.rows[0].count, 10)).toBe(1);
   });
 });

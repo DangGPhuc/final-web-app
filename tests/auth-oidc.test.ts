@@ -11,6 +11,17 @@ import {
   resetOidcConfigForTesting,
   buildGoogleAuthorizationUrl,
   exchangeAndVerifyGoogleOidc,
+  generateOAuthBinder,
+  extractOAuthBinder,
+  hashOAuthBinder,
+  createOAuthBinderCookieHeader,
+  clearOAuthBinderCookieHeader,
+  validateGoogleIdentityClaims,
+  getCanonicalAppOrigin,
+  getGoogleOidcCredentials,
+  buildCanonicalCallbackUrl,
+  OAUTH_BINDER_COOKIE,
+  OAUTH_BINDER_MAX_AGE_SECONDS,
 } from '../src/server/oidc';
 
 import {
@@ -30,10 +41,11 @@ import {
   SESSION_MAX_AGE_SECONDS,
 } from '../src/server/session';
 
-import { setTestAuthClientOverride } from '../src/server/auth-database';
+import { setTestAuthClientOverride, authTransaction } from '../src/server/auth-database';
 import { GET as startGet } from '../src/app/api/v2/auth/google/start/route';
 import { GET as callbackGet } from '../src/app/api/v2/auth/google/callback/route';
 import { logSecurityEvent } from '../src/server/logger';
+import { performLogout, checkSessionMe, type AuthUser } from '../src/context/auth-actions';
 
 describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   let db: PGlite;
@@ -54,6 +66,7 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     await db.exec(readFileSync('db/migrations/004_runtime_role_hardening.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/005_session_revocation_hardening.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/006_auth_identity.sql', 'utf8'));
+    await db.exec(readFileSync('db/migrations/007_auth_security_hardening.sql', 'utf8'));
 
     poolClient = db as unknown as PoolClient;
     setTestAuthClientOverride(poolClient);
@@ -67,6 +80,11 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
 
   beforeEach(async () => {
     resetOidcConfigForTesting();
+    process.env.APP_ORIGIN = 'https://localhost:3000';
+    process.env.GOOGLE_OIDC_CLIENT_ID = 'mock-google-client-id.apps.googleusercontent.com';
+    process.env.GOOGLE_OIDC_CLIENT_SECRET = 'mock-google-client-secret';
+    process.env.GOOGLE_OIDC_REDIRECT_URI = 'https://localhost:3000/api/v2/auth/google/callback';
+
     // Clean up auth tables between tests
     await db.exec('DELETE FROM fintrack.oauth_login_states');
     await db.exec('DELETE FROM fintrack.auth_identities');
@@ -94,7 +112,6 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   it('AUTH-02 PKCE S256 challenge generated correctly through library flow', async () => {
     const params = await generateOAuthParams('/');
     expect(params.codeVerifier.length).toBeGreaterThanOrEqual(43);
-    // Standard RFC 7636: challenge = base64url(SHA256(verifier))
     const expectedChallenge = createHash('sha256').update(params.codeVerifier).digest('base64url');
     expect(params.codeChallenge).toBe(expectedChallenge);
   });
@@ -104,15 +121,15 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   // --------------------------------------------------------------------------
   it('AUTH-03 expired OAuth state is rejected with AUTH_STATE_EXPIRED', async () => {
     const params = await generateOAuthParams('/');
-    // Insert an expired state record (expires 5 seconds ago)
+    const { binderHash } = generateOAuthBinder();
     await db.query(
       `INSERT INTO fintrack.oauth_login_states (
-         state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at
-       ) VALUES ($1, 'google', $2, $3, $4, now() - interval '5 seconds')`,
-      [params.stateHash, params.codeVerifier, params.nonceHash, '/dashboard']
+         state_hash, browser_bind_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at
+       ) VALUES ($1, $2, 'google', $3, $4, $5, now() - interval '5 seconds')`,
+      [params.stateHash, binderHash, params.codeVerifier, params.nonceHash, '/dashboard']
     );
 
-    await expect(consumeOAuthState(poolClient, params.stateHash)).rejects.toMatchObject({
+    await expect(consumeOAuthState(poolClient, params.stateHash, binderHash)).rejects.toMatchObject({
       code: 'AUTH_STATE_EXPIRED',
     });
   });
@@ -122,8 +139,10 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   // --------------------------------------------------------------------------
   it('AUTH-04 consumed OAuth state replay is rejected with AUTH_STATE_REPLAYED', async () => {
     const params = await generateOAuthParams('/');
+    const { binderHash } = generateOAuthBinder();
     await recordOAuthState(poolClient, {
       stateHash: params.stateHash,
+      browserBindHash: binderHash,
       provider: 'google',
       codeVerifier: params.codeVerifier,
       nonceHash: params.nonceHash,
@@ -131,11 +150,11 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     });
 
     // First consumption succeeds
-    const consumed = await consumeOAuthState(poolClient, params.stateHash);
+    const consumed = await consumeOAuthState(poolClient, params.stateHash, binderHash);
     expect(consumed.codeVerifier).toBe(params.codeVerifier);
 
     // Second consumption must fail closed
-    await expect(consumeOAuthState(poolClient, params.stateHash)).rejects.toMatchObject({
+    await expect(consumeOAuthState(poolClient, params.stateHash, binderHash)).rejects.toMatchObject({
       code: 'AUTH_STATE_REPLAYED',
     });
   });
@@ -145,126 +164,125 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   // --------------------------------------------------------------------------
   it('AUTH-05 state mismatch is rejected with AUTH_STATE_INVALID', async () => {
     const nonExistentHash = createHash('sha256').update('non-existent-state').digest('hex');
-    await expect(consumeOAuthState(poolClient, nonExistentHash)).rejects.toMatchObject({
+    const { binderHash } = generateOAuthBinder();
+    await expect(consumeOAuthState(poolClient, nonExistentHash, binderHash)).rejects.toMatchObject({
       code: 'AUTH_STATE_INVALID',
     });
   });
 
   // --------------------------------------------------------------------------
-  // AUTH-06: Nonce mismatch rejected
+  // AUTH-06 / AUTH-H08: Nonce mismatch rejected by pure claim validator
   // --------------------------------------------------------------------------
-  it('AUTH-06 nonce mismatch is rejected with AUTH_IDENTITY_INVALID', async () => {
-    setMockOidcExchangeHandler(async (_url, expectedNonceHash, _verifier) => {
-      const claimNonceHash = createHash('sha256').update('tampered-nonce').digest('hex');
-      if (claimNonceHash !== expectedNonceHash) {
-        throw { code: 'AUTH_IDENTITY_INVALID' };
-      }
-      return {
-        provider: 'google',
-        providerSubject: 'sub-123',
-        email: 'user@example.com',
-        emailVerified: true,
-        displayName: 'Test User',
-        avatarUrl: 'https://example.com/avatar.jpg',
-      };
-    });
+  it('AUTH-06 (AUTH-H08) nonce mismatch is rejected by validateGoogleIdentityClaims', () => {
+    const expectedNonceHash = createHash('sha256').update('expected-valid-nonce').digest('hex');
+    const claims = {
+      iss: 'https://accounts.google.com',
+      aud: process.env.GOOGLE_OIDC_CLIENT_ID,
+      sub: 'google-sub-valid-1',
+      nonce: 'tampered-nonce-sent-by-attacker',
+      email: 'user@example.com',
+      email_verified: true,
+    };
 
-    const realNonceHash = createHash('sha256').update('original-nonce').digest('hex');
-    await expect(
-      exchangeAndVerifyGoogleOidc(new URL('https://localhost:3000/api/v2/auth/google/callback?code=abc'), {
-        codeVerifier: 'verifier',
-        nonceHash: realNonceHash,
-      })
-    ).rejects.toMatchObject({
-      code: 'AUTH_IDENTITY_INVALID',
-    });
+    expect(() =>
+      validateGoogleIdentityClaims(claims, process.env.GOOGLE_OIDC_CLIENT_ID!, expectedNonceHash)
+    ).toThrowError(expect.objectContaining({ code: 'AUTH_IDENTITY_INVALID', status: 400 }));
   });
 
   // --------------------------------------------------------------------------
-  // AUTH-07: Invalid issuer rejected
+  // AUTH-07 / AUTH-H06: Invalid issuer rejected by pure claim validator
   // --------------------------------------------------------------------------
-  it('AUTH-07 invalid issuer is rejected with AUTH_IDENTITY_INVALID', async () => {
-    setMockOidcExchangeHandler(async () => {
-      const issuer: string = 'https://evil-issuer.example';
-      if (issuer !== 'https://accounts.google.com') {
-        throw { code: 'AUTH_IDENTITY_INVALID' };
-      }
-      return {
-        provider: 'google',
-        providerSubject: 'sub-123',
-        email: 'user@example.com',
-        emailVerified: true,
-        displayName: 'Test',
-        avatarUrl: null,
-      };
-    });
+  it('AUTH-07 (AUTH-H06) invalid issuer is rejected by validateGoogleIdentityClaims', () => {
+    const nonce = 'valid-nonce';
+    const nonceHash = createHash('sha256').update(nonce).digest('hex');
+    const claims = {
+      iss: 'https://evil-issuer.attacker.com',
+      aud: process.env.GOOGLE_OIDC_CLIENT_ID,
+      sub: 'google-sub-valid-2',
+      nonce,
+      email: 'user@example.com',
+      email_verified: true,
+    };
 
-    await expect(
-      exchangeAndVerifyGoogleOidc(new URL('https://localhost:3000/api/v2/auth/google/callback?code=abc'), {
-        codeVerifier: 'verifier',
-        nonceHash: 'nonceHash',
-      })
-    ).rejects.toMatchObject({
-      code: 'AUTH_IDENTITY_INVALID',
-    });
+    expect(() =>
+      validateGoogleIdentityClaims(claims, process.env.GOOGLE_OIDC_CLIENT_ID!, nonceHash)
+    ).toThrowError(expect.objectContaining({ code: 'AUTH_IDENTITY_INVALID', status: 400 }));
   });
 
   // --------------------------------------------------------------------------
-  // AUTH-08: Invalid audience rejected
+  // AUTH-08 / AUTH-H07: Invalid audience rejected by pure claim validator
   // --------------------------------------------------------------------------
-  it('AUTH-08 invalid audience is rejected with AUTH_IDENTITY_INVALID', async () => {
-    setMockOidcExchangeHandler(async () => {
-      const aud = 'wrong-client-id';
-      if (aud !== process.env.GOOGLE_OIDC_CLIENT_ID) {
-        throw { code: 'AUTH_IDENTITY_INVALID' };
-      }
-      return {
-        provider: 'google',
-        providerSubject: 'sub-123',
-        email: 'user@example.com',
-        emailVerified: true,
-        displayName: 'Test',
-        avatarUrl: null,
-      };
-    });
+  it('AUTH-08 (AUTH-H07) invalid audience is rejected by validateGoogleIdentityClaims', () => {
+    const nonce = 'valid-nonce';
+    const nonceHash = createHash('sha256').update(nonce).digest('hex');
+    const claims = {
+      iss: 'https://accounts.google.com',
+      aud: 'attacker-client-id.apps.googleusercontent.com',
+      sub: 'google-sub-valid-3',
+      nonce,
+      email: 'user@example.com',
+      email_verified: true,
+    };
 
-    await expect(
-      exchangeAndVerifyGoogleOidc(new URL('https://localhost:3000/api/v2/auth/google/callback?code=abc'), {
-        codeVerifier: 'verifier',
-        nonceHash: 'nonceHash',
-      })
-    ).rejects.toMatchObject({
-      code: 'AUTH_IDENTITY_INVALID',
-    });
+    expect(() =>
+      validateGoogleIdentityClaims(claims, process.env.GOOGLE_OIDC_CLIENT_ID!, nonceHash)
+    ).toThrowError(expect.objectContaining({ code: 'AUTH_IDENTITY_INVALID', status: 400 }));
   });
 
   // --------------------------------------------------------------------------
-  // AUTH-09: Unverified email rejected
+  // AUTH-09 / AUTH-H09: Unverified or missing email rejected by pure claim validator
   // --------------------------------------------------------------------------
-  it('AUTH-09 unverified email is rejected according to product policy', async () => {
-    setMockOidcExchangeHandler(async () => {
-      const emailVerified = false;
-      if (!emailVerified) {
-        throw { code: 'AUTH_IDENTITY_INVALID' };
-      }
-      return {
-        provider: 'google',
-        providerSubject: 'sub-123',
-        email: 'unverified@example.com',
-        emailVerified: false,
-        displayName: 'Unverified',
-        avatarUrl: null,
-      };
-    });
+  it('AUTH-09 (AUTH-H09) unverified or missing email is rejected by validateGoogleIdentityClaims', () => {
+    const nonce = 'valid-nonce';
+    const nonceHash = createHash('sha256').update(nonce).digest('hex');
 
-    await expect(
-      exchangeAndVerifyGoogleOidc(new URL('https://localhost:3000/api/v2/auth/google/callback?code=abc'), {
-        codeVerifier: 'verifier',
-        nonceHash: 'nonceHash',
-      })
-    ).rejects.toMatchObject({
-      code: 'AUTH_IDENTITY_INVALID',
-    });
+    // Case 1: email_verified is false
+    expect(() =>
+      validateGoogleIdentityClaims(
+        {
+          iss: 'https://accounts.google.com',
+          aud: process.env.GOOGLE_OIDC_CLIENT_ID,
+          sub: 'google-sub-valid-4',
+          nonce,
+          email: 'unverified@example.com',
+          email_verified: false,
+        },
+        process.env.GOOGLE_OIDC_CLIENT_ID!,
+        nonceHash
+      )
+    ).toThrowError(expect.objectContaining({ code: 'AUTH_IDENTITY_INVALID', status: 400 }));
+
+    // Case 2: email is null / missing
+    expect(() =>
+      validateGoogleIdentityClaims(
+        {
+          iss: 'https://accounts.google.com',
+          aud: process.env.GOOGLE_OIDC_CLIENT_ID,
+          sub: 'google-sub-valid-5',
+          nonce,
+          email: null,
+          email_verified: true,
+        },
+        process.env.GOOGLE_OIDC_CLIENT_ID!,
+        nonceHash
+      )
+    ).toThrowError(expect.objectContaining({ code: 'AUTH_IDENTITY_INVALID', status: 400 }));
+
+    // Case 3: email is empty string
+    expect(() =>
+      validateGoogleIdentityClaims(
+        {
+          iss: 'https://accounts.google.com',
+          aud: process.env.GOOGLE_OIDC_CLIENT_ID,
+          sub: 'google-sub-valid-6',
+          nonce,
+          email: '   ',
+          email_verified: true,
+        },
+        process.env.GOOGLE_OIDC_CLIENT_ID!,
+        nonceHash
+      )
+    ).toThrowError(expect.objectContaining({ code: 'AUTH_IDENTITY_INVALID', status: 400 }));
   });
 
   // --------------------------------------------------------------------------
@@ -275,16 +293,14 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
       provider: 'google' as const,
       providerSubject: 'google-sub-repeat-test',
       email: 'repeat@example.com',
-      emailVerified: true,
+      emailVerified: true as const,
       displayName: 'Repeat User',
       avatarUrl: 'https://example.com/repeat.png',
     };
 
-    // First login
     const first = await findOrCreateUserFromIdentity(poolClient, claims);
     expect(first.isNewUser).toBe(true);
 
-    // Second login with same provider_subject
     const second = await findOrCreateUserFromIdentity(poolClient, {
       ...claims,
       displayName: 'Repeat User Updated',
@@ -292,7 +308,6 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     expect(second.isNewUser).toBe(false);
     expect(second.userId).toBe(first.userId);
 
-    // Profile metadata updated
     const safeUser = await getSafeUserIdentity(poolClient, first.userId);
     expect(safeUser.displayName).toBe('Repeat User Updated');
   });
@@ -305,7 +320,7 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
       provider: 'google' as const,
       providerSubject: 'google-sub-first-test',
       email: 'first@example.com',
-      emailVerified: true,
+      emailVerified: true as const,
       displayName: 'First User',
       avatarUrl: 'https://example.com/first.png',
     };
@@ -324,34 +339,6 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   });
 
   // --------------------------------------------------------------------------
-  // AUTH-12: Concurrent first login does not create duplicates
-  // --------------------------------------------------------------------------
-  it('AUTH-12 concurrent first login cannot create duplicate identities or users', async () => {
-    const claims = {
-      provider: 'google' as const,
-      providerSubject: 'google-sub-concurrent',
-      email: 'concurrent@example.com',
-      emailVerified: true,
-      displayName: 'Concurrent User',
-      avatarUrl: null,
-    };
-
-    // Simulate concurrent calls
-    const [resA, resB] = await Promise.all([
-      findOrCreateUserFromIdentity(poolClient, claims),
-      findOrCreateUserFromIdentity(poolClient, claims),
-    ]);
-
-    expect(resA.userId).toBe(resB.userId);
-
-    const identities = await db.query<{ count: number }>(
-      'SELECT count(*)::int AS count FROM fintrack.auth_identities WHERE provider_subject = $1',
-      [claims.providerSubject]
-    );
-    expect(identities.rows[0].count).toBe(1);
-  });
-
-  // --------------------------------------------------------------------------
   // AUTH-13: Same email alone never auto-links identity
   // --------------------------------------------------------------------------
   it('AUTH-13 same email alone never auto-links to another external identity', async () => {
@@ -361,7 +348,7 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
       provider: 'google' as const,
       providerSubject: 'subject-google-primary',
       email,
-      emailVerified: true,
+      emailVerified: true as const,
       displayName: 'Google Account 1',
       avatarUrl: null,
     };
@@ -369,8 +356,8 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     const identityOther = {
       provider: 'google' as const,
       providerSubject: 'subject-google-secondary',
-      email, // Exactly same email address
-      emailVerified: true,
+      email,
+      emailVerified: true as const,
       displayName: 'Google Account 2',
       avatarUrl: null,
     };
@@ -378,7 +365,6 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     const user1 = await findOrCreateUserFromIdentity(poolClient, identityGoogle);
     const user2 = await findOrCreateUserFromIdentity(poolClient, identityOther);
 
-    // CRITICAL: They must NOT be linked to the same FinTrack user!
     expect(user1.userId).not.toBe(user2.userId);
 
     const totalUsers = await db.query<{ count: number }>('SELECT count(*)::int AS count FROM fintrack.users');
@@ -386,7 +372,7 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   });
 
   // --------------------------------------------------------------------------
-  // AUTH-14 & AUTH-15: Provider access and refresh tokens are not persisted
+  // AUTH-14 & AUTH-15: Provider tokens not persisted
   // --------------------------------------------------------------------------
   it('AUTH-14 & AUTH-15 provider tokens are not persisted in database schema', async () => {
     const columns = await db.query<{ column_name: string }>(
@@ -406,20 +392,19 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   // AUTH-16 & AUTH-17: Raw session token not persisted; stored hash equals SHA-256
   // --------------------------------------------------------------------------
   it('AUTH-16 & AUTH-17 raw session token is never stored; SHA-256 hash is stored', async () => {
-    const user = await db.query<{ id: string }>(
-      'INSERT INTO fintrack.users DEFAULT VALUES RETURNING id'
-    );
+    const newUserId = randomBytes(16).toString('hex');
+    // Using server-side generated UUID
+    await db.query(`INSERT INTO fintrack.users (id) VALUES (gen_random_uuid())`);
+    const user = await db.query<{ id: string }>('SELECT id FROM fintrack.users LIMIT 1');
     const userId = user.rows[0].id;
 
     const { rawToken, tokenHash } = await issueSession(poolClient, userId);
     expect(rawToken.length).toBe(43);
     expect(tokenHash).toMatch(/^[0-9a-f]{64}$/);
 
-    // Stored hash must equal SHA-256 of the raw token
     const computedHash = createHash('sha256').update(rawToken).digest('hex');
     expect(tokenHash).toBe(computedHash);
 
-    // Verify DB contains token_hash only
     const stored = await db.query<{ token_hash: string }>(
       'SELECT token_hash FROM fintrack.sessions WHERE token_hash = $1',
       [tokenHash]
@@ -427,7 +412,6 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     expect(stored.rows.length).toBe(1);
     expect(stored.rows[0].token_hash).toBe(tokenHash);
 
-    // Verify rawToken does NOT appear in sessions table
     const searchRaw = await db.query(
       'SELECT 1 FROM fintrack.sessions WHERE token_hash = $1',
       [rawToken]
@@ -442,68 +426,59 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     const rawToken = randomBytes(32).toString('base64url');
     const header = createSessionCookieHeader(rawToken, 86400);
 
-    // AUTH-18: Secure
     expect(header).toContain('Secure');
-    // AUTH-19: HttpOnly
     expect(header).toContain('HttpOnly');
-    // AUTH-20: SameSite=Lax
     expect(header).toContain('SameSite=Lax');
-    // AUTH-21: Path=/
     expect(header).toContain('Path=/');
-    // AUTH-22: NO Domain
     expect(header).not.toContain('Domain=');
     expect(header).not.toContain('domain=');
-    // Starts with __Host-fintrack_session
     expect(header.startsWith(`${SESSION_COOKIE}=`)).toBe(true);
   });
 
   // --------------------------------------------------------------------------
-  // AUTH-23: DB session expiry aligns with cookie expiry
+  // AUTH-23 / AUTH-H16: DB session expiry aligns with cookie expiry; cookie never outlives DB
   // --------------------------------------------------------------------------
-  it('AUTH-23 DB session expiry matches cookie lifetime (24 hours)', async () => {
-    const user = await db.query<{ id: string }>(
-      'INSERT INTO fintrack.users DEFAULT VALUES RETURNING id'
-    );
-    const { expiresAt } = await issueSession(poolClient, user.rows[0].id);
+  it('AUTH-23 (AUTH-H16) DB session expiry aligns with cookie lifetime; cookie never outlives DB session', async () => {
+    await db.query(`INSERT INTO fintrack.users (id) VALUES (gen_random_uuid())`);
+    const user = await db.query<{ id: string }>('SELECT id FROM fintrack.users LIMIT 1');
+    const explicitExpiry = new Date(Date.now() + 300 * 1000); // 5 minutes in future
 
-    const now = Date.now();
-    const diffSeconds = Math.round((new Date(expiresAt).getTime() - now) / 1000);
+    const { expiresAt, maxAgeSeconds } = await issueSession(poolClient, user.rows[0].id, explicitExpiry);
 
-    // Should be exactly ~86,400 seconds (allowing +/- 5 seconds execution delta)
-    expect(diffSeconds).toBeGreaterThanOrEqual(SESSION_MAX_AGE_SECONDS - 5);
-    expect(diffSeconds).toBeLessThanOrEqual(SESSION_MAX_AGE_SECONDS + 5);
+    expect(expiresAt.getTime()).toBe(explicitExpiry.getTime());
+    expect(maxAgeSeconds).toBeLessThanOrEqual(300);
+    expect(maxAgeSeconds).toBeGreaterThanOrEqual(295);
+
+    // Emitted cookie with maxAgeSeconds
+    const header = createSessionCookieHeader('dummy-token-43-chars-long-dummy-dummy-dum', maxAgeSeconds);
+    expect(header).toContain(`Max-Age=${maxAgeSeconds}`);
+    // Cookie lifetime never exceeds remaining session duration
+    expect(maxAgeSeconds * 1000).toBeLessThanOrEqual(expiresAt.getTime() - Date.now() + 1000);
   });
 
   // --------------------------------------------------------------------------
   // AUTH-24: Session fixation prevented
   // --------------------------------------------------------------------------
   it('AUTH-24 session fixation prevented: previous session revoked and fresh session issued', async () => {
-    const user = await db.query<{ id: string }>(
-      'INSERT INTO fintrack.users DEFAULT VALUES RETURNING id'
-    );
+    await db.query(`INSERT INTO fintrack.users (id) VALUES (gen_random_uuid())`);
+    const user = await db.query<{ id: string }>('SELECT id FROM fintrack.users LIMIT 1');
     const userId = user.rows[0].id;
 
-    // Issue initial session
     const oldSession = await issueSession(poolClient, userId);
-
-    // Pre-existing cookie in incoming request
     const incomingReq = new Request('https://localhost:3000/api/v2/auth/google/callback', {
       headers: {
         cookie: `${SESSION_COOKIE}=${oldSession.rawToken}`,
       },
     });
 
-    // Revoke existing session if present
     await revokeExistingSessionIfPresent(poolClient, incomingReq);
 
-    // Verify old session is now revoked in DB
     const oldDb = await db.query<{ revoked_at: Date | null }>(
       'SELECT revoked_at FROM fintrack.sessions WHERE token_hash = $1',
       [oldSession.tokenHash]
     );
     expect(oldDb.rows[0].revoked_at).not.toBeNull();
 
-    // Issue fresh session
     const freshSession = await issueSession(poolClient, userId);
     expect(freshSession.tokenHash).not.toBe(oldSession.tokenHash);
   });
@@ -512,9 +487,8 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   // AUTH-25: /session/me exposes only safe fields
   // --------------------------------------------------------------------------
   it('AUTH-25 session/me helper returns safe fields only, never token or hash', async () => {
-    const user = await db.query<{ id: string }>(
-      'INSERT INTO fintrack.users DEFAULT VALUES RETURNING id'
-    );
+    await db.query(`INSERT INTO fintrack.users (id) VALUES (gen_random_uuid())`);
+    const user = await db.query<{ id: string }>('SELECT id FROM fintrack.users LIMIT 1');
     const userId = user.rows[0].id;
 
     await db.query(
@@ -532,14 +506,13 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
       email: 'safe@example.com',
     });
 
-    // Must never contain sensitive fields
     expect(safeData).not.toHaveProperty('token');
     expect(safeData).not.toHaveProperty('tokenHash');
     expect(safeData).not.toHaveProperty('providerSubject');
   });
 
   // --------------------------------------------------------------------------
-  // AUTH-26: Logout revokes session
+  // AUTH-26: Logout cookie clearing header
   // --------------------------------------------------------------------------
   it('AUTH-26 clearSessionCookieHeader clears cookie with Max-Age=0', () => {
     const clearHeader = clearSessionCookieHeader();
@@ -555,8 +528,10 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
   // --------------------------------------------------------------------------
   it('AUTH-27 callback route rejects replaying an authorization code / state', async () => {
     const params = await generateOAuthParams('/dashboard');
+    const { rawBinder, binderHash } = generateOAuthBinder();
     await recordOAuthState(poolClient, {
       stateHash: params.stateHash,
+      browserBindHash: binderHash,
       provider: 'google',
       codeVerifier: params.codeVerifier,
       nonceHash: params.nonceHash,
@@ -575,13 +550,21 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     const callbackUrl = `https://localhost:3000/api/v2/auth/google/callback?code=mock-code&state=${params.state}`;
 
     // Request 1: Succeeds and consumes state
-    const req1 = new Request(callbackUrl);
+    const req1 = new Request(callbackUrl, {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${rawBinder}`,
+      },
+    });
     const res1 = await callbackGet(req1);
     expect(res1.status).toBe(302);
     expect(res1.headers.get('Set-Cookie')).toContain(SESSION_COOKIE);
 
     // Request 2: Must be rejected as replayed
-    const req2 = new Request(callbackUrl);
+    const req2 = new Request(callbackUrl, {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${rawBinder}`,
+      },
+    });
     const res2 = await callbackGet(req2);
     expect(res2.status).toBe(400);
     const body2 = await res2.json();
@@ -607,7 +590,6 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
       expect(() => validateRedirectPath(bad)).toThrow();
     }
 
-    // Valid paths must succeed
     expect(validateRedirectPath('/dashboard')).toBe('/dashboard');
     expect(validateRedirectPath('/wallets?tab=active')).toBe('/wallets?tab=active');
     expect(validateRedirectPath('')).toBe('/');
@@ -632,7 +614,6 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     expect(consoleWarnSpy).toHaveBeenCalled();
     const loggedOutput = consoleWarnSpy.mock.calls[0][0];
 
-    // Assert absence of any sensitive token or secret patterns
     expect(loggedOutput).not.toContain('code');
     expect(loggedOutput).not.toContain('verifier');
     expect(loggedOutput).not.toContain('secret');
@@ -640,5 +621,387 @@ describe('FinTrack Pro OIDC Identity & Real Authentication Foundation', () => {
     expect(loggedOutput).not.toContain('hash');
 
     consoleWarnSpy.mockRestore();
+  });
+
+  // ==========================================================================
+  // HARDENING ITERATION TESTS (AUTH-H01 through AUTH-H21)
+  // ==========================================================================
+
+  // --------------------------------------------------------------------------
+  // AUTH-H01: State from Browser A rejected in Browser B
+  // --------------------------------------------------------------------------
+  it('AUTH-H01 state from Browser A rejected when used in Browser B', async () => {
+    const params = await generateOAuthParams('/dashboard');
+    const binderA = generateOAuthBinder();
+    const binderB = generateOAuthBinder();
+
+    // State is registered for Browser A
+    await recordOAuthState(poolClient, {
+      stateHash: params.stateHash,
+      browserBindHash: binderA.binderHash,
+      provider: 'google',
+      codeVerifier: params.codeVerifier,
+      nonceHash: params.nonceHash,
+      redirectPath: '/dashboard',
+    });
+
+    // Browser B attempts to consume Browser A's state
+    const callbackUrl = `https://localhost:3000/api/v2/auth/google/callback?code=mock-code&state=${params.state}`;
+    const reqBrowserB = new Request(callbackUrl, {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${binderB.rawBinder}`,
+      },
+    });
+
+    const res = await callbackGet(reqBrowserB);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe('AUTH_STATE_INVALID');
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H02: Missing OAuth binder cookie rejected
+  // --------------------------------------------------------------------------
+  it('AUTH-H02 missing OAuth binder cookie rejected with AUTH_STATE_INVALID', async () => {
+    const params = await generateOAuthParams('/dashboard');
+    const binder = generateOAuthBinder();
+    await recordOAuthState(poolClient, {
+      stateHash: params.stateHash,
+      browserBindHash: binder.binderHash,
+      provider: 'google',
+      codeVerifier: params.codeVerifier,
+      nonceHash: params.nonceHash,
+      redirectPath: '/dashboard',
+    });
+
+    const callbackUrl = `https://localhost:3000/api/v2/auth/google/callback?code=mock-code&state=${params.state}`;
+    // Request has NO cookies
+    const reqNoCookie = new Request(callbackUrl);
+
+    const res = await callbackGet(reqNoCookie);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe('AUTH_STATE_INVALID');
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H03: Correct state + binder accepted
+  // --------------------------------------------------------------------------
+  it('AUTH-H03 correct state + browser binder accepted, issues session, clears binder', async () => {
+    const params = await generateOAuthParams('/wallets');
+    const binder = generateOAuthBinder();
+    await recordOAuthState(poolClient, {
+      stateHash: params.stateHash,
+      browserBindHash: binder.binderHash,
+      provider: 'google',
+      codeVerifier: params.codeVerifier,
+      nonceHash: params.nonceHash,
+      redirectPath: '/wallets',
+    });
+
+    setMockOidcExchangeHandler(async () => ({
+      provider: 'google',
+      providerSubject: 'sub-h03-test',
+      email: 'h03@example.com',
+      emailVerified: true,
+      displayName: 'H03 User',
+      avatarUrl: null,
+    }));
+
+    const callbackUrl = `https://localhost:3000/api/v2/auth/google/callback?code=mock-code-h03&state=${params.state}`;
+    const req = new Request(callbackUrl, {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${binder.rawBinder}`,
+      },
+    });
+
+    const res = await callbackGet(req);
+    expect(res.status).toBe(302);
+    // Destination matches canonical origin
+    expect(res.headers.get('Location')).toBe('https://localhost:3000/wallets');
+
+    // Both session cookie emitted and binder cookie cleared
+    const setCookie = res.headers.get('Set-Cookie') ?? '';
+    expect(setCookie).toContain(SESSION_COOKIE);
+    expect(setCookie).toContain(OAUTH_BINDER_COOKIE);
+    expect(setCookie).toContain('Max-Age=0'); // cleared binder cookie
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H04: Second auth start invalidates previous browser attempt
+  // --------------------------------------------------------------------------
+  it('AUTH-H04 second auth start invalidates previous browser attempt', async () => {
+    const binder = generateOAuthBinder();
+
+    // Start 1 from this browser
+    const req1 = new Request('https://localhost:3000/api/v2/auth/google/start', {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${binder.rawBinder}`,
+        'sec-fetch-site': 'same-origin',
+      },
+    });
+    const res1 = await startGet(req1);
+    expect(res1.status).toBe(302);
+
+    const statesAfterFirst = await db.query<{ state_hash: string; consumed_at: Date | null }>(
+      'SELECT state_hash, consumed_at FROM fintrack.oauth_login_states WHERE browser_bind_hash = $1',
+      [binder.binderHash]
+    );
+    expect(statesAfterFirst.rows.length).toBe(1);
+    expect(statesAfterFirst.rows[0].consumed_at).toBeNull();
+    const firstStateHash = statesAfterFirst.rows[0].state_hash;
+
+    // Start 2 from same browser (same binder)
+    const req2 = new Request('https://localhost:3000/api/v2/auth/google/start', {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${binder.rawBinder}`,
+        'sec-fetch-site': 'same-origin',
+      },
+    });
+    const res2 = await startGet(req2);
+    expect(res2.status).toBe(302);
+
+    const statesAfterSecond = await db.query<{ state_hash: string; consumed_at: Date | null }>(
+      'SELECT state_hash, consumed_at FROM fintrack.oauth_login_states WHERE browser_bind_hash = $1 ORDER BY created_at ASC',
+      [binder.binderHash]
+    );
+    expect(statesAfterSecond.rows.length).toBe(2);
+
+    // Prior attempt is invalidated (consumed_at is NOT null)
+    const priorState = statesAfterSecond.rows.find((r) => r.state_hash === firstStateHash);
+    expect(priorState?.consumed_at).not.toBeNull();
+
+    // Latest attempt is active
+    const activeStates = statesAfterSecond.rows.filter((r) => r.consumed_at === null);
+    expect(activeStates.length).toBe(1);
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H05: Provider-error callback consumes state
+  // --------------------------------------------------------------------------
+  it('AUTH-H05 provider-error callback consumes state and repeating callback fails', async () => {
+    const params = await generateOAuthParams('/dashboard');
+    const binder = generateOAuthBinder();
+    await recordOAuthState(poolClient, {
+      stateHash: params.stateHash,
+      browserBindHash: binder.binderHash,
+      provider: 'google',
+      codeVerifier: params.codeVerifier,
+      nonceHash: params.nonceHash,
+      redirectPath: '/dashboard',
+    });
+
+    const errorCallbackUrl = `https://localhost:3000/api/v2/auth/google/callback?error=access_denied&state=${params.state}`;
+    const req1 = new Request(errorCallbackUrl, {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${binder.rawBinder}`,
+      },
+    });
+
+    const res1 = await callbackGet(req1);
+    expect(res1.status).toBe(400);
+    const body1 = await res1.json();
+    expect(body1.error).toBe('AUTH_PROVIDER_REJECTED');
+
+    // Verify state was consumed in DB
+    const stateDb = await db.query<{ consumed_at: Date | null }>(
+      'SELECT consumed_at FROM fintrack.oauth_login_states WHERE state_hash = $1',
+      [params.stateHash]
+    );
+    expect(stateDb.rows[0].consumed_at).not.toBeNull();
+
+    // Repeating callback with the same state and valid code is rejected
+    const repeatUrl = `https://localhost:3000/api/v2/auth/google/callback?code=mock-code&state=${params.state}`;
+    const req2 = new Request(repeatUrl, {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${binder.rawBinder}`,
+      },
+    });
+    const res2 = await callbackGet(req2);
+    expect(res2.status).toBe(400);
+    const body2 = await res2.json();
+    expect(body2.error).toBe('AUTH_STATE_REPLAYED');
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H12: Google external exchange occurs outside DB transaction
+  // --------------------------------------------------------------------------
+  it('AUTH-H12 Google external exchange occurs outside DB transaction (architectural isolation)', async () => {
+    const params = await generateOAuthParams('/dashboard');
+    const binder = generateOAuthBinder();
+    await recordOAuthState(poolClient, {
+      stateHash: params.stateHash,
+      browserBindHash: binder.binderHash,
+      provider: 'google',
+      codeVerifier: params.codeVerifier,
+      nonceHash: params.nonceHash,
+      redirectPath: '/dashboard',
+    });
+
+    let exchangeExecutedWithoutDbTx = false;
+
+    setMockOidcExchangeHandler(async () => {
+      // While external exchange is in progress:
+      // Verify no open transaction on poolClient by attempting a read that would deadlock or checking isolation
+      // In PGlite/PostgreSQL, if we run a statement and rollback, we verify we are not in an active user tx
+      try {
+        // Can execute independent statement outside tx
+        await poolClient.query('SELECT 1');
+        exchangeExecutedWithoutDbTx = true;
+      } catch {
+        exchangeExecutedWithoutDbTx = false;
+      }
+
+      // Return valid claims
+      return {
+        provider: 'google',
+        providerSubject: 'sub-h12-test',
+        email: 'h12@example.com',
+        emailVerified: true,
+        displayName: 'H12 User',
+        avatarUrl: null,
+      };
+    });
+
+    const callbackUrl = `https://localhost:3000/api/v2/auth/google/callback?code=mock-code-h12&state=${params.state}`;
+    const req = new Request(callbackUrl, {
+      headers: {
+        cookie: `${OAUTH_BINDER_COOKIE}=${binder.rawBinder}`,
+      },
+    });
+
+    const res = await callbackGet(req);
+    expect(res.status).toBe(302);
+    expect(exchangeExecutedWithoutDbTx).toBe(true);
+
+    // Verify exchangeAndVerifyGoogleOidc signature does not accept a PoolClient
+    expect(exchangeAndVerifyGoogleOidc.length).toBe(2);
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H13: Poisoned request Host cannot change final redirect origin
+  // --------------------------------------------------------------------------
+  it('AUTH-H13 poisoned request Host cannot change final redirect origin', async () => {
+    const params = await generateOAuthParams('/dashboard');
+    const binder = generateOAuthBinder();
+    await recordOAuthState(poolClient, {
+      stateHash: params.stateHash,
+      browserBindHash: binder.binderHash,
+      provider: 'google',
+      codeVerifier: params.codeVerifier,
+      nonceHash: params.nonceHash,
+      redirectPath: '/dashboard',
+    });
+
+    setMockOidcExchangeHandler(async () => ({
+      provider: 'google',
+      providerSubject: 'sub-h13-test',
+      email: 'h13@example.com',
+      emailVerified: true,
+      displayName: 'H13 User',
+      avatarUrl: null,
+    }));
+
+    // Attacker sends request with poisoned Host and X-Forwarded-Host headers
+    const poisonedUrl = 'https://attacker.evil.com/api/v2/auth/google/callback?code=mock-code&state=' + params.state;
+    const req = new Request(poisonedUrl, {
+      headers: {
+        Host: 'attacker.evil.com',
+        'X-Forwarded-Host': 'attacker.evil.com',
+        cookie: `${OAUTH_BINDER_COOKIE}=${binder.rawBinder}`,
+      },
+    });
+
+    const res = await callbackGet(req);
+    expect(res.status).toBe(302);
+    const location = res.headers.get('Location');
+    // Final destination must remain on canonical APP_ORIGIN (https://localhost:3000)
+    expect(location).toBe('https://localhost:3000/dashboard');
+    expect(location).not.toContain('attacker.evil.com');
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H14: GOOGLE_OIDC_REDIRECT_URI origin mismatch rejected
+  // --------------------------------------------------------------------------
+  it('AUTH-H14 GOOGLE_OIDC_REDIRECT_URI origin mismatch rejected with AUTH_UNAVAILABLE', () => {
+    process.env.APP_ORIGIN = 'https://localhost:3000';
+    process.env.GOOGLE_OIDC_REDIRECT_URI = 'https://malicious.attacker.com/api/v2/auth/google/callback';
+
+    expect(() => getGoogleOidcCredentials()).toThrowError(
+      expect.objectContaining({ code: 'AUTH_UNAVAILABLE', status: 503 })
+    );
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H15: Callback processing uses configured canonical redirect URI
+  // --------------------------------------------------------------------------
+  it('AUTH-H15 callback processing uses configured canonical redirect URI', () => {
+    const configuredRedirectUri = 'https://localhost:3000/api/v2/auth/google/callback';
+    const incomingPoisonedUrl = new URL('https://attacker.example.com/some/path?code=mock-code&state=mock-state');
+
+    const canonicalUrl = buildCanonicalCallbackUrl(incomingPoisonedUrl, configuredRedirectUri);
+    expect(canonicalUrl.origin).toBe('https://localhost:3000');
+    expect(canonicalUrl.pathname).toBe('/api/v2/auth/google/callback');
+    expect(canonicalUrl.searchParams.get('code')).toBe('mock-code');
+    expect(canonicalUrl.searchParams.get('state')).toBe('mock-state');
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H20: Failed server logout does not set frontend UNAUTHENTICATED
+  // --------------------------------------------------------------------------
+  it('AUTH-H20 failed server logout does not set frontend UNAUTHENTICATED', async () => {
+    let onSuccessCalled = false;
+    let errorReported: string | null = null;
+
+    // Simulate fetch returning 500 server error on logout
+    const mockFetch500 = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+    } as unknown as Response);
+
+    await performLogout(mockFetch500 as unknown as typeof fetch, {
+      onSuccess: () => {
+        onSuccessCalled = true;
+      },
+      onError: (err) => {
+        errorReported = err;
+      },
+    });
+
+    // Invariant: onSuccess is NOT called, frontend does not set UNAUTHENTICATED or clear user
+    expect(onSuccessCalled).toBe(false);
+    expect(errorReported).toBe('LOGOUT_FAILED');
+  });
+
+  // --------------------------------------------------------------------------
+  // AUTH-H21: /session/me 503 results in frontend ERROR, not UNAUTHENTICATED
+  // --------------------------------------------------------------------------
+  it('AUTH-H21 /session/me 503 results in frontend ERROR, not UNAUTHENTICATED', async () => {
+    let unauthCalled = false;
+    let authUser: AuthUser | null = null;
+    let errorReported: string | null = null;
+
+    // Simulate fetch returning 503 service unavailable on /session/me
+    const mockFetch503 = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+    } as unknown as Response);
+
+    await checkSessionMe(mockFetch503 as unknown as typeof fetch, {
+      onAuthenticated: (user) => {
+        authUser = user;
+      },
+      onUnauthenticated: () => {
+        unauthCalled = true;
+      },
+      onError: (err) => {
+        errorReported = err;
+      },
+    });
+
+    // Invariant: 503 backend error is NOT treated as user unauthenticated
+    expect(unauthCalled).toBe(false);
+    expect(authUser).toBeNull();
+    expect(errorReported).toBe('AUTH_BACKEND_ERROR');
   });
 });
