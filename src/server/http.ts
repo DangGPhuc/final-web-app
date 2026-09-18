@@ -17,9 +17,11 @@ export interface RouteContext {
 
 export interface HandleOptions {
   rateLimitScope?: RateLimitScope;
+  rateLimitMode?: 'normal' | 'none';
   customHeaders?: Record<string, string>;
   successOnlyHeaders?: Record<string, string>;
   successStatus?: number;
+  afterCommit?: (result: unknown, meta: { requestId: string; userId: string; timestamp: string }) => void | Promise<void>;
 }
 
 export async function body(req: Request) {
@@ -60,27 +62,30 @@ export async function handle(
     const hash = sessionHash(req);
 
     // Rate-limiting check in separate isolated transaction to ensure counts persist even on error
-    const businessScope = options?.rateLimitScope;
-    const allowed = await transaction(async c => {
-      const user = await authenticate(c, hash);
-      authenticatedUserId = user;
-      // Stacked rate limits: every authenticated request consumes 'global'
-      const globalAllowed = await rateLimit(c, user, 'global');
-      if (!globalAllowed) {
-        return false;
-      }
-      // Mutating or sensitive operations also consume their specific business scope
-      if (businessScope && businessScope !== 'global') {
-        const businessAllowed = await rateLimit(c, user, businessScope);
-        if (!businessAllowed) {
+    const rateLimitMode = options?.rateLimitMode ?? 'normal';
+    if (rateLimitMode !== 'none') {
+      const businessScope = options?.rateLimitScope;
+      const allowed = await transaction(async c => {
+        const user = await authenticate(c, hash);
+        authenticatedUserId = user;
+        // Stacked rate limits: every authenticated request consumes 'global'
+        const globalAllowed = await rateLimit(c, user, 'global');
+        if (!globalAllowed) {
           return false;
         }
-      }
-      return true;
-    });
+        // Mutating or sensitive operations also consume their specific business scope
+        if (businessScope && businessScope !== 'global') {
+          const businessAllowed = await rateLimit(c, user, businessScope);
+          if (!businessAllowed) {
+            return false;
+          }
+        }
+        return true;
+      });
 
-    if (!allowed) {
-      throw new ApiError(429, 'RATE_LIMITED');
+      if (!allowed) {
+        throw new ApiError(429, 'RATE_LIMITED');
+      }
     }
 
     // Read bounded input outside DB transaction so a slow client cannot exhaust DB pool slots
@@ -92,6 +97,16 @@ export async function handle(
       authenticatedUserId = user;
       return run(c, user, { requestId, hash, input });
     });
+
+    // Execute post-commit hook strictly after successful transaction commit
+    if (options?.afterCommit && authenticatedUserId) {
+      try {
+        await options.afterCommit(result, { requestId, userId: authenticatedUserId, timestamp });
+      } catch (logErr) {
+        // Operational logging failure AFTER COMMIT must NOT cause client retry
+        console.error('Post-commit hook error:', logErr);
+      }
+    }
 
     const status = options?.successStatus ?? (req.method === 'POST' ? 201 : 200);
     const successHeaders: Record<string, string> = {
