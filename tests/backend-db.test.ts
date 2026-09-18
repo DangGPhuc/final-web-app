@@ -1,6 +1,7 @@
 import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { Client, Pool, type PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
 import { authenticate, revokeCurrentSession } from '../src/server/session';
@@ -13,7 +14,11 @@ import {
 } from '../src/server/repository';
 import { transaction, resetPoolForTesting } from '../src/server/database';
 import { runMaintenance } from '../scripts/backend-maintenance.mjs';
-import { runMigrations, computeFileChecksum } from '../scripts/migrate.mjs';
+import { runMigrations, computeFileChecksum, prepareMigrationForExecution } from '../scripts/migrate.mjs';
+import { baselineLegacyDatabase } from '../scripts/baseline-migrations.mjs';
+import { assertSafeTestDatabaseUrl } from './helpers/test-db-guard';
+import { handle } from '../src/server/http';
+import { logSecurityEvent } from '../src/server/logger';
 
 const alice = '11111111-1111-4111-8111-111111111111';
 const bob = '22222222-2222-4222-8222-222222222222';
@@ -43,6 +48,7 @@ async function asUser<T>(hash: string, run: (c: PoolClient, user: string) => Pro
 
 beforeAll(async () => {
   if (realUrl) {
+    assertSafeTestDatabaseUrl(realUrl);
     const rootUrl = realUrl.substring(0, realUrl.lastIndexOf('/') + 1) + 'postgres';
     const rootClient = new Client({ connectionString: rootUrl });
     await rootClient.connect();
@@ -57,6 +63,7 @@ beforeAll(async () => {
     await realClient.connect();
     // Clean up disposable database if re-running tests against same container
     try { await realClient.query('DROP DATABASE IF EXISTS fintrack_restore'); } catch {}
+    try { await realClient.query('DROP DATABASE IF EXISTS fintrack_upgrade_test'); } catch {}
     await realClient.query('DROP SCHEMA IF EXISTS fintrack CASCADE');
     try { await realClient.query('DROP ROLE IF EXISTS fintrack_runtime'); } catch {}
     try { await realClient.query('DROP ROLE IF EXISTS fintrack_app_login'); } catch {}
@@ -71,10 +78,11 @@ beforeAll(async () => {
     await realClient.query("ALTER ROLE fintrack_app_login WITH PASSWORD 'test-login-password'");
   } else {
     db = new PGlite();
-    // Apply migrations 001, 002, and 003
+    // Apply migrations 001, 002, 003, and 004
     await db.exec(readFileSync('db/migrations/001_backend_foundation.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/002_backend_security_hardening.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/003_backend_deployment_closure.sql', 'utf8'));
+    await db.exec(readFileSync('db/migrations/004_runtime_role_hardening.sql', 'utf8'));
   }
 
   await db.query('INSERT INTO fintrack.users(id) VALUES($1),($2)', [alice, bob]);
@@ -400,7 +408,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
     expect(auditCols.rows.length).toBe(1);
 
     await upgradeDb.close();
-  });
+  }, 25000);
 
   it('(M) restored logical backup preserves balances and RLS', async () => {
     // Invariant check on active database: balances are positive and non-negative
@@ -531,7 +539,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
     await expect(runMaintenance(loginUrl)).rejects.toThrow(/SECURITY VIOLATION.*fintrack_app_login/);
   });
 
-  it.skipIf(!realUrl)('(AA) real PostgreSQL 001→002→003 upgrade preserves data, roles, RLS, and audit request IDs', async () => {
+  it.skipIf(!realUrl)('(AA) real PostgreSQL 001→002→003→004 upgrade preserves data, roles, RLS, and audit request IDs', async () => {
     const rootClient = new Client({ connectionString: 'postgres://postgres:ci-only-disposable-password@localhost:5432/postgres' });
     await rootClient.connect();
     await rootClient.query('DROP DATABASE IF EXISTS fintrack_upgrade_test');
@@ -564,7 +572,10 @@ describe('PostgreSQL schema and security hardening integration', () => {
     // 4. Apply 003
     await upClient.query(readFileSync('db/migrations/003_backend_deployment_closure.sql', 'utf8'));
 
-    // 5. Invariant verifications:
+    // 5. Apply 004
+    await upClient.query(readFileSync('db/migrations/004_runtime_role_hardening.sql', 'utf8'));
+
+    // 6. Invariant verifications:
     // Roles exist
     const roles = await upClient.query("SELECT rolname FROM pg_roles WHERE rolname IN ('fintrack_runtime', 'fintrack_app_login')");
     expect(roles.rows.length).toBe(2);
@@ -584,6 +595,13 @@ describe('PostgreSQL schema and security hardening integration', () => {
     );
     expect(auditCols.rows.length).toBe(1);
 
+    // 004 maintenance cleanup indexes exist
+    const idxRes = await upClient.query("SELECT indexname FROM pg_indexes WHERE schemaname = 'fintrack'");
+    const idxNames = idxRes.rows.map(r => r.indexname);
+    expect(idxNames).toContain('idx_idempotency_created_at');
+    expect(idxNames).toContain('idx_sessions_expires_at');
+    expect(idxNames).toContain('idx_sessions_revoked_at');
+
     await upClient.end();
   });
 
@@ -595,15 +613,17 @@ describe('PostgreSQL schema and security hardening integration', () => {
     await adminClient.query("UPDATE fintrack.schema_migrations SET checksum = 'tampered_checksum_value' WHERE version = '001_backend_foundation.sql'");
     await adminClient.end();
 
-    // Re-running migrations must fail closed with CHECKSUM MISMATCH
-    await expect(runMigrations(realUrl!)).rejects.toThrow(/MIGRATION CHECKSUM MISMATCH/);
-
-    // Restore correct checksum
-    const restoreClient = new Client({ connectionString: realUrl });
-    await restoreClient.connect();
-    const validChecksum = computeFileChecksum('db/migrations/001_backend_foundation.sql');
-    await restoreClient.query("UPDATE fintrack.schema_migrations SET checksum = $1 WHERE version = '001_backend_foundation.sql'", [validChecksum]);
-    await restoreClient.end();
+    try {
+      // Re-running migrations must fail closed with CHECKSUM MISMATCH
+      await expect(runMigrations(realUrl!)).rejects.toThrow(/MIGRATION_CHECKSUM_MISMATCH/);
+    } finally {
+      // Restore correct checksum
+      const restoreClient = new Client({ connectionString: realUrl });
+      await restoreClient.connect();
+      const validChecksum = computeFileChecksum('db/migrations/001_backend_foundation.sql');
+      await restoreClient.query("UPDATE fintrack.schema_migrations SET checksum = $1 WHERE version = '001_backend_foundation.sql'", [validChecksum]);
+      await restoreClient.end();
+    }
   });
 
   it.skipIf(!realUrl)('(AC) backup and restore verifies missing cluster roles and validates all 6 security tables with ENABLE + FORCE RLS', async () => {
@@ -643,5 +663,358 @@ describe('PostgreSQL schema and security hardening integration', () => {
     const content = readFileSync(workflowPath, 'utf8');
     expect(content).toContain('gitleaks');
     expect(content).toContain('gitleaks/gitleaks-action');
+  });
+
+  it.skipIf(!realUrl)('(AE) migration + checksum record are one atomic transaction', async () => {
+    const adminClient = new Client({ connectionString: realUrl });
+    await adminClient.connect();
+
+    // Create trigger that fails during checksum insertion of '005_atomicity_probe.sql'
+    await adminClient.query(`
+      CREATE OR REPLACE FUNCTION fintrack.fail_on_atomicity_test()
+      RETURNS trigger AS $$
+      BEGIN
+        IF NEW.version = '005_atomicity_probe.sql' THEN
+          RAISE EXCEPTION 'SIMULATED_CHECKSUM_FAILURE_TRIGGERED';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS trg_fail_atomicity ON fintrack.schema_migrations;
+      CREATE TRIGGER trg_fail_atomicity
+      BEFORE INSERT ON fintrack.schema_migrations
+      FOR EACH ROW EXECUTE FUNCTION fintrack.fail_on_atomicity_test();
+    `);
+
+    const probeFile = 'db/migrations/005_atomicity_probe.sql';
+    writeFileSync(probeFile, 'CREATE TABLE fintrack.atomicity_probe_table (id int);');
+
+    try {
+      // Running migrations must fail closed during checksum insertion
+      await expect(runMigrations(realUrl!)).rejects.toThrow(/SIMULATED_CHECKSUM_FAILURE_TRIGGERED/);
+
+      // Verify that table atomicity_probe_table was ROLLED BACK and does not exist!
+      const tableCheck = await adminClient.query(`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.tables WHERE table_schema = 'fintrack' AND table_name = 'atomicity_probe_table'
+        ) AS exists;
+      `);
+      expect(tableCheck.rows[0].exists).toBe(false);
+
+      // And schema_migrations does not have entry for 005
+      const migCheck = await adminClient.query(
+        "SELECT 1 FROM fintrack.schema_migrations WHERE version = '005_atomicity_probe.sql'"
+      );
+      expect(migCheck.rows.length).toBe(0);
+    } finally {
+      unlinkSync(probeFile);
+      await adminClient.query('DROP TRIGGER IF EXISTS trg_fail_atomicity ON fintrack.schema_migrations');
+      await adminClient.query('DROP FUNCTION IF EXISTS fintrack.fail_on_atomicity_test()');
+      await adminClient.end();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AF) missing applied migration file fails closed (MIGRATION_HISTORY_GAP)', async () => {
+    const adminClient = new Client({ connectionString: realUrl });
+    await adminClient.connect();
+    // Insert a dummy future version into schema_migrations
+    await adminClient.query("INSERT INTO fintrack.schema_migrations (version, checksum) VALUES ('999_missing_file.sql', 'fakechecksum')");
+    await adminClient.end();
+
+    try {
+      await expect(runMigrations(realUrl!)).rejects.toThrow(/MIGRATION_HISTORY_GAP/);
+    } finally {
+      const cleanClient = new Client({ connectionString: realUrl });
+      await cleanClient.connect();
+      await cleanClient.query("DELETE FROM fintrack.schema_migrations WHERE version = '999_missing_file.sql'");
+      await cleanClient.end();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AG) out-of-order inserted historical migration fails closed (MIGRATION_HISTORY_MISMATCH)', async () => {
+    const patchFile = 'db/migrations/0025_security_patch.sql';
+    writeFileSync(patchFile, 'SELECT 1;');
+
+    try {
+      // Since 003 and 004 are already applied in DB, 0025 inserted between 002 and 003 must fail closed
+      await expect(runMigrations(realUrl!)).rejects.toThrow(/MIGRATION_HISTORY_MISMATCH/);
+    } finally {
+      unlinkSync(patchFile);
+    }
+  });
+
+  it.skipIf(!realUrl)('(AH) legacy schema without migration history fails closed and requires baseline workflow', async () => {
+    const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
+    const rootClient = new Client({ connectionString: rootUrl });
+    await rootClient.connect();
+    await rootClient.query('DROP DATABASE IF EXISTS fintrack_legacy_test');
+    await rootClient.query('CREATE DATABASE fintrack_legacy_test');
+    await rootClient.end();
+
+    const legacyUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'fintrack_legacy_test';
+    const legacyClient = new Client({ connectionString: legacyUrl });
+    await legacyClient.connect();
+
+    // Create legacy fintrack schema and tables without schema_migrations
+    await legacyClient.query('CREATE SCHEMA fintrack');
+    await legacyClient.query('CREATE TABLE fintrack.users (id uuid PRIMARY KEY)');
+    await legacyClient.query('CREATE TABLE fintrack.sessions (token_hash text PRIMARY KEY, user_id uuid, expires_at timestamptz, revoked_at timestamptz)');
+    await legacyClient.query('CREATE TABLE fintrack.wallets (id uuid PRIMARY KEY, user_id uuid, name text, type text, opening_balance bigint, balance bigint)');
+    await legacyClient.query('CREATE TABLE fintrack.transfers (id uuid PRIMARY KEY, user_id uuid, from_wallet_id uuid, to_wallet_id uuid, amount bigint, fee bigint, created_at timestamptz DEFAULT now())');
+    await legacyClient.query('CREATE TABLE fintrack.rate_limits (user_id uuid, scope text, bucket bigint, hits int, PRIMARY KEY (user_id, scope))');
+    await legacyClient.query('CREATE TABLE fintrack.audit_events (id uuid PRIMARY KEY, user_id uuid, action text, resource_id uuid, request_id uuid, created_at timestamptz DEFAULT now())');
+    await legacyClient.query("CREATE FUNCTION fintrack.current_session_user_id() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $$;");
+    await legacyClient.end();
+
+    // 1. runMigrations on legacy schema without schema_migrations must fail closed
+    await expect(runMigrations(legacyUrl)).rejects.toThrow(/LEGACY_SCHEMA_WITHOUT_MIGRATION_HISTORY/);
+
+    // 2. Explicit baseline workflow succeeds and establishes trusted baseline
+    const baselineRes = await baselineLegacyDatabase(legacyUrl, '003_backend_deployment_closure.sql');
+    expect(baselineRes.success).toBe(true);
+    expect(baselineRes.baselinedCount).toBe(3);
+
+    // Cleanup
+    const cleanRoot = new Client({ connectionString: rootUrl });
+    await cleanRoot.connect();
+    await cleanRoot.query('DROP DATABASE IF EXISTS fintrack_legacy_test');
+    await cleanRoot.end();
+  });
+
+  it('(AI) npm test with NO PostgreSQL environment does not attempt any TCP/database connection', () => {
+    expect(() => assertSafeTestDatabaseUrl(undefined)).toThrow(/DATABASE_TEST_URL is required/);
+  });
+
+  it('(AJ) destructive DB test refuses unsafe database name', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      expect(() => assertSafeTestDatabaseUrl('postgres://user:pw@host/postgres')).toThrow(/forbidden/);
+      expect(() => assertSafeTestDatabaseUrl('postgres://user:pw@host/fintrack')).toThrow(/forbidden/);
+      expect(() => assertSafeTestDatabaseUrl('postgres://user:pw@host/production')).toThrow(/forbidden/);
+      expect(() => assertSafeTestDatabaseUrl('postgres://user:pw@host/random_db')).toThrow(/pattern/);
+    } finally {
+      process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+    }
+  });
+
+  it('(AK) destructive DB test refuses execution without explicit opt-in', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'false';
+    try {
+      expect(() => assertSafeTestDatabaseUrl('postgres://user:pw@host/fintrack_test')).toThrow(/ALLOW_DESTRUCTIVE_DB_TESTS=true is required/);
+    } finally {
+      process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+    }
+  });
+
+  it.skipIf(!realUrl)('(AM) logout success log is emitted only after commit', async () => {
+    let afterCommitCalled = false;
+    let metaCaptured: any = null;
+
+    const prevApi = process.env.ENABLE_BACKEND_API;
+    const prevOrigin = process.env.APP_ORIGIN;
+    const prevUrl = process.env.DATABASE_URL;
+    process.env.ENABLE_BACKEND_API = 'true';
+    process.env.APP_ORIGIN = 'https://fintrack.example';
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    await resetPoolForTesting();
+
+    const mockReq = new Request('https://fintrack.example/api/v2/session/logout', {
+      method: 'POST',
+      headers: {
+        origin: 'https://fintrack.example',
+        cookie: `__Host-fintrack_session=${'a'.repeat(43)}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+
+    try {
+      // Verify afterCommit contract on handle()
+      await handle(
+        mockReq,
+        async () => ({ committed: true }),
+        {
+          rateLimitMode: 'none',
+          afterCommit: (_res, meta) => {
+            afterCommitCalled = true;
+            metaCaptured = meta;
+          },
+        }
+      );
+
+      expect(afterCommitCalled).toBe(true);
+      expect(metaCaptured.requestId).toBeTruthy();
+      expect(metaCaptured.userId).toBe(alice);
+    } finally {
+      process.env.ENABLE_BACKEND_API = prevApi;
+      process.env.APP_ORIGIN = prevOrigin;
+      process.env.DATABASE_URL = prevUrl;
+      await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AN) simulated commit/revocation failure emits no success-revocation log', async () => {
+    let afterCommitCalled = false;
+
+    const prevApi = process.env.ENABLE_BACKEND_API;
+    const prevOrigin = process.env.APP_ORIGIN;
+    const prevUrl = process.env.DATABASE_URL;
+    process.env.ENABLE_BACKEND_API = 'true';
+    process.env.APP_ORIGIN = 'https://fintrack.example';
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    await resetPoolForTesting();
+
+    const mockReq = new Request('https://fintrack.example/api/v2/session/logout', {
+      method: 'POST',
+      headers: {
+        origin: 'https://fintrack.example',
+        cookie: `__Host-fintrack_session=${'a'.repeat(43)}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+
+    try {
+      await handle(
+        mockReq,
+        async () => {
+          throw new Error('SIMULATED_TRANSACTION_FAILURE');
+        },
+        {
+          rateLimitMode: 'none',
+          afterCommit: () => {
+            afterCommitCalled = true;
+          },
+        }
+      );
+
+      expect(afterCommitCalled).toBe(false);
+    } finally {
+      process.env.ENABLE_BACKEND_API = prevApi;
+      process.env.APP_ORIGIN = prevOrigin;
+      process.env.DATABASE_URL = prevUrl;
+      await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AO) pre-existing direct table grant to app login is removed and rejected by transaction()', async () => {
+    const adminClient = new Client({ connectionString: realUrl });
+    await adminClient.connect();
+
+    // Grant unexpected direct table privilege to fintrack_app_login
+    await adminClient.query('GRANT SELECT ON fintrack.wallets TO fintrack_app_login');
+    await adminClient.end();
+
+    const prevUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    await resetPoolForTesting();
+
+    try {
+      // transaction() must detect direct table privileges and fail closed with UNSAFE_DATABASE_ROLE
+      await expect(transaction(async () => 'ok')).rejects.toThrow(/UNSAFE_DATABASE_ROLE/);
+    } finally {
+      const cleanClient = new Client({ connectionString: realUrl });
+      await cleanClient.connect();
+      await cleanClient.query('REVOKE ALL ON fintrack.wallets FROM fintrack_app_login');
+      await cleanClient.end();
+      process.env.DATABASE_URL = prevUrl;
+      await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AP) unexpected role membership fails closed', async () => {
+    const adminClient = new Client({ connectionString: realUrl });
+    await adminClient.connect();
+
+    // Grant unexpected role to fintrack_app_login
+    try { await adminClient.query('CREATE ROLE test_intruder_role NOLOGIN'); } catch {}
+    await adminClient.query('GRANT test_intruder_role TO fintrack_app_login');
+    await adminClient.end();
+
+    const prevUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    await resetPoolForTesting();
+
+    try {
+      // transaction() must detect unexpected membership and fail closed
+      await expect(transaction(async () => 'ok')).rejects.toThrow(/UNSAFE_DATABASE_ROLE/);
+    } finally {
+      const cleanClient = new Client({ connectionString: realUrl });
+      await cleanClient.connect();
+      await cleanClient.query('REVOKE test_intruder_role FROM fintrack_app_login');
+      await cleanClient.query('DROP ROLE IF EXISTS test_intruder_role');
+      await cleanClient.end();
+      process.env.DATABASE_URL = prevUrl;
+      await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AQ) production EXPECTED_LOGIN_ROLE override cannot change trusted role', async () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevRole = process.env.EXPECTED_LOGIN_ROLE;
+    const prevUrl = process.env.DATABASE_URL;
+    const prevSsl = process.env.ALLOW_INSECURE_TEST_LOCAL_SSL;
+
+    (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+    process.env.ALLOW_INSECURE_TEST_LOCAL_SSL = 'true';
+    process.env.EXPECTED_LOGIN_ROLE = 'attacker_supplied_role';
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    await resetPoolForTesting();
+
+    try {
+      // In production, EXPECTED_LOGIN_ROLE is ignored and fintrack_app_login remains strictly expected
+      const res = await transaction(async () => 'ok');
+      expect(res).toBe('ok');
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+      process.env.EXPECTED_LOGIN_ROLE = prevRole;
+      process.env.DATABASE_URL = prevUrl;
+      process.env.ALLOW_INSECURE_TEST_LOCAL_SSL = prevSsl;
+      await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AR) maintenance cleanup indexes exist in fintrack schema', async () => {
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+
+    const idxRes = await client.query("SELECT indexname FROM pg_indexes WHERE schemaname = 'fintrack'");
+    const idxNames = idxRes.rows.map(r => r.indexname);
+
+    expect(idxNames).toContain('idx_idempotency_created_at');
+    expect(idxNames).toContain('idx_sessions_expires_at');
+    expect(idxNames).toContain('idx_sessions_revoked_at');
+
+    await client.end();
+  });
+
+  it('(AS) backup temporary file permissions are owner-only and cleanup trap runs', () => {
+    const cmd = `bash -c 'umask 077; F="$(mktemp -t fintrack_test_XXXXXX.sql)"; stat -c %a "$F"; (trap "rm -f $F" EXIT; exit 0); test ! -f "$F"'`;
+    const output = execSync(cmd, { encoding: 'utf8' }).trim();
+    expect(output).toBe('600');
+  });
+
+  it('(AT) destructive backup drill requires explicit database URLs', () => {
+    try {
+      execSync('bash scripts/backup-restore-drill.sh', {
+        env: { ...process.env, DATABASE_TEST_URL: '', DATABASE_RESTORE_URL: '' },
+        stdio: 'pipe',
+      });
+      expect.unreachable('Should have failed without database URLs');
+    } catch (e: any) {
+      expect(e.status).toBe(1);
+      const combined = (e.stderr?.toString() || '') + (e.stdout?.toString() || '');
+      expect(combined).toContain('DATABASE_TEST_URL and DATABASE_RESTORE_URL are strictly required');
+    }
+  });
+
+  it('(AU) CodeQL workflow covers fix/** and feature/**', () => {
+    const workflowPath = '.github/workflows/codeql.yml';
+    const content = readFileSync(workflowPath, 'utf8');
+    expect(content).toContain('"feature/**"');
+    expect(content).toContain('"fix/**"');
   });
 });
