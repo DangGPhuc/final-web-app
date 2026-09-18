@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { AppProvider, useApp } from '@/context/AppContext';
+import { AuthProvider } from '@/context/AuthContext';
 import { Navigation } from '@/components/Navigation';
 import { DashboardView } from '@/components/DashboardView';
 import { TransactionsView } from '@/components/TransactionsView';
@@ -50,8 +51,10 @@ function MainContent() {
 
 export default function Home() {
   return (
-    <AppProvider>
-      <MainContent />
-    </AppProvider>
+    <AuthProvider>
+      <AppProvider>
+        <MainContent />
+      </AppProvider>
+    </AuthProvider>
   );
 }
