@@ -7,16 +7,43 @@ set -euo pipefail
 # cluster-wide role definitions (pg_roles), cluster recovery requires bootstrapping application roles
 # (fintrack_runtime, fintrack_app_login) via version-controlled migration/bootstrap logic.
 
-BASE_URL="${DATABASE_TEST_URL:-postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test}"
-RESTORE_URL="${DATABASE_RESTORE_URL:-postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_restore}"
-BACKUP_FILE="/tmp/fintrack_logical_backup.sql"
+# Invariant: Explicit database URLs required. No default credentials in destructive scripts.
+if [ -z "${DATABASE_TEST_URL:-}" ] || [ -z "${DATABASE_RESTORE_URL:-}" ]; then
+  echo "ERROR: DATABASE_TEST_URL and DATABASE_RESTORE_URL are strictly required." >&2
+  echo "Destructive scripts refuse execution without explicit test database URLs." >&2
+  exit 1
+fi
 
-echo "=== [1/7] Initializing source database & applying migrations (001 -> 002 -> 003) ==="
+BASE_URL="$DATABASE_TEST_URL"
+RESTORE_URL="$DATABASE_RESTORE_URL"
+
+# Enforce secure temporary file creation with owner-only permissions (0600)
+umask 077
+BACKUP_FILE="$(mktemp -t fintrack_logical_backup_XXXXXX.sql)"
+
+# Trap cleanup to ensure sensitive backup files and disposable DBs are dropped on exit/interruption
+cleanup() {
+  echo "=== [Cleanup] Removing temporary backup file & cleaning disposable databases ==="
+  rm -f "$BACKUP_FILE"
+  psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS fintrack_restore;" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+# Verify owner-only permissions
+PERMS="$(stat -c %a "$BACKUP_FILE" 2>/dev/null || stat -f %Lp "$BACKUP_FILE")"
+if [ "$PERMS" != "600" ]; then
+  echo "ERROR: Backup file permissions are $PERMS, expected 0600 (owner-only)!"
+  exit 1
+fi
+echo "Verified: Temporary backup file created with owner-only permissions (0600)."
+
+echo "=== [1/7] Initializing source database & applying migrations (001 -> 002 -> 003 -> 004) ==="
 psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS fintrack_restore;" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;"
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS fintrack CASCADE; DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime') THEN DROP OWNED BY fintrack_runtime; DROP ROLE fintrack_runtime; END IF; IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_app_login') THEN DROP OWNED BY fintrack_app_login; DROP ROLE fintrack_app_login; END IF; END \$\$;"
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/001_backend_foundation.sql
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/002_backend_security_hardening.sql
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/003_backend_deployment_closure.sql
+psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/004_runtime_role_hardening.sql
 
 echo "=== [2/7] Seeding representative domain state ==="
 psql "$BASE_URL" -v ON_ERROR_STOP=1 <<'EOF'
@@ -111,7 +138,7 @@ EOF
 
 echo "=== [7/7] Verifying application login role connection & Alice/Bob tenant isolation ==="
 psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "ALTER ROLE fintrack_app_login WITH PASSWORD 'ci-only-disposable-password';"
-APP_RESTORE_URL="postgres://fintrack_app_login:ci-only-disposable-password@localhost:5432/fintrack_restore"
+APP_RESTORE_URL="$(echo "$RESTORE_URL" | sed -E 's/\/\/[^:]+:[^@]+@/\/\/fintrack_app_login:ci-only-disposable-password@/')"
 
 psql "$APP_RESTORE_URL" -v ON_ERROR_STOP=1 <<'EOF'
 BEGIN;
@@ -150,4 +177,3 @@ ROLLBACK;
 EOF
 
 echo "=== Backup & Restore Drill Completed Successfully! ==="
-rm -f "$BACKUP_FILE"
