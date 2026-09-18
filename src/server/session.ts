@@ -58,6 +58,8 @@ export async function revokeCurrentSession(c: PoolClient): Promise<void> {
 }
 
 export async function revokeSessionByHash(c: PoolClient, hash: string): Promise<void> {
+  // Set transaction-local app.auth_revoke_hash so fintrack_auth_runtime RLS permits revoking only this exact session
+  await c.query("SELECT set_config('app.auth_revoke_hash', $1, true)", [hash]);
   await c.query(
     'UPDATE fintrack.sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL',
     [hash]
@@ -80,17 +82,19 @@ export function generateOpaqueSessionToken(): { rawToken: string; tokenHash: str
 
 export async function issueSession(
   c: PoolClient,
-  userId: string
-): Promise<{ rawToken: string; tokenHash: string; expiresAt: Date }> {
+  userId: string,
+  explicitExpiresAt?: Date
+): Promise<{ rawToken: string; tokenHash: string; expiresAt: Date; maxAgeSeconds: number }> {
   const { rawToken, tokenHash } = generateOpaqueSessionToken();
-  const res = await c.query<{ expires_at: Date }>(
+  const expiresAt = explicitExpiresAt ?? new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
+  await c.query(
     `INSERT INTO fintrack.sessions (token_hash, user_id, expires_at)
-     VALUES ($1, $2, now() + interval '24 hours')
-     RETURNING expires_at`,
-    [tokenHash, userId]
+     VALUES ($1, $2, $3)`,
+    [tokenHash, userId, expiresAt]
   );
-  const expiresAt = res.rows[0]?.expires_at ?? new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
-  return { rawToken, tokenHash, expiresAt };
+  const remainingMs = expiresAt.getTime() - Date.now();
+  const maxAgeSeconds = Math.max(0, Math.min(SESSION_MAX_AGE_SECONDS, Math.floor(remainingMs / 1000)));
+  return { rawToken, tokenHash, expiresAt, maxAgeSeconds };
 }
 
 export function createSessionCookieHeader(token: string, maxAge: number = SESSION_MAX_AGE_SECONDS): string {
