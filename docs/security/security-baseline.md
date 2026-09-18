@@ -131,6 +131,21 @@
 > [!IMPORTANT]
 > Financial ledger records (`transfers`, `audit_events`) are durable records and are **NEVER** deleted merely to reduce database storage.
 
+## Truthful Implementation Statuses
+
+| Capability | Status | Implementation Evidence / Notes |
+|---|---|---|
+| Database-level logical restore | **IMPLEMENTED** | Verified automated script `scripts/backup-restore-drill.sh` testing dump, fresh restore, all 6 security tables with ENABLE + FORCE RLS, and tenant isolation. |
+| Authentication | **PARTIAL / PLANNED** | Session verification, constant-time hashing, and server-side revocation implemented. Real identity issuance, passwordless/OAuth login planned for next iteration. |
+| Centralized monitoring + alerting | **PARTIAL / PLANNED** | Structured security logging with UUID `request_id` implemented in `src/server/logger.ts`. Centralized metric aggregation (Prometheus/Datadog) and alerting rules are planned. |
+| Frontend PostgreSQL cutover | **PLANNED** | Frontend currently uses client-side state and localStorage exclusively. PostgreSQL cutover planned for next iteration. |
+| Private object storage | **PLANNED** | Planned for subsequent receipt attachments phase. |
+| Managed encrypted backup / PITR | **PLANNED** | Automated logical dump verified. Continuous WAL archiving and managed encrypted PITR planned for cloud production phase. Full disaster recovery is NOT claimed. |
+
+### Schema Object Ownership Model
+> [!IMPORTANT]
+> Application runtime roles (`fintrack_runtime`, `fintrack_app_login`) do **NOT** own application tables. All tables are created and owned exclusively by the dedicated operator/migration role. Runtime identity guarantees in `transaction()` strictly verify zero table ownership for the connecting role (`tableowner = session_user` count is 0).
+
 ---
 
 ## Secret Scanning Gate
