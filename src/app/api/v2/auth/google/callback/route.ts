@@ -2,11 +2,19 @@ import { NextResponse } from 'next/server';
 import { createHash, randomUUID } from 'node:crypto';
 import { authTransaction } from '@/server/auth-database';
 import { consumeOAuthState, findOrCreateUserFromIdentity } from '@/server/auth-repository';
-import { exchangeAndVerifyGoogleOidc, validateRedirectPath } from '@/server/oidc';
+import {
+  exchangeAndVerifyGoogleOidc,
+  validateRedirectPath,
+  extractOAuthBinder,
+  hashOAuthBinder,
+  clearOAuthBinderCookieHeader,
+  getCanonicalAppOrigin,
+} from '@/server/oidc';
 import {
   issueSession,
   createSessionCookieHeader,
   revokeExistingSessionIfPresent,
+  SESSION_MAX_AGE_SECONDS,
 } from '@/server/session';
 import { logSecurityEvent } from '@/server/logger';
 import { ApiError } from '@/server/errors';
@@ -19,9 +27,26 @@ export async function GET(req: Request) {
   const timestamp = new Date().toISOString();
   const url = new URL(req.url);
 
-  // Check for provider-level errors returned in query params
+  // 1. Extract and validate browser binder cookie
+  const rawBinder = extractOAuthBinder(req);
+
+  // 2. Handle provider-level errors returned by Google
   const providerError = url.searchParams.get('error');
   if (providerError) {
+    const state = url.searchParams.get('state');
+    if (state && rawBinder) {
+      try {
+        const stateHash = createHash('sha256').update(state).digest('hex');
+        const binderHash = hashOAuthBinder(rawBinder);
+        // Atomically consume state on provider denial to prevent leaving stale active state
+        await authTransaction(async (client) => {
+          await consumeOAuthState(client, stateHash, binderHash);
+        });
+      } catch {
+        // If state or binder validation fails, proceed to reject
+      }
+    }
+
     logSecurityEvent({
       event: 'AUTH_LOGIN_FAILED',
       requestId,
@@ -29,16 +54,19 @@ export async function GET(req: Request) {
       provider: 'google',
       timestamp,
     });
-    return NextResponse.json(
+
+    const res = NextResponse.json(
       { error: 'AUTH_PROVIDER_REJECTED', requestId },
       { status: 400, headers: { 'Cache-Control': 'no-store' } }
     );
+    res.headers.set('Set-Cookie', clearOAuthBinderCookieHeader());
+    return res;
   }
 
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
 
-  if (!code || !state) {
+  if (!code || !state || !rawBinder) {
     logSecurityEvent({
       event: 'AUTH_LOGIN_FAILED',
       requestId,
@@ -46,42 +74,55 @@ export async function GET(req: Request) {
       provider: 'google',
       timestamp,
     });
-    return NextResponse.json(
+    const res = NextResponse.json(
       { error: 'AUTH_STATE_INVALID', requestId },
       { status: 400, headers: { 'Cache-Control': 'no-store' } }
     );
+    res.headers.set('Set-Cookie', clearOAuthBinderCookieHeader());
+    return res;
   }
 
   const stateHash = createHash('sha256').update(state).digest('hex');
+  const binderHash = hashOAuthBinder(rawBinder);
 
   try {
-    const { rawToken, redirectPath, userId } = await authTransaction(async (client) => {
-      // 1. Atomically consume OAuth state (guards against replay, expiry, tampering)
-      const stateRecord = await consumeOAuthState(client, stateHash);
-
-      // 2. Exchange authorization code & verify Google ID token using OIDC library
-      const identityClaims = await exchangeAndVerifyGoogleOidc(url, {
-        codeVerifier: stateRecord.codeVerifier,
-        nonceHash: stateRecord.nonceHash,
-      });
-
-      // 3. Authoritative identity mapping (find or create user; never email-link)
-      const { userId } = await findOrCreateUserFromIdentity(client, identityClaims);
-
-      // 4. Session fixation prevention: revoke any pre-existing session if present
-      await revokeExistingSessionIfPresent(client, req);
-
-      // 5. Issue fresh opaque FinTrack session (24h absolute lifetime)
-      const { rawToken } = await issueSession(client, userId);
-
-      return {
-        rawToken,
-        redirectPath: stateRecord.redirectPath,
-        userId,
-      };
+    // ========================================================================
+    // PHASE A — SHORT DB TRANSACTION
+    // Atomically claim and consume OAuth state (validates state, binder, expiry, replay)
+    // ========================================================================
+    const stateRecord = await authTransaction(async (client) => {
+      return consumeOAuthState(client, stateHash, binderHash);
     });
 
-    // 6. Emit security audit events strictly post-commit with safe fields only
+    // ========================================================================
+    // PHASE B — NO DATABASE TRANSACTION
+    // External Google OIDC token exchange & claim verification outside DB tx
+    // ========================================================================
+    const identityClaims = await exchangeAndVerifyGoogleOidc(url, {
+      codeVerifier: stateRecord.codeVerifier,
+      nonceHash: stateRecord.nonceHash,
+    });
+
+    // ========================================================================
+    // PHASE C — SHORT DB TRANSACTION
+    // Authoritative identity resolution, session revocation, and issuance
+    // ========================================================================
+    const sessionExpiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
+
+    const { rawToken, userId, maxAgeSeconds } = await authTransaction(async (client) => {
+      // 1. Authoritative identity mapping (advisory lock + find/create user + server-generated UUID)
+      const { userId } = await findOrCreateUserFromIdentity(client, identityClaims);
+
+      // 2. Session fixation prevention: revoke any pre-existing session if present
+      await revokeExistingSessionIfPresent(client, req);
+
+      // 3. Issue fresh opaque FinTrack session with explicit expiration
+      const { rawToken, maxAgeSeconds } = await issueSession(client, userId, sessionExpiresAt);
+
+      return { rawToken, userId, maxAgeSeconds };
+    });
+
+    // Post-commit: emit security audit events with safe fields only
     logSecurityEvent({
       event: 'AUTH_LOGIN_SUCCEEDED',
       requestId,
@@ -100,9 +141,10 @@ export async function GET(req: Request) {
       timestamp,
     });
 
-    // 7. Secure redirect to validated relative path with HttpOnly session cookie
-    const safeTarget = validateRedirectPath(redirectPath);
-    const destination = new URL(safeTarget, url.origin);
+    // Redirect to canonical APP_ORIGIN (rejects poisoned Host / request origin)
+    const canonicalOrigin = getCanonicalAppOrigin();
+    const safeTarget = validateRedirectPath(stateRecord.redirectPath);
+    const destination = new URL(safeTarget, canonicalOrigin);
 
     const res = NextResponse.redirect(destination.toString(), {
       status: 302,
@@ -111,8 +153,10 @@ export async function GET(req: Request) {
       },
     });
 
-    // Set __Host-fintrack_session cookie (Secure, HttpOnly, SameSite=Lax, Path=/, no Domain)
-    res.headers.set('Set-Cookie', createSessionCookieHeader(rawToken));
+    // Emit session cookie (Max-Age never outlives DB expires_at)
+    res.headers.append('Set-Cookie', createSessionCookieHeader(rawToken, maxAgeSeconds));
+    // Clear transient OAuth browser binder cookie
+    res.headers.append('Set-Cookie', clearOAuthBinderCookieHeader());
     return res;
   } catch (err: unknown) {
     const errorCode =
@@ -129,9 +173,11 @@ export async function GET(req: Request) {
       timestamp,
     });
 
-    return NextResponse.json(
+    const res = NextResponse.json(
       { error: errorCode, requestId },
       { status, headers: { 'Cache-Control': 'no-store' } }
     );
+    res.headers.set('Set-Cookie', clearOAuthBinderCookieHeader());
+    return res;
   }
 }
