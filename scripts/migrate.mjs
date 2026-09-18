@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 /**
- * FinTrack Schema Migration Runner with SHA-256 Checksum Verification.
+ * FinTrack Schema Migration Runner with Atomic Transaction Management
+ * and Exact-Prefix History Verification.
  *
  * SAFETY INVARIANTS:
  * 1. Requires operator credentials (DATABASE_MAINTENANCE_URL or DATABASE_ADMIN_URL).
- * 2. Refuses execution by runtime roles (fintrack_runtime, fintrack_app_login).
- * 3. Validates SHA-256 checksums of all previously applied migrations.
- * 4. Fails closed on any checksum mismatch or out-of-order execution.
+ * 2. Refuses execution by application runtime/login roles (fintrack_runtime, fintrack_app_login).
+ * 3. Runner strictly owns transaction boundary across migration DDL and checksum recording.
+ * 4. Raw migration files on disk remain byte-for-byte immutable; checksums calculated on raw content.
+ * 5. Applied migrations must be an EXACT PREFIX of sorted repository migration files.
+ * 6. Fails closed on: missing historical file, history gap, out-of-order insertion, checksum mismatch,
+ *    or legacy schema without migration history.
  */
 import { Client } from 'pg';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -21,6 +25,53 @@ const MIGRATIONS_DIR = path.resolve(__dirname, '../db/migrations');
 export function computeFileChecksum(filePath) {
   const content = readFileSync(filePath);
   return createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Prepares raw migration SQL for runner-managed transaction execution.
+ * - Legacy migrations (001-003) have their outer BEGIN; and COMMIT; stripped.
+ * - Migrations 004+ must NOT contain top-level transaction control.
+ */
+export function prepareMigrationForExecution(raw, filename) {
+  const legacyMigrations = [
+    '001_backend_foundation.sql',
+    '002_backend_security_hardening.sql',
+    '003_backend_deployment_closure.sql',
+  ];
+
+  if (legacyMigrations.includes(filename)) {
+    // Strip leading comments and whitespace before finding outer BEGIN;
+    const strippedLeading = raw.replace(/^(\s*(--[^\r\n]*\r?\n|\/\*[\s\S]*?\*\/))*\s*/, '');
+    if (!strippedLeading.startsWith('BEGIN;')) {
+      throw new Error(
+        `INVALID_LEGACY_MIGRATION_FORMAT: Expected ${filename} to have outer BEGIN; statement.`
+      );
+    }
+    const afterBegin = strippedLeading.replace(/^BEGIN;\s*/i, '');
+    // Check trailing COMMIT; (allowing trailing whitespace/comments)
+    const strippedTrailing = afterBegin.replace(/\s*(--[^\r\n]*\r?\n?|\/\*[\s\S]*?\*\/)*\s*$/, '');
+    if (!strippedTrailing.endsWith('COMMIT;')) {
+      throw new Error(
+        `INVALID_LEGACY_MIGRATION_FORMAT: Expected ${filename} to have outer COMMIT; statement.`
+      );
+    }
+    const withoutCommit = strippedTrailing.replace(/\s*COMMIT;\s*$/i, '');
+    return withoutCommit;
+  }
+
+  // For 004+ migrations: runner owns transaction.
+  // Validate that file contains no top-level BEGIN/COMMIT/ROLLBACK statements.
+  const lines = raw.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (/^(BEGIN|COMMIT|ROLLBACK)(\s+TRANSACTION)?\s*;/i.test(line)) {
+      throw new Error(
+        `INVALID_MIGRATION_TRANSACTION_CONTROL: Migration ${filename} line ${i + 1} contains transaction control statement "${line}". Migrations 004+ must not contain top-level transaction control; the runner manages transactions atomically.`
+      );
+    }
+  }
+
+  return raw;
 }
 
 export async function runMigrations(connectionString) {
@@ -38,7 +89,13 @@ export async function runMigrations(connectionString) {
       throw new Error(`SECURITY VIOLATION: Migration execution forbidden for runtime role "${role.name}". Operator credentials required.`);
     }
 
-    // Check if schema fintrack and schema_migrations table exist
+    // 1. Check if schema fintrack exists
+    const schemaCheck = await client.query(`
+      SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'fintrack') AS exists;
+    `);
+    const schemaExists = schemaCheck.rows[0]?.exists;
+
+    // 2. Check if schema_migrations table exists
     const tableCheck = await client.query(`
       SELECT EXISTS (
         SELECT 1 FROM information_schema.tables 
@@ -47,66 +104,103 @@ export async function runMigrations(connectionString) {
     `);
     const tableExists = tableCheck.rows[0]?.exists;
 
-    const appliedMap = new Map();
-    if (tableExists) {
-      const appliedRes = await client.query('SELECT version, checksum FROM fintrack.schema_migrations ORDER BY version ASC');
-      for (const r of appliedRes.rows) {
-        appliedMap.set(r.version, r.checksum);
+    // 3. Fail closed if legacy fintrack tables exist without migration history
+    if (schemaExists && !tableExists) {
+      const existingTables = await client.query(`
+        SELECT count(*)::int AS count FROM information_schema.tables WHERE table_schema = 'fintrack'
+      `);
+      if (existingTables.rows[0]?.count > 0) {
+        throw new Error(
+          'LEGACY_SCHEMA_WITHOUT_MIGRATION_HISTORY: Existing fintrack tables detected without schema_migrations table. Run scripts/baseline-migrations.mjs to establish trusted baseline.'
+        );
       }
     }
 
-    // Read and sort migration files
+    // 4. Fetch applied migrations from database ordered by version
+    const appliedRows = tableExists
+      ? (await client.query('SELECT version, checksum FROM fintrack.schema_migrations ORDER BY version ASC')).rows
+      : [];
+
+    // 5. Read all migration files from repository sorted
     const files = readdirSync(MIGRATIONS_DIR)
       .filter(f => f.endsWith('.sql'))
       .sort();
 
-    for (const file of files) {
+    // 6. EXACT PREFIX INVARIANT:
+    // Applied migrations must be an exact prefix of sorted files in repository.
+    if (appliedRows.length > files.length) {
+      throw new Error(
+        `MIGRATION_HISTORY_GAP: Database has ${appliedRows.length} applied migrations, but repository has only ${files.length} migration files. Applied migrations were deleted from repository.`
+      );
+    }
+
+    for (let i = 0; i < appliedRows.length; i++) {
+      const applied = appliedRows[i];
+      const repoFile = files[i];
+
+      if (applied.version !== repoFile) {
+        throw new Error(
+          `MIGRATION_HISTORY_MISMATCH: Out-of-order insertion or gap detected! Applied migration #${i + 1} is "${applied.version}", but repository file is "${repoFile}".`
+        );
+      }
+
+      const filePath = path.join(MIGRATIONS_DIR, repoFile);
+      const currentChecksum = computeFileChecksum(filePath);
+      if (applied.checksum !== currentChecksum) {
+        throw new Error(
+          `MIGRATION_CHECKSUM_MISMATCH: Checksum mismatch for ${repoFile}! Recorded ${applied.checksum}, file on disk has ${currentChecksum}. Migration history was tampered with.`
+        );
+      }
+      console.log(`[migrate] Verified ${repoFile} (checksum matched)`);
+    }
+
+    // 7. Apply pending migrations atomically
+    const pendingFiles = files.slice(appliedRows.length);
+    for (const file of pendingFiles) {
       const version = file;
       const filePath = path.join(MIGRATIONS_DIR, file);
+      const rawSql = readFileSync(filePath, 'utf8');
       const currentChecksum = computeFileChecksum(filePath);
 
-      if (appliedMap.has(version)) {
-        const storedChecksum = appliedMap.get(version);
-        if (storedChecksum !== currentChecksum) {
-          throw new Error(
-            `MIGRATION CHECKSUM MISMATCH for ${version}! Expected ${storedChecksum}, calculated ${currentChecksum}. Migration history was tampered with.`
+      let executionSql = prepareMigrationForExecution(rawSql, file);
+
+      // In cluster environment, if fintrack_runtime already provisioned, skip duplicate CREATE ROLE in 001
+      if (version === '001_backend_foundation.sql') {
+        const roleCheck = await client.query("SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime'");
+        if (roleCheck.rows.length > 0) {
+          executionSql = executionSql.replace(
+            'CREATE ROLE fintrack_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;',
+            '-- role fintrack_runtime already provisioned in cluster'
           );
         }
-        console.log(`[migrate] Verified ${version} (checksum matched)`);
-      } else {
-        console.log(`[migrate] Applying ${version}...`);
-        let sql = readFileSync(filePath, 'utf8');
-        if (version === '001_backend_foundation.sql') {
-          const roleCheck = await client.query("SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime'");
-          if (roleCheck.rows.length > 0) {
-            sql = sql.replace(
-              'CREATE ROLE fintrack_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;',
-              '-- role fintrack_runtime already provisioned in cluster'
-            );
-          }
-        }
-        await client.query('BEGIN');
-        try {
-          await client.query(sql);
-          // Ensure schema_migrations exists in fintrack
-          await client.query(`
-            CREATE TABLE IF NOT EXISTS fintrack.schema_migrations (
-              version text PRIMARY KEY,
-              checksum text NOT NULL,
-              applied_at timestamptz NOT NULL DEFAULT now()
-            );
-          `);
-          await client.query(
-            'INSERT INTO fintrack.schema_migrations (version, checksum) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING',
-            [version, currentChecksum]
+      }
+
+      console.log(`[migrate] Applying ${version}...`);
+      await client.query('BEGIN');
+      try {
+        await client.query(executionSql);
+
+        // Ensure schema_migrations table exists (in fintrack schema)
+        await client.query(`
+          CREATE SCHEMA IF NOT EXISTS fintrack;
+          CREATE TABLE IF NOT EXISTS fintrack.schema_migrations (
+            version text PRIMARY KEY,
+            checksum text NOT NULL,
+            applied_at timestamptz NOT NULL DEFAULT now()
           );
-          await client.query('COMMIT');
-          console.log(`[migrate] Applied ${version} successfully.`);
-          appliedMap.set(version, currentChecksum);
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw err;
-        }
+        `);
+
+        // Record checksum within the same transaction
+        await client.query(
+          'INSERT INTO fintrack.schema_migrations (version, checksum) VALUES ($1, $2)',
+          [version, currentChecksum]
+        );
+
+        await client.query('COMMIT');
+        console.log(`[migrate] Applied ${version} successfully.`);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
       }
     }
 
