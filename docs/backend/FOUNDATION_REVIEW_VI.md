@@ -93,12 +93,14 @@ DATABASE_MAINTENANCE_URL=postgres://postgres:ci-only-disposable-password@localho
 
 | Hạng mục | Trạng thái | Ghi chú minh chứng |
 |---|---|---|
-| **Database-level logical restore** | **IMPLEMENTED** | Diễn tập tự động qua `scripts/backup-restore-drill.sh` với `umask 077`, `mktemp`, kiểm tra 6 bảng bảo mật có `ENABLE + FORCE RLS`, và cách ly tenant. |
+| **Database-level logical restore** | **IMPLEMENTED** | Diễn tập tự động qua `scripts/backup-restore-drill.sh` với `umask 077`, `mktemp`, kiểm tra 6 bảng bảo mật có `ENABLE + FORCE RLS`, cách ly tenant, bảo toàn lịch sử `schema_migrations`, và xác minh qua runner `migrate.mjs`. |
+| **Fresh-cluster disaster recovery** | **PARTIAL / PLANNED** | Phục hồi logical DB đã kiểm chứng. Khởi tạo roles trên cluster mới đòi hỏi bootstrap có kiểm soát phiên bản trước khi restore. |
 | **Authentication** | **PARTIAL / PLANNED** | Xác thực session, băm an toàn, thu hồi session phía server đã hoàn thành. OAuth / passwordless login dự kiến ở iteration kế tiếp. |
 | **Centralized monitoring + alerting** | **PARTIAL / PLANNED** | Structured security logging với `request_id` hoàn chỉnh qua `src/server/logger.ts`. Alerting và ngưỡng cảnh báo tập trung (Prometheus/Slack) là PLANNED. |
 | **Frontend PostgreSQL cutover** | **PLANNED** | Frontend hiện dùng client state / `localStorage`. Cutover sang backend DB dự kiến ở iteration kế tiếp. |
 | **Private object storage** | **PLANNED** | Lưu trữ hóa đơn private dự kiến sau khi hoàn tất auth. |
-| **Managed encrypted backup / PITR** | **PLANNED** | Diễn tập logical dump đã kiểm chứng. PITR và disaster recovery toàn diện trên multi-cluster là PLANNED cho hạ tầng cloud. |
+| **Managed encrypted backup** | **PLANNED** | Diễn tập logical dump đã kiểm chứng. Sao lưu mã hóa KMS quản lý trên hạ tầng cloud là PLANNED. |
+| **Point-in-Time Recovery (PITR)** | **PLANNED** | Sao lưu liên tục WAL và PITR trên multi-cluster là PLANNED cho hạ tầng cloud. Disaster recovery toàn diện chưa được công bố. |
 
 > [!IMPORTANT]
 > **Quyền sở hữu bảng**: Các role runtime ứng dụng (`fintrack_runtime`, `fintrack_app_login`) **KHÔNG** sở hữu bất kỳ bảng nào trong database. Bảng được tạo và sở hữu hoàn toàn bởi role operator / migration. `transaction()` kiểm tra và xác nhận 0 table ownership cho login role lúc kết nối.

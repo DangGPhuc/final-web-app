@@ -14,6 +14,7 @@ export async function POST(req: Request) {
     },
     {
       rateLimitMode: 'none',
+      bodyMode: 'none',
       successStatus: 200,
       successOnlyHeaders: {
         'Set-Cookie': clearSessionCookieHeader(),

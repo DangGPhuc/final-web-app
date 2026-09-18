@@ -258,6 +258,49 @@ describe.skipIf(!shouldRun)('Next.js API route integration (wallet, transfer, lo
     expect(body.code).toBe('CROSS_SITE_REQUEST');
   });
 
+  it('(BK) logout succeeds with empty/no JSON body while Origin validation remains enforced', async () => {
+    try {
+      // 1. Valid origin and same-origin Sec-Fetch-Site with NO body and NO content-type
+      const req = new Request('https://fintrack.example/api/v2/session/logout', {
+        method: 'POST',
+        headers: {
+          origin: 'https://fintrack.example',
+          'sec-fetch-site': 'same-origin',
+          cookie: aliceCookie,
+        },
+      });
+
+      const res = await logoutPost(req);
+      expect(res.status).toBe(200);
+      const setCookie = res.headers.get('Set-Cookie');
+      expect(setCookie).toBeTruthy();
+      expect(setCookie).toContain('__Host-fintrack_session=');
+      expect(setCookie).toContain('Max-Age=0');
+
+      // 2. Cross-origin with empty body must be rejected (Origin enforcement not weakened)
+      const badReq = new Request('https://fintrack.example/api/v2/session/logout', {
+        method: 'POST',
+        headers: {
+          origin: 'https://attacker.example',
+          'sec-fetch-site': 'cross-site',
+          cookie: aliceCookie,
+        },
+      });
+      const badRes = await logoutPost(badReq);
+      expect(badRes.status).toBe(403);
+      expect(badRes.headers.get('Set-Cookie')).toBeNull();
+    } finally {
+      // Re-activate Alice session so subsequent tests (e.g. Test AL) continue to work
+      const adminClient = new Client({ connectionString: ADMIN_URL });
+      await adminClient.connect();
+      await adminClient.query(
+        "UPDATE fintrack.sessions SET revoked_at = NULL WHERE user_id = $1",
+        [aliceId]
+      );
+      await adminClient.end();
+    }
+  });
+
   it('(AL) exhausted global quota does NOT block logout (rateLimitMode = none)', async () => {
     // Manually saturate rate limit for Alice to trigger 429
     const adminClient = new Client({ connectionString: ADMIN_URL });

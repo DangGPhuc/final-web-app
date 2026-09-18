@@ -47,7 +47,7 @@ export function clearSessionCookieHeader(): string {
   return `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
 }
 
-export function checkMutationOrigin(req: Request): void {
+export function checkMutationOrigin(req: Request, options?: { requireJson?: boolean }): void {
   const configured = process.env.APP_ORIGIN;
   if (!configured) throw new ApiError(503, 'BACKEND_NOT_CONFIGURED');
   const origin = new URL(configured);
@@ -57,7 +57,9 @@ export function checkMutationOrigin(req: Request): void {
   if (req.headers.get('origin') !== configured) throw new ApiError(403, 'INVALID_ORIGIN');
   const site = req.headers.get('sec-fetch-site');
   if (site && site !== 'same-origin') throw new ApiError(403, 'CROSS_SITE_REQUEST');
-  if (req.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
-    throw new ApiError(415, 'JSON_REQUIRED');
+  if (options?.requireJson !== false) {
+    if (req.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+      throw new ApiError(415, 'JSON_REQUIRED');
+    }
   }
 }

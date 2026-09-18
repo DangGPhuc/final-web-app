@@ -1,8 +1,9 @@
 name: Backend security gates
 on:
   pull_request:
+    branches: [main, dev/fintrack-v2, "feature/**", "fix/**"]
   push:
-    branches: [dev/fintrack-v2, feature/backend-foundation-v2, fix/**]
+    branches: [main, dev/fintrack-v2, "feature/**", "fix/**"]
 permissions:
   contents: read
 jobs:

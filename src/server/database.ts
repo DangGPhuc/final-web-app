@@ -31,7 +31,13 @@ export async function transaction<T>(run: (client: PoolClient) => Promise<T>): P
   const c = await database().connect();
   let broken = false;
   try {
+    // Reset connection state at checkout to prevent session-state poisoning
+    await c.query('RESET ROLE');
     await c.query('BEGIN');
+    await c.query("SET LOCAL search_path = fintrack, pg_temp");
+    await c.query("SET LOCAL lock_timeout = '3s'");
+    await c.query("SET LOCAL statement_timeout = '5s'");
+    await c.query("SET LOCAL idle_in_transaction_session_timeout = '5s'");
     await c.query('SET LOCAL ROLE fintrack_runtime');
 
     const expectedLoginRole = process.env.NODE_ENV === 'test' && process.env.EXPECTED_LOGIN_ROLE
@@ -89,9 +95,9 @@ export async function transaction<T>(run: (client: PoolClient) => Promise<T>): P
       throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
     }
 
-    // Assert session role has only expected role membership (fintrack_runtime)
-    const membershipRes = await c.query<{ rolname: string }>(`
-      SELECT r.rolname
+    // Assert session role has only expected role membership (fintrack_runtime) with NO admin option
+    const membershipRes = await c.query<{ rolname: string; admin_option: boolean }>(`
+      SELECT r.rolname, m.admin_option
       FROM pg_auth_members m
       JOIN pg_roles r ON r.oid = m.roleid
       JOIN pg_roles u ON u.oid = m.member
@@ -99,25 +105,63 @@ export async function transaction<T>(run: (client: PoolClient) => Promise<T>): P
     `, [r.session_name]);
     const allowedMemberships = ['fintrack_runtime'];
     for (const row of membershipRes.rows) {
-      if (!allowedMemberships.includes(row.rolname)) {
+      if (!allowedMemberships.includes(row.rolname) || row.admin_option) {
         throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
       }
     }
 
-    const tableOwnerRes = await c.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM pg_tables WHERE schemaname = 'fintrack' AND tableowner = $1`,
-      [r.session_name]
-    );
-    if (parseInt(tableOwnerRes.rows[0]?.count ?? '0', 10) > 0) {
+    // Assert fintrack_runtime is a member of ZERO other roles (no unexpected privilege escalation)
+    const runtimeMembershipRes = await c.query<{ count: string }>(`
+      SELECT count(*)::text AS count
+      FROM pg_auth_members m
+      JOIN pg_roles u ON u.oid = m.member
+      WHERE u.rolname = 'fintrack_runtime'
+    `);
+    if (parseInt(runtimeMembershipRes.rows[0]?.count ?? '0', 10) > 0) {
       throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
     }
 
-    await c.query("SET LOCAL lock_timeout = '3s'");
+    // Assert BOTH application roles (login and runtime) own ZERO tables, sequences, functions, or schemas
+    const appRoles = [r.session_name, 'fintrack_runtime'];
+
+    const classOwnerRes = await c.query<{ count: string }>(`
+      SELECT count(*)::text AS count
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_roles r ON r.oid = c.relowner
+      WHERE n.nspname = 'fintrack' AND r.rolname = ANY($1::text[])
+    `, [appRoles]);
+    if (parseInt(classOwnerRes.rows[0]?.count ?? '0', 10) > 0) {
+      throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
+    }
+
+    const procOwnerRes = await c.query<{ count: string }>(`
+      SELECT count(*)::text AS count
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      JOIN pg_roles r ON r.oid = p.proowner
+      WHERE n.nspname = 'fintrack' AND r.rolname = ANY($1::text[])
+    `, [appRoles]);
+    if (parseInt(procOwnerRes.rows[0]?.count ?? '0', 10) > 0) {
+      throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
+    }
+
+    const nspOwnerRes = await c.query<{ count: string }>(`
+      SELECT count(*)::text AS count
+      FROM pg_namespace n
+      JOIN pg_roles r ON r.oid = n.nspowner
+      WHERE n.nspname = 'fintrack' AND r.rolname = ANY($1::text[])
+    `, [appRoles]);
+    if (parseInt(nspOwnerRes.rows[0]?.count ?? '0', 10) > 0) {
+      throw new ApiError(503, 'UNSAFE_DATABASE_ROLE');
+    }
+
     const result = await run(c);
     await c.query('COMMIT');
     return result;
   } catch (e) {
     try { await c.query('ROLLBACK'); } catch { broken = true; }
+    try { await c.query('RESET ROLE'); } catch {}
     throw e;
   } finally { c.release(broken); }
 }

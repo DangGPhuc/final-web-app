@@ -135,12 +135,14 @@
 
 | Capability | Status | Implementation Evidence / Notes |
 |---|---|---|
-| Database-level logical restore | **IMPLEMENTED** | Verified automated script `scripts/backup-restore-drill.sh` testing dump, fresh restore, all 6 security tables with ENABLE + FORCE RLS, and tenant isolation. |
+| Database-level logical restore | **IMPLEMENTED** | Verified automated script `scripts/backup-restore-drill.sh` testing data restoration, balance invariants, all 6 security tables with ENABLE + FORCE RLS, tenant isolation, full `schema_migrations` history preservation, and subsequent migration runner acceptance. |
+| Fresh-cluster disaster recovery | **PARTIAL / PLANNED** | Database logical restore verified. Provisioning cluster-level roles (`fintrack_runtime`, `fintrack_app_login`) on a blank cluster requires version-controlled bootstrap prior to restore. Full fresh-cluster disaster recovery orchestration is PLANNED. |
 | Authentication | **PARTIAL / PLANNED** | Session verification, constant-time hashing, and server-side revocation implemented. Real identity issuance, passwordless/OAuth login planned for next iteration. |
 | Centralized monitoring + alerting | **PARTIAL / PLANNED** | Structured security logging with UUID `request_id` implemented in `src/server/logger.ts`. Centralized metric aggregation (Prometheus/Datadog) and alerting rules are planned. |
 | Frontend PostgreSQL cutover | **PLANNED** | Frontend currently uses client-side state and localStorage exclusively. PostgreSQL cutover planned for next iteration. |
 | Private object storage | **PLANNED** | Planned for subsequent receipt attachments phase. |
-| Managed encrypted backup / PITR | **PLANNED** | Automated logical dump verified. Continuous WAL archiving and managed encrypted PITR planned for cloud production phase. Full disaster recovery is NOT claimed. |
+| Managed encrypted backup | **PLANNED** | Automated logical dump verified. Managed KMS-encrypted backups planned for cloud production phase. |
+| Point-in-Time Recovery (PITR) | **PLANNED** | Continuous WAL archiving and PITR planned for production cloud deployment. Full disaster recovery is NOT claimed. |
 
 ### Schema Object Ownership Model
 > [!IMPORTANT]

@@ -103,6 +103,7 @@ Every logical restore drill verifies:
 3. **Tenant Data Isolation**: Verifies that restoring preserves row security by executing queries under `fintrack_runtime` for separate tenants (Alice vs. Bob) and asserting zero cross-tenant leakage.
 4. **Login Privilege Sandboxing**: Connects as `fintrack_app_login`, executes `SET LOCAL ROLE fintrack_runtime`, sets `app.session_hash`, and asserts `current_session_user_id()` correctly resolves.
 5. **Ledger & Audit Parity**: Validates account balances match the cumulative transfer ledger and all transfer mutations correlate with a valid `request_id` in `fintrack.audit_events`.
+6. **Migration History Preservation & Runner Acceptance**: Validates that all rows in `fintrack.schema_migrations` survive dump/restore, checksums match repository migration files, and `scripts/migrate.mjs` runs against the restored database with 0 pending migrations and full checksum verification.
 
 ---
 

@@ -82,12 +82,17 @@ export async function runMigrations(connectionString) {
   const client = new Client({ connectionString });
   await client.connect();
 
+  let lockAcquired = false;
   try {
     const roleRes = await client.query('SELECT current_user AS name, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user');
     const role = roleRes.rows[0];
     if (role.name === 'fintrack_runtime' || role.name === 'fintrack_app_login') {
       throw new Error(`SECURITY VIOLATION: Migration execution forbidden for runtime role "${role.name}". Operator credentials required.`);
     }
+
+    // Acquire session-level advisory lock to serialize migration execution across concurrent runners
+    await client.query("SELECT pg_advisory_lock(hashtextextended('fintrack:migrations', 0))");
+    lockAcquired = true;
 
     // 1. Check if schema fintrack exists
     const schemaCheck = await client.query(`
@@ -156,6 +161,11 @@ export async function runMigrations(connectionString) {
 
     // 7. Apply pending migrations atomically
     const pendingFiles = files.slice(appliedRows.length);
+    if (pendingFiles.length === 0) {
+      console.log('[migrate] Database schema is up to date.');
+      return { success: true, appliedCount: 0, totalCount: files.length };
+    }
+
     for (const file of pendingFiles) {
       const version = file;
       const filePath = path.join(MIGRATIONS_DIR, file);
@@ -204,8 +214,15 @@ export async function runMigrations(connectionString) {
       }
     }
 
-    return { success: true, appliedCount: files.length };
+    return { success: true, appliedCount: pendingFiles.length, totalCount: files.length };
   } finally {
+    if (lockAcquired) {
+      try {
+        await client.query("SELECT pg_advisory_unlock(hashtextextended('fintrack:migrations', 0))");
+      } catch (err) {
+        console.error('[migrate] Failed to release advisory lock:', err);
+      }
+    }
     await client.end();
   }
 }

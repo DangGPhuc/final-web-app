@@ -18,6 +18,7 @@ export interface RouteContext {
 export interface HandleOptions {
   rateLimitScope?: RateLimitScope;
   rateLimitMode?: 'normal' | 'none';
+  bodyMode?: 'required' | 'none';
   customHeaders?: Record<string, string>;
   successOnlyHeaders?: Record<string, string>;
   successStatus?: number;
@@ -54,9 +55,10 @@ export async function handle(
       throw new ApiError(503, 'BACKEND_DISABLED');
     }
 
+    const bodyMode = options?.bodyMode ?? 'required';
     const isMutation = !['GET', 'HEAD'].includes(req.method);
     if (isMutation) {
-      checkMutationOrigin(req);
+      checkMutationOrigin(req, { requireJson: bodyMode !== 'none' });
     }
 
     const hash = sessionHash(req);
@@ -89,7 +91,7 @@ export async function handle(
     }
 
     // Read bounded input outside DB transaction so a slow client cannot exhaust DB pool slots
-    const input = req.method === 'POST' ? await body(req) : undefined;
+    const input = (req.method === 'POST' && bodyMode === 'required') ? await body(req) : undefined;
 
     // Execute business mutation with row-locking on active session if mutating
     const result = await transaction(async c => {

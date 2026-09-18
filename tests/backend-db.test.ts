@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { Client, Pool, type PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
-import { authenticate, revokeCurrentSession } from '../src/server/session';
+import { authenticate, revokeCurrentSession, checkMutationOrigin } from '../src/server/session';
 import {
   createWallet,
   createTransfer,
@@ -16,6 +16,8 @@ import { transaction, resetPoolForTesting } from '../src/server/database';
 import { runMaintenance } from '../scripts/backend-maintenance.mjs';
 import { runMigrations, computeFileChecksum, prepareMigrationForExecution } from '../scripts/migrate.mjs';
 import { baselineLegacyDatabase } from '../scripts/baseline-migrations.mjs';
+import { validateTestDbUrls } from '../scripts/validate-test-db.mjs';
+import { verifyMigrationHistory } from '../scripts/verify-migration-history.mjs';
 import { assertSafeTestDatabaseUrl } from './helpers/test-db-guard';
 import { handle } from '../src/server/http';
 import { logSecurityEvent } from '../src/server/logger';
@@ -770,10 +772,23 @@ describe('PostgreSQL schema and security hardening integration', () => {
     // 1. runMigrations on legacy schema without schema_migrations must fail closed
     await expect(runMigrations(legacyUrl)).rejects.toThrow(/LEGACY_SCHEMA_WITHOUT_MIGRATION_HISTORY/);
 
-    // 2. Explicit baseline workflow succeeds and establishes trusted baseline
-    const baselineRes = await baselineLegacyDatabase(legacyUrl, '003_backend_deployment_closure.sql');
-    expect(baselineRes.success).toBe(true);
-    expect(baselineRes.baselinedCount).toBe(3);
+    // 2. Calling baseline without ALLOW_LEGACY_BASELINE fails closed
+    const prevBaseline = process.env.ALLOW_LEGACY_BASELINE;
+    delete process.env.ALLOW_LEGACY_BASELINE;
+    await expect(baselineLegacyDatabase(legacyUrl, '003_backend_deployment_closure.sql')).rejects.toThrow(
+      /ALLOW_LEGACY_BASELINE=I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR/
+    );
+
+    // 3. Calling baseline on incomplete legacy schema (missing idempotency, RLS, etc.) MUST FAIL!
+    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
+    try {
+      await expect(baselineLegacyDatabase(legacyUrl, '003_backend_deployment_closure.sql')).rejects.toThrow(
+        /INCOMPLETE_LEGACY_SCHEMA/
+      );
+    } finally {
+      if (prevBaseline !== undefined) process.env.ALLOW_LEGACY_BASELINE = prevBaseline;
+      else delete process.env.ALLOW_LEGACY_BASELINE;
+    }
 
     // Cleanup
     const cleanRoot = new Client({ connectionString: rootUrl });
@@ -970,9 +985,12 @@ describe('PostgreSQL schema and security hardening integration', () => {
       expect(res).toBe('ok');
     } finally {
       (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
-      process.env.EXPECTED_LOGIN_ROLE = prevRole;
-      process.env.DATABASE_URL = prevUrl;
-      process.env.ALLOW_INSECURE_TEST_LOCAL_SSL = prevSsl;
+      if (prevRole !== undefined) process.env.EXPECTED_LOGIN_ROLE = prevRole;
+      else delete process.env.EXPECTED_LOGIN_ROLE;
+      if (prevUrl !== undefined) process.env.DATABASE_URL = prevUrl;
+      else delete process.env.DATABASE_URL;
+      if (prevSsl !== undefined) process.env.ALLOW_INSECURE_TEST_LOCAL_SSL = prevSsl;
+      else delete process.env.ALLOW_INSECURE_TEST_LOCAL_SSL;
       await resetPoolForTesting();
     }
   });
@@ -1016,5 +1034,406 @@ describe('PostgreSQL schema and security hardening integration', () => {
     const content = readFileSync(workflowPath, 'utf8');
     expect(content).toContain('"feature/**"');
     expect(content).toContain('"fix/**"');
+  });
+
+  it.skipIf(!realUrl)('(AV) incomplete legacy schema baseline is rejected', async () => {
+    const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
+    const rootClient = new Client({ connectionString: rootUrl });
+    await rootClient.connect();
+    await rootClient.query('DROP DATABASE IF EXISTS fintrack_av_test');
+    await rootClient.query('CREATE DATABASE fintrack_av_test');
+    await rootClient.end();
+
+    const incUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'fintrack_av_test';
+    const incClient = new Client({ connectionString: incUrl });
+    await incClient.connect();
+    await incClient.query('CREATE SCHEMA fintrack');
+    // Incomplete schema: missing idempotency table and missing RLS
+    await incClient.query('CREATE TABLE fintrack.users (id uuid PRIMARY KEY)');
+    await incClient.query('CREATE TABLE fintrack.sessions (token_hash text PRIMARY KEY, user_id uuid, expires_at timestamptz)');
+    await incClient.query('CREATE TABLE fintrack.wallets (id uuid PRIMARY KEY, user_id uuid, name text, type text, opening_balance bigint, balance bigint)');
+    await incClient.query('CREATE TABLE fintrack.transfers (id uuid PRIMARY KEY, user_id uuid, from_wallet_id uuid, to_wallet_id uuid, amount bigint, fee bigint)');
+    await incClient.end();
+
+    const prev = process.env.ALLOW_LEGACY_BASELINE;
+    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
+    try {
+      await expect(baselineLegacyDatabase(incUrl, '001_backend_foundation.sql')).rejects.toThrow(
+        /INCOMPLETE_LEGACY_SCHEMA/
+      );
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_LEGACY_BASELINE = prev;
+      else delete process.env.ALLOW_LEGACY_BASELINE;
+      const cleanClient = new Client({ connectionString: rootUrl });
+      await cleanClient.connect();
+      await cleanClient.query('DROP DATABASE IF EXISTS fintrack_av_test');
+      await cleanClient.end();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AW) trusted baseline + subsequent runMigrations succeeds', async () => {
+    const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
+    const rootClient = new Client({ connectionString: rootUrl });
+    await rootClient.connect();
+    await rootClient.query('DROP DATABASE IF EXISTS fintrack_aw_test');
+    await rootClient.query('CREATE DATABASE fintrack_aw_test');
+    await rootClient.end();
+
+    const testUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'fintrack_aw_test';
+    const c = new Client({ connectionString: testUrl });
+    await c.connect();
+    // Apply migrations 001, 002, 003 directly without schema_migrations
+    const sql001 = readFileSync('db/migrations/001_backend_foundation.sql', 'utf8')
+      .replace(
+        'CREATE ROLE fintrack_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;',
+        '-- role fintrack_runtime already exists'
+      );
+    const sql002 = readFileSync('db/migrations/002_backend_security_hardening.sql', 'utf8');
+    const sql003 = readFileSync('db/migrations/003_backend_deployment_closure.sql', 'utf8');
+    await c.query(sql001);
+    await c.query(sql002);
+    await c.query(sql003);
+    await c.end();
+
+    const prev = process.env.ALLOW_LEGACY_BASELINE;
+    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
+    try {
+      // Baseline up to 003
+      const baselineRes = await baselineLegacyDatabase(testUrl, '003_backend_deployment_closure.sql');
+      expect(baselineRes.success).toBe(true);
+      expect(baselineRes.baselinedCount).toBe(3);
+
+      // Now run normal migration runner; should apply 004 successfully!
+      const migrateRes = await runMigrations(testUrl);
+      expect(migrateRes.appliedCount).toBe(1);
+
+      // Subsequent runMigrations: 0 pending
+      const noPendingRes = await runMigrations(testUrl);
+      expect(noPendingRes.appliedCount).toBe(0);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_LEGACY_BASELINE = prev;
+      else delete process.env.ALLOW_LEGACY_BASELINE;
+      const cleanClient = new Client({ connectionString: rootUrl });
+      await cleanClient.connect();
+      await cleanClient.query('DROP DATABASE IF EXISTS fintrack_aw_test');
+      await cleanClient.end();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AX) baseline cannot rewrite existing checksum history', async () => {
+    const prev = process.env.ALLOW_LEGACY_BASELINE;
+    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
+    try {
+      await expect(baselineLegacyDatabase(realUrl!, '003_backend_deployment_closure.sql')).rejects.toThrow(
+        /BASELINE_HISTORY_EXISTS/
+      );
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_LEGACY_BASELINE = prev;
+      else delete process.env.ALLOW_LEGACY_BASELINE;
+    }
+  });
+
+  it.skipIf(!realUrl)('(AY) baseline rollback leaves no partial schema_migrations metadata', async () => {
+    const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
+    const rootClient = new Client({ connectionString: rootUrl });
+    await rootClient.connect();
+    await rootClient.query('DROP DATABASE IF EXISTS fintrack_ay_test');
+    await rootClient.query('CREATE DATABASE fintrack_ay_test');
+    await rootClient.end();
+
+    const testUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'fintrack_ay_test';
+    const c = new Client({ connectionString: testUrl });
+    await c.connect();
+    await c.query('CREATE SCHEMA fintrack');
+    // Only 1 table, incomplete
+    await c.query('CREATE TABLE fintrack.users (id uuid PRIMARY KEY)');
+    await c.end();
+
+    const prev = process.env.ALLOW_LEGACY_BASELINE;
+    process.env.ALLOW_LEGACY_BASELINE = 'I_UNDERSTAND_THIS_CREATES_A_TRUST_ANCHOR';
+    try {
+      await expect(baselineLegacyDatabase(testUrl, '001_backend_foundation.sql')).rejects.toThrow();
+
+      // Verify fintrack.schema_migrations does not exist
+      const checkClient = new Client({ connectionString: testUrl });
+      await checkClient.connect();
+      const res = await checkClient.query(
+        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'fintrack' AND table_name = 'schema_migrations'"
+      );
+      expect(res.rows.length).toBe(0);
+      await checkClient.end();
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_LEGACY_BASELINE = prev;
+      else delete process.env.ALLOW_LEGACY_BASELINE;
+      const cleanClient = new Client({ connectionString: rootUrl });
+      await cleanClient.connect();
+      await cleanClient.query('DROP DATABASE IF EXISTS fintrack_ay_test');
+      await cleanClient.end();
+    }
+  });
+
+  it.skipIf(!realUrl)('(AZ) backup source contains complete migration checksum history', async () => {
+    const history = await verifyMigrationHistory(realUrl!);
+    expect(history.total).toBe(4);
+    expect(history.versions).toEqual([
+      '001_backend_foundation.sql',
+      '002_backend_security_hardening.sql',
+      '003_backend_deployment_closure.sql',
+      '004_runtime_role_hardening.sql',
+    ]);
+  });
+
+  it.skipIf(!realUrl)('(BA) restored DB passes normal migration verification', async () => {
+    const rootUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'postgres';
+    const rootClient = new Client({ connectionString: rootUrl });
+    await rootClient.connect();
+    await rootClient.query('DROP DATABASE IF EXISTS fintrack_ba_test');
+    await rootClient.query('CREATE DATABASE fintrack_ba_test');
+    await rootClient.end();
+
+    const restoreUrl = realUrl!.substring(0, realUrl!.lastIndexOf('/') + 1) + 'fintrack_ba_test';
+    const backupFile = execSync('mktemp -t fintrack_ba_XXXXXX.sql', { encoding: 'utf8' }).trim();
+    try {
+      execSync(`pg_dump "${realUrl}" --schema=fintrack --clean --if-exists --no-owner > "${backupFile}"`);
+      execSync(`psql "${restoreUrl}" -v ON_ERROR_STOP=1 -f "${backupFile}"`);
+
+      // Verify all rows in schema_migrations survived restore
+      const history = await verifyMigrationHistory(restoreUrl);
+      expect(history.total).toBe(4);
+
+      // Verify migration runner accepts restored DB with 0 pending
+      const res = await runMigrations(restoreUrl);
+      expect(res.appliedCount).toBe(0);
+    } finally {
+      unlinkSync(backupFile);
+      const cleanClient = new Client({ connectionString: rootUrl });
+      await cleanClient.connect();
+      await cleanClient.query('DROP DATABASE IF EXISTS fintrack_ba_test');
+      await cleanClient.end();
+    }
+  });
+
+  it.skipIf(!realUrl)('(BB) concurrent migration runners serialize safely', async () => {
+    const p1 = runMigrations(realUrl!);
+    const p2 = runMigrations(realUrl!);
+    const [res1, res2] = await Promise.all([p1, p2]);
+    expect(res1.appliedCount).toBe(0);
+    expect(res2.appliedCount).toBe(0);
+  });
+
+  it.skipIf(!realUrl)('(BC) fintrack_runtime unexpected membership fails closed', async () => {
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+    await client.query('DROP ROLE IF EXISTS fintrack_priv_test_role');
+    await client.query('CREATE ROLE fintrack_priv_test_role NOLOGIN');
+    await client.query('GRANT fintrack_priv_test_role TO fintrack_runtime');
+    await client.end();
+
+    const prevUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    try {
+      await resetPoolForTesting();
+      await expect(transaction(async () => 'ok')).rejects.toThrow(/UNSAFE_DATABASE_ROLE/);
+    } finally {
+      process.env.DATABASE_URL = prevUrl;
+      const cleanClient = new Client({ connectionString: realUrl });
+      await cleanClient.connect();
+      await cleanClient.query('REVOKE fintrack_priv_test_role FROM fintrack_runtime');
+      await cleanClient.query('DROP ROLE IF EXISTS fintrack_priv_test_role');
+      await cleanClient.end();
+      await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(BD) fintrack_runtime owns table -> transaction fails closed', async () => {
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+    await client.query('CREATE TABLE fintrack.test_leak_table ()');
+    await client.query('ALTER TABLE fintrack.test_leak_table OWNER TO fintrack_runtime');
+    await client.end();
+
+    const prevUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    try {
+      await resetPoolForTesting();
+      await expect(transaction(async () => 'ok')).rejects.toThrow(/UNSAFE_DATABASE_ROLE/);
+    } finally {
+      process.env.DATABASE_URL = prevUrl;
+      const cleanClient = new Client({ connectionString: realUrl });
+      await cleanClient.connect();
+      await cleanClient.query('DROP TABLE IF EXISTS fintrack.test_leak_table');
+      await cleanClient.end();
+      await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(BE) fintrack_app_login owns routine/schema -> fails closed', async () => {
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+    await client.query('CREATE FUNCTION fintrack.test_owned_routine() RETURNS void AS $$ BEGIN END $$ LANGUAGE plpgsql');
+    await client.query('ALTER FUNCTION fintrack.test_owned_routine() OWNER TO fintrack_app_login');
+    await client.end();
+
+    const prevUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    try {
+      await resetPoolForTesting();
+      await expect(transaction(async () => 'ok')).rejects.toThrow(/UNSAFE_DATABASE_ROLE/);
+    } finally {
+      process.env.DATABASE_URL = prevUrl;
+      const cleanClient = new Client({ connectionString: realUrl });
+      await cleanClient.connect();
+      await cleanClient.query('DROP FUNCTION IF EXISTS fintrack.test_owned_routine()');
+      await cleanClient.end();
+      await resetPoolForTesting();
+    }
+  });
+
+  it.skipIf(!realUrl)('(BF) current_session_user_id has no accidental PUBLIC EXECUTE', async () => {
+    const client = new Client({ connectionString: realUrl });
+    await client.connect();
+    const res = await client.query(
+      "SELECT has_function_privilege('public', 'fintrack.current_session_user_id()', 'execute') AS has_priv"
+    );
+    expect(res.rows[0].has_priv).toBe(false);
+    await client.end();
+  });
+
+  it('(BG) backup drill refuses execution without ALLOW_DESTRUCTIVE_DB_TESTS', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    try {
+      expect(() =>
+        validateTestDbUrls('postgres://host/fintrack_test', 'postgres://host/fintrack_restore')
+      ).toThrow(/ALLOW_DESTRUCTIVE_DB_TESTS=true is strictly required/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+    }
+  });
+
+  it('(BH) backup drill rejects unsafe source database name', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      expect(() =>
+        validateTestDbUrls('postgres://host/postgres', 'postgres://host/fintrack_restore')
+      ).toThrow(/forbidden/);
+      expect(() =>
+        validateTestDbUrls('postgres://host/fintrack', 'postgres://host/fintrack_restore')
+      ).toThrow(/forbidden/);
+      expect(() =>
+        validateTestDbUrls('postgres://host/production', 'postgres://host/fintrack_restore')
+      ).toThrow(/forbidden/);
+      expect(() =>
+        validateTestDbUrls('postgres://host/my_custom_db', 'postgres://host/fintrack_restore')
+      ).toThrow(/pattern/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    }
+  });
+
+  it('(BI) backup drill rejects source == restore database', () => {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      expect(() =>
+        validateTestDbUrls('postgres://host/fintrack_test', 'postgres://host/fintrack_test')
+      ).toThrow(/must be distinct/);
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    }
+  });
+
+  it('(BJ) backend security workflow covers main + feature/** + fix/**', () => {
+    const workflowPath = '.github/workflows/backend-security.yml';
+    const content = readFileSync(workflowPath, 'utf8');
+    expect(content).toContain('main');
+    expect(content).toContain('dev/fintrack-v2');
+    expect(content).toContain('"feature/**"');
+    expect(content).toContain('"fix/**"');
+  });
+
+  it('(BK) logout succeeds with empty/no JSON body while Origin validation remains enforced', () => {
+    const prevOrigin = process.env.APP_ORIGIN;
+    process.env.APP_ORIGIN = 'https://fintrack.example';
+    try {
+      // 1. Valid origin, no body/no JSON content-type -> checkMutationOrigin succeeds with requireJson: false
+      const validReq = new Request('https://fintrack.example/api/v2/session/logout', {
+        method: 'POST',
+        headers: {
+          origin: 'https://fintrack.example',
+          'sec-fetch-site': 'same-origin',
+        },
+      });
+      expect(() => checkMutationOrigin(validReq, { requireJson: false })).not.toThrow();
+
+      // 2. Untrusted origin with requireJson: false -> strictly throws 403 INVALID_ORIGIN
+      const badOriginReq = new Request('https://fintrack.example/api/v2/session/logout', {
+        method: 'POST',
+        headers: {
+          origin: 'https://attacker.example',
+          'sec-fetch-site': 'same-origin',
+        },
+      });
+      expect(() => checkMutationOrigin(badOriginReq, { requireJson: false })).toThrow(/INVALID_ORIGIN/);
+
+      // 3. Cross-site Sec-Fetch-Site with requireJson: false -> strictly throws 403 CROSS_SITE_REQUEST
+      const crossSiteReq = new Request('https://fintrack.example/api/v2/session/logout', {
+        method: 'POST',
+        headers: {
+          origin: 'https://fintrack.example',
+          'sec-fetch-site': 'cross-site',
+        },
+      });
+      expect(() => checkMutationOrigin(crossSiteReq, { requireJson: false })).toThrow(/CROSS_SITE_REQUEST/);
+
+      // 4. Financial mutations with requireJson: true still require application/json
+      expect(() => checkMutationOrigin(validReq, { requireJson: true })).toThrow(/JSON_REQUIRED/);
+    } finally {
+      if (prevOrigin !== undefined) process.env.APP_ORIGIN = prevOrigin;
+      else delete process.env.APP_ORIGIN;
+    }
+  });
+
+  it.skipIf(!realUrl)('(BL) pooled DB transaction starts from known-safe role/GUC state', async () => {
+    const prevUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgres://fintrack_app_login:test-login-password@localhost:5432/fintrack_test';
+    await resetPoolForTesting();
+
+    try {
+      // Verify transaction baseline settings
+      await transaction(async (client) => {
+        const roleRes = await client.query('SELECT current_user, session_user');
+        expect(roleRes.rows[0].session_user).toBe('fintrack_app_login');
+        expect(roleRes.rows[0].current_user).toBe('fintrack_runtime');
+
+        const pathRes = await client.query("SHOW search_path");
+        expect(pathRes.rows[0].search_path).toContain('fintrack');
+
+        const lockRes = await client.query("SHOW lock_timeout");
+        expect(lockRes.rows[0].lock_timeout).toBe('3s');
+
+        const stmtRes = await client.query("SHOW statement_timeout");
+        expect(stmtRes.rows[0].statement_timeout).toBe('5s');
+      });
+
+      // Even if previous transaction threw an error, next transaction runs cleanly
+      await expect(
+        transaction(async (client) => {
+          await client.query("SET search_path = public");
+          throw new Error('deliberate failure');
+        })
+      ).rejects.toThrow('deliberate failure');
+
+      await transaction(async (client) => {
+        const pathRes = await client.query("SHOW search_path");
+        expect(pathRes.rows[0].search_path).toContain('fintrack');
+      });
+    } finally {
+      process.env.DATABASE_URL = prevUrl;
+      await resetPoolForTesting();
+    }
   });
 });

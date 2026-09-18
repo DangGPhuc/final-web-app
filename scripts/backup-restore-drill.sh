@@ -2,20 +2,25 @@
 set -euo pipefail
 
 # FinTrack Logical Backup & Restore Drill
-# Validates pg_dump / restore, role independence, schema invariants, balances, and RLS enforcement.
+# Validates pg_dump / restore, role independence, schema invariants, balances, RLS enforcement,
+# and migration history preservation.
 # NOTE: This drill tests database-level logical restoration. Because pg_dump does not serialize
 # cluster-wide role definitions (pg_roles), cluster recovery requires bootstrapping application roles
 # (fintrack_runtime, fintrack_app_login) via version-controlled migration/bootstrap logic.
 
-# Invariant: Explicit database URLs required. No default credentials in destructive scripts.
+# Safety Guard: Ensure test safety environment flag and disposable database names
 if [ -z "${DATABASE_TEST_URL:-}" ] || [ -z "${DATABASE_RESTORE_URL:-}" ]; then
   echo "ERROR: DATABASE_TEST_URL and DATABASE_RESTORE_URL are strictly required." >&2
   echo "Destructive scripts refuse execution without explicit test database URLs." >&2
   exit 1
 fi
 
+# Strict safety validation before any destructive command
+node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL"
+
 BASE_URL="$DATABASE_TEST_URL"
 RESTORE_URL="$DATABASE_RESTORE_URL"
+RESTORE_DB="$(node -e 'try { const u = new URL(process.argv[1]); console.log(u.pathname.replace(/^\//, "")) } catch { const p = process.argv[1].split("/"); console.log(p[p.length - 1]); }' "$RESTORE_URL")"
 
 # Enforce secure temporary file creation with owner-only permissions (0600)
 umask 077
@@ -25,7 +30,7 @@ BACKUP_FILE="$(mktemp -t fintrack_logical_backup_XXXXXX.sql)"
 cleanup() {
   echo "=== [Cleanup] Removing temporary backup file & cleaning disposable databases ==="
   rm -f "$BACKUP_FILE"
-  psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS fintrack_restore;" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;" >/dev/null 2>&1 || true
+  psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS ${RESTORE_DB};" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -37,15 +42,18 @@ if [ "$PERMS" != "600" ]; then
 fi
 echo "Verified: Temporary backup file created with owner-only permissions (0600)."
 
-echo "=== [1/7] Initializing source database & applying migrations (001 -> 002 -> 003 -> 004) ==="
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS fintrack_restore;" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;"
+echo "=== [1/8] Initializing source database via production migration runner ==="
+psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB};" -c "DROP DATABASE IF EXISTS fintrack_upgrade_test;"
 psql "$BASE_URL" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS fintrack CASCADE; DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime') THEN DROP OWNED BY fintrack_runtime; DROP ROLE fintrack_runtime; END IF; IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_app_login') THEN DROP OWNED BY fintrack_app_login; DROP ROLE fintrack_app_login; END IF; END \$\$;"
-psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/001_backend_foundation.sql
-psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/002_backend_security_hardening.sql
-psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/003_backend_deployment_closure.sql
-psql "$BASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/004_runtime_role_hardening.sql
 
-echo "=== [2/7] Seeding representative domain state ==="
+# Initialize source database using PRODUCTION migration runner (not direct psql -f)
+DATABASE_MAINTENANCE_URL="$BASE_URL" node scripts/migrate.mjs
+
+# Verify source schema_migrations table has all expected repository migration checksums
+node scripts/verify-migration-history.mjs "$BASE_URL"
+echo "Verified: Source database initialized with full migration history and verified checksums."
+
+echo "=== [2/8] Seeding representative domain state ==="
 psql "$BASE_URL" -v ON_ERROR_STOP=1 <<'EOF'
 BEGIN;
 -- Seed users
@@ -74,7 +82,7 @@ INSERT INTO fintrack.audit_events (id, user_id, action, resource_id, request_id)
 COMMIT;
 EOF
 
-echo "=== [3/7] Taking logical pg_dump ==="
+echo "=== [3/8] Taking logical pg_dump ==="
 pg_dump "$BASE_URL" --schema=fintrack --clean --if-exists --no-owner > "$BACKUP_FILE"
 
 # Invariant check: Prove pg_dump does NOT serialize cluster-wide roles (pg_roles)
@@ -84,14 +92,14 @@ if grep -i "CREATE ROLE" "$BACKUP_FILE"; then
 fi
 echo "Verified: Logical backup does NOT carry cluster-global roles (bootstrap required on new clusters)."
 
-echo "=== [4/7] Creating fresh isolated restore database ==="
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS fintrack_restore;"
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "CREATE DATABASE fintrack_restore;"
+echo "=== [4/8] Creating fresh isolated restore database ==="
+psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB};"
+psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${RESTORE_DB};"
 
-echo "=== [5/7] Restoring logical backup into isolated database ==="
+echo "=== [5/8] Restoring logical backup into isolated database ==="
 psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_FILE"
 
-echo "=== [6/7] Verifying invariants and ENABLE + FORCE RLS on ALL 6 security tables ==="
+echo "=== [6/8] Verifying invariants and ENABLE + FORCE RLS on ALL 6 security tables ==="
 psql "$RESTORE_URL" -v ON_ERROR_STOP=1 <<'EOF'
 DO $$
 DECLARE
@@ -136,7 +144,17 @@ BEGIN
 END $$;
 EOF
 
-echo "=== [7/7] Verifying application login role connection & Alice/Bob tenant isolation ==="
+echo "=== [7/8] Verifying restored schema_migrations and running migration verifier ==="
+# Explicitly verify all expected migration rows survived dump/restore
+node scripts/verify-migration-history.mjs "$RESTORE_URL"
+echo "Verified: Restored database contains full migration history matching repository files."
+
+# Verify migration runner accepts restored database (0 pending, checksums verified, no history mismatch)
+DATABASE_MAINTENANCE_URL="$RESTORE_URL" node scripts/migrate.mjs
+echo "Verified: Restored database is fully accepted by migration runner with 0 pending migrations."
+
+echo "=== [8/8] Verifying application login role connection & Alice/Bob tenant isolation ==="
+# Altering role password only happens after all test guards have verified disposable cluster
 psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "ALTER ROLE fintrack_app_login WITH PASSWORD 'ci-only-disposable-password';"
 APP_RESTORE_URL="$(echo "$RESTORE_URL" | sed -E 's/\/\/[^:]+:[^@]+@/\/\/fintrack_app_login:ci-only-disposable-password@/')"
 
