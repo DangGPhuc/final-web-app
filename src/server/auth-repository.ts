@@ -1,4 +1,5 @@
 import 'server-only';
+import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { ApiError } from './errors';
 import type { VerifiedIdentityClaims } from './oidc';
@@ -9,13 +10,14 @@ export async function recordOAuthState(
   c: PoolClient,
   params: {
     stateHash: string;
+    browserBindHash: string;
     provider: string;
     codeVerifier: string;
     nonceHash: string;
     redirectPath: string;
   }
 ): Promise<void> {
-  // Pre-auth rate limit / bound outstanding active states
+  // Pre-auth rate limit / bound outstanding active states globally (circuit breaker)
   const activeCountRes = await c.query<{ count: string }>(
     `SELECT count(*)::text AS count
      FROM fintrack.oauth_login_states
@@ -26,12 +28,22 @@ export async function recordOAuthState(
     throw new ApiError(429, 'AUTH_RATE_LIMITED');
   }
 
+  // Enforce 1 active OAuth login attempt per browser binder:
+  // Invalidate any previous active attempt for the same browser binder.
+  await c.query(
+    `UPDATE fintrack.oauth_login_states
+     SET consumed_at = now()
+     WHERE browser_bind_hash = $1 AND consumed_at IS NULL`,
+    [params.browserBindHash]
+  );
+
   await c.query(
     `INSERT INTO fintrack.oauth_login_states (
-       state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at
-     ) VALUES ($1, $2, $3, $4, $5, now() + interval '10 minutes')`,
+       state_hash, browser_bind_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, now() + interval '10 minutes')`,
     [
       params.stateHash,
+      params.browserBindHash,
       params.provider,
       params.codeVerifier,
       params.nonceHash,
@@ -42,7 +54,8 @@ export async function recordOAuthState(
 
 export async function consumeOAuthState(
   c: PoolClient,
-  stateHash: string
+  stateHash: string,
+  browserBindHash: string
 ): Promise<{
   provider: string;
   codeVerifier: string;
@@ -51,6 +64,7 @@ export async function consumeOAuthState(
 }> {
   const res = await c.query<{
     state_hash: string;
+    browser_bind_hash: string;
     provider: string;
     code_verifier: string;
     nonce_hash: string;
@@ -58,7 +72,7 @@ export async function consumeOAuthState(
     expires_at: Date;
     consumed_at: Date | null;
   }>(
-    `SELECT state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at, consumed_at
+    `SELECT state_hash, browser_bind_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at, consumed_at
      FROM fintrack.oauth_login_states
      WHERE state_hash = $1
      FOR UPDATE`,
@@ -70,6 +84,11 @@ export async function consumeOAuthState(
   }
 
   const record = res.rows[0];
+
+  // Callback must validate that both state and browser binder match the same row
+  if (record.browser_bind_hash !== browserBindHash) {
+    throw new ApiError(400, 'AUTH_STATE_INVALID');
+  }
 
   if (record.consumed_at !== null) {
     throw new ApiError(400, 'AUTH_STATE_REPLAYED');
@@ -99,7 +118,15 @@ export async function findOrCreateUserFromIdentity(
   c: PoolClient,
   claims: VerifiedIdentityClaims
 ): Promise<{ userId: string; isNewUser: boolean }> {
-  // 1. Look up existing identity strictly by (provider, provider_subject)
+  // 1. Transaction-scoped PostgreSQL advisory lock before lookup/create.
+  // Namespace: auth-identity:<provider>:<providerSubject>
+  const identityKey = `auth-identity:${claims.provider}:${claims.providerSubject}`;
+  await c.query(
+    `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+    [identityKey]
+  );
+
+  // 2. Look up existing identity strictly by (provider, provider_subject)
   // Invariant: Email alone NEVER auto-links accounts
   const existingRes = await c.query<{ user_id: string }>(
     `SELECT user_id
@@ -132,13 +159,14 @@ export async function findOrCreateUserFromIdentity(
     return { userId, isNewUser: false };
   }
 
-  // 2. New identity: Create new FinTrack user
-  const userRes = await c.query<{ id: string }>(
-    `INSERT INTO fintrack.users DEFAULT VALUES RETURNING id`
+  // 3. New identity: Generate UUID in trusted server code (no SELECT/RETURNING privileges needed on users table)
+  const newUserId = randomUUID();
+  await c.query(
+    `INSERT INTO fintrack.users (id) VALUES ($1)`,
+    [newUserId]
   );
-  const newUserId = userRes.rows[0].id;
 
-  // 3. Atomically attach identity; handle concurrent creation race condition gracefully
+  // 4. Atomically attach identity; handle concurrent creation race condition gracefully (defense-in-depth)
   const identityRes = await c.query<{ user_id: string }>(
     `INSERT INTO fintrack.auth_identities (
        user_id, provider, provider_subject, email, email_verified, display_name, avatar_url, last_login_at
