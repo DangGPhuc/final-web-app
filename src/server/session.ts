@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { ApiError } from './errors';
 
 export const SESSION_COOKIE = '__Host-fintrack_session';
+export const SESSION_MAX_AGE_SECONDS = 86400; // 24 hours absolute lifetime
 
 export function sessionHash(req: Request): string {
   const cookies = (req.headers.get('cookie') ?? '')
@@ -13,6 +14,21 @@ export function sessionHash(req: Request): string {
   const token = cookies[0].slice(SESSION_COOKIE.length + 1);
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new ApiError(401, 'UNAUTHENTICATED');
   return createHash('sha256').update(token).digest('hex');
+}
+
+export function safeExtractSessionHash(req: Request): string | null {
+  try {
+    const cookies = (req.headers.get('cookie') ?? '')
+      .split(';')
+      .map(v => v.trim())
+      .filter(v => v.startsWith(SESSION_COOKIE + '='));
+    if (cookies.length !== 1) return null;
+    const token = cookies[0].slice(SESSION_COOKIE.length + 1);
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+    return createHash('sha256').update(token).digest('hex');
+  } catch {
+    return null;
+  }
 }
 
 export async function authenticate(c: PoolClient, hash: string, options?: { forMutation?: boolean }): Promise<string> {
@@ -39,6 +55,47 @@ export async function revokeCurrentSession(c: PoolClient): Promise<void> {
   if (result.rowCount !== 1) {
     throw new ApiError(401, 'UNAUTHENTICATED');
   }
+}
+
+export async function revokeSessionByHash(c: PoolClient, hash: string): Promise<void> {
+  await c.query(
+    'UPDATE fintrack.sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL',
+    [hash]
+  );
+}
+
+export async function revokeExistingSessionIfPresent(c: PoolClient, req: Request): Promise<void> {
+  const existingHash = safeExtractSessionHash(req);
+  if (existingHash) {
+    await revokeSessionByHash(c, existingHash);
+  }
+}
+
+export function generateOpaqueSessionToken(): { rawToken: string; tokenHash: string } {
+  // 32 bytes (256 bits) of cryptographically secure randomness encoded as base64url (43 chars)
+  const rawToken = randomBytes(32).toString('base64url');
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  return { rawToken, tokenHash };
+}
+
+export async function issueSession(
+  c: PoolClient,
+  userId: string
+): Promise<{ rawToken: string; tokenHash: string; expiresAt: Date }> {
+  const { rawToken, tokenHash } = generateOpaqueSessionToken();
+  const res = await c.query<{ expires_at: Date }>(
+    `INSERT INTO fintrack.sessions (token_hash, user_id, expires_at)
+     VALUES ($1, $2, now() + interval '24 hours')
+     RETURNING expires_at`,
+    [tokenHash, userId]
+  );
+  const expiresAt = res.rows[0]?.expires_at ?? new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
+  return { rawToken, tokenHash, expiresAt };
+}
+
+export function createSessionCookieHeader(token: string, maxAge: number = SESSION_MAX_AGE_SECONDS): string {
+  // Enforce Secure, HttpOnly, SameSite=Lax, Path=/, and NO Domain attribute
+  return `${SESSION_COOKIE}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 }
 
 export function clearSessionCookieHeader(): string {
