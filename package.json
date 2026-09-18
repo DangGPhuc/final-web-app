@@ -8,7 +8,7 @@
     "start": "next start",
     "test": "vitest run",
     "typecheck": "next typegen && tsc --noEmit",
-    "test:backend": "vitest run tests/backend-security.test.ts tests/backend-db.test.ts tests/route-integration.test.ts",
+    "test:backend": "vitest run tests/backend-security.test.ts tests/backend-db.test.ts tests/route-integration.test.ts tests/auth-oidc.test.ts",
     "maintenance:backend": "node scripts/backend-maintenance.mjs",
     "verify:evidence": "node scripts/verify-evidence.mjs"
   },
@@ -19,6 +19,7 @@
     "exceljs": "^4.4.0",
     "lucide-react": "^1.16.0",
     "next": "^15.2.0",
+    "openid-client": "^6.8.8",
     "pg": "^8.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

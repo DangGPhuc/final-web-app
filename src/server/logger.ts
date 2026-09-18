@@ -7,11 +7,16 @@ export interface SecurityLogPayload {
     | 'SECURITY_BOLA_DENIED'
     | 'SECURITY_SESSION_REVOKED'
     | 'SECURITY_QUOTA_EXCEEDED'
-    | 'SECURITY_UNEXPECTED_FAILURE';
+    | 'SECURITY_UNEXPECTED_FAILURE'
+    | 'AUTH_LOGIN_SUCCEEDED'
+    | 'AUTH_LOGIN_FAILED'
+    | 'AUTH_SESSION_ISSUED'
+    | 'AUTH_SESSION_REVOKED';
   requestId: string;
   errorCode: string;
   timestamp: string;
   userId?: string;
+  provider?: string;
 }
 
 /**
@@ -29,6 +34,11 @@ export function logSecurityEvent(payload: SecurityLogPayload): void {
   // Only attach userId when already authenticated and safely known
   if (payload.userId) {
     sanitized.userId = payload.userId;
+  }
+
+  // Safe provider name (e.g. 'google')
+  if (payload.provider) {
+    sanitized.provider = payload.provider;
   }
 
   // Use stderr for operational warning/error logging
