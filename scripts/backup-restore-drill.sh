@@ -72,6 +72,12 @@ psql "$MAINT_URL" -v ON_ERROR_STOP=1 -c \
      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_app_login') THEN
        DROP OWNED BY fintrack_app_login; DROP ROLE fintrack_app_login;
      END IF;
+     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_auth_runtime') THEN
+       DROP OWNED BY fintrack_auth_runtime; DROP ROLE fintrack_auth_runtime;
+     END IF;
+     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_auth_login') THEN
+       DROP OWNED BY fintrack_auth_login; DROP ROLE fintrack_auth_login;
+     END IF;
    END \$\$;"
 
 # Initialize source database using PRODUCTION migration runner (not direct psql -f)
@@ -159,8 +165,8 @@ BEGIN
     RAISE EXCEPTION 'Ledger or audit count mismatch after restore! transfers: %, audits: %', v_transfer_count, v_audit_count;
   END IF;
 
-  -- Verify ALL 6 security tables have ENABLE and FORCE RLS
-  FOREACH v_t IN ARRAY ARRAY['sessions','wallets','transfers','idempotency','audit_events','rate_limits'] LOOP
+  -- Verify ALL 9 security tables have ENABLE and FORCE RLS
+  FOREACH v_t IN ARRAY ARRAY['sessions','wallets','transfers','idempotency','audit_events','rate_limits','users','auth_identities','oauth_login_states'] LOOP
     SELECT relrowsecurity, relforcerowsecurity INTO v_rls_enabled, v_rls_forced
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'fintrack' AND c.relname = v_t;

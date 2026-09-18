@@ -25,7 +25,12 @@ export async function runMaintenance(connectionString) {
     const roleCheck = await client.query('SELECT current_user AS name FROM pg_roles WHERE rolname=current_user');
     const currentUser = roleCheck.rows[0]?.name;
 
-    if (currentUser === 'fintrack_runtime' || currentUser === 'fintrack_app_login') {
+    if (
+      currentUser === 'fintrack_runtime' ||
+      currentUser === 'fintrack_app_login' ||
+      currentUser === 'fintrack_auth_runtime' ||
+      currentUser === 'fintrack_auth_login'
+    ) {
       throw new Error(
         `SECURITY VIOLATION: Maintenance cleanup cannot be executed by application role "${currentUser}". Operator credentials required.`
       );
@@ -52,9 +57,20 @@ export async function runMaintenance(connectionString) {
       `[backend-maintenance] Purged ${idempotencyRes.rowCount} idempotency record(s) beyond 8-day retention.`
     );
 
+    // 3. Purge expired OAuth login states and consumed states older than 30-day retention
+    const oauthStatesRes = await client.query(`
+      DELETE FROM fintrack.oauth_login_states
+      WHERE (consumed_at IS NOT NULL AND consumed_at < now() - interval '30 days')
+         OR (consumed_at IS NULL AND expires_at < now());
+    `);
+    console.log(
+      `[backend-maintenance] Purged ${oauthStatesRes.rowCount} stale OAuth login state(s).`
+    );
+
     return {
       purgedSessions: sessionRes.rowCount,
       purgedIdempotency: idempotencyRes.rowCount,
+      purgedOAuthStates: oauthStatesRes.rowCount,
     };
   } finally {
     await client.end();

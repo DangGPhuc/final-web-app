@@ -28,7 +28,12 @@ const SAFE_DISPOSABLE_PATTERN = /^([a-z0-9_]+_(test|ci)|fintrack_test|fintrack_r
 const DISALLOWED_NAMES = ['fintrack', 'postgres', 'production', 'master', 'template0', 'template1'];
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 const APPROVED_ADMIN_DBS = new Set(['postgres', 'template0', 'template1']);
-const APP_ROLE_NAMES = new Set(['fintrack_runtime', 'fintrack_app_login']);
+const APP_ROLE_NAMES = new Set([
+  'fintrack_runtime',
+  'fintrack_app_login',
+  'fintrack_auth_runtime',
+  'fintrack_auth_login',
+]);
 
 export function quoteIdentifier(ident) {
   if (!ident || typeof ident !== 'string' || !STRICT_IDENTIFIER_REGEX.test(ident)) {
