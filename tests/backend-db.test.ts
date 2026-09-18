@@ -15,7 +15,7 @@ import {
 import { transaction, resetPoolForTesting } from '../src/server/database';
 import { runMaintenance } from '../scripts/backend-maintenance.mjs';
 import { runMigrations, computeFileChecksum, prepareMigrationForExecution } from '../scripts/migrate.mjs';
-import { validateTestDbUrls, verifyDedicatedCluster, quoteIdentifier } from '../scripts/validate-test-db.mjs';
+import { validateTestDbUrls, verifyDedicatedCluster, quoteIdentifier, validateMaintenanceUrl, validateMaintenanceRole } from '../scripts/validate-test-db.mjs';
 import { verifyMigrationHistory } from '../scripts/verify-migration-history.mjs';
 import { assertSafeTestDatabaseUrl } from './helpers/test-db-guard';
 import { handle } from '../src/server/http';
@@ -1666,5 +1666,274 @@ describe('PostgreSQL schema and security hardening integration', () => {
       if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
       else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
     }
+  });
+});
+
+// =============================================================================
+// Tests CA–CK: Operator credential + destructive tooling safety closure
+// =============================================================================
+
+describe('operator credential and maintenance URL safety (CA–CK)', () => {
+  const sourceUrl = 'postgres://user:pw@127.0.0.1:5432/fintrack_test';
+
+  function withDestructive<T>(fn: () => T): T {
+    const prev = process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    process.env.ALLOW_DESTRUCTIVE_DB_TESTS = 'true';
+    try {
+      return fn();
+    } finally {
+      if (prev !== undefined) process.env.ALLOW_DESTRUCTIVE_DB_TESTS = prev;
+      else delete process.env.ALLOW_DESTRUCTIVE_DB_TESTS;
+    }
+  }
+
+  it('(CA) missing DATABASE_MAINTENANCE_URL fails before any destructive work', () => {
+    expect(() => validateMaintenanceUrl(undefined as unknown as string, sourceUrl))
+      .toThrow(/DATABASE_MAINTENANCE_URL is required/);
+    expect(() => validateMaintenanceUrl('', sourceUrl))
+      .toThrow(/DATABASE_MAINTENANCE_URL is required/);
+    expect(() => validateMaintenanceUrl(null as unknown as string, sourceUrl))
+      .toThrow(/DATABASE_MAINTENANCE_URL is required/);
+  });
+
+  it('(CB) maintenance host differs from source cluster -> MAINTENANCE_CLUSTER_MISMATCH', () => {
+    // Source URL targets 127.0.0.1; maintenance URL targets localhost (different hostname string)
+    // Both are loopback but hostname comparison fails -> MAINTENANCE_CLUSTER_MISMATCH
+    const source127 = 'postgres://user:pw@127.0.0.1:5432/fintrack_test';
+    expect(() =>
+      validateMaintenanceUrl(
+        'postgres://admin:pw@localhost:5432/postgres',
+        source127
+      )
+    ).toThrow(/MAINTENANCE_CLUSTER_MISMATCH/);
+    // Non-loopback maintenance host: rejected with REFUSING DESTRUCTIVE ACTION (loopback check first)
+    // This is correct behavior — a remote maintenance host is also rejected before reaching mismatch
+    expect(() =>
+      validateMaintenanceUrl(
+        'postgres://admin:pw@192.168.1.10:5432/postgres',
+        source127
+      )
+    ).toThrow(/REFUSING DESTRUCTIVE ACTION/);
+  });
+
+  it('(CC) maintenance port differs from source cluster -> MAINTENANCE_CLUSTER_MISMATCH', () => {
+    expect(() =>
+      validateMaintenanceUrl(
+        'postgres://admin:pw@127.0.0.1:5433/postgres',
+        sourceUrl
+      )
+    ).toThrow(/MAINTENANCE_CLUSTER_MISMATCH/);
+  });
+
+  it('(CD) maintenance database is not an approved admin database -> rejected', () => {
+    // Production-like or application databases must be rejected
+    expect(() =>
+      validateMaintenanceUrl(
+        'postgres://admin:pw@127.0.0.1:5432/fintrack',
+        sourceUrl
+      )
+    ).toThrow(/not an approved admin database/);
+    expect(() =>
+      validateMaintenanceUrl(
+        'postgres://admin:pw@127.0.0.1:5432/fintrack_test',
+        sourceUrl
+      )
+    ).toThrow(/not an approved admin database/);
+    expect(() =>
+      validateMaintenanceUrl(
+        'postgres://admin:pw@127.0.0.1:5432/production',
+        sourceUrl
+      )
+    ).toThrow(/not an approved admin database/);
+  });
+
+  it.skipIf(!process.env.DATABASE_MAINTENANCE_URL)(
+    '(CE) app runtime/login role cannot act as maintenance identity',
+    async () => {
+      const maintUrl = process.env.DATABASE_MAINTENANCE_URL!;
+      const baseUrl = process.env.DATABASE_TEST_URL!;
+
+      // Connect via base URL (which uses the app cluster) to check fintrack_app_login restriction
+      // We need a client that would be connected as fintrack_app_login
+      // Since we cannot easily impersonate fintrack_app_login here, we test validateMaintenanceRole
+      // with a mock pg.Client whose query returns a forbidden role name.
+      const mockClientRuntime = {
+        query: async () => ({ rows: [{ name: 'fintrack_runtime' }] }),
+      };
+      await expect(
+        validateMaintenanceRole(mockClientRuntime as unknown as Parameters<typeof validateMaintenanceRole>[0])
+      ).rejects.toThrow(/fintrack_runtime.*application identity/);
+
+      const mockClientLogin = {
+        query: async () => ({ rows: [{ name: 'fintrack_app_login' }] }),
+      };
+      await expect(
+        validateMaintenanceRole(mockClientLogin as unknown as Parameters<typeof validateMaintenanceRole>[0])
+      ).rejects.toThrow(/fintrack_app_login.*application identity/);
+    }
+  );
+
+  it('(CE) validateMaintenanceRole rejects fintrack application identities (offline mock)', async () => {
+    const mockRuntime = {
+      query: async () => ({ rows: [{ name: 'fintrack_runtime' }] }),
+    };
+    await expect(
+      validateMaintenanceRole(mockRuntime as unknown as Parameters<typeof validateMaintenanceRole>[0])
+    ).rejects.toThrow(/fintrack_runtime.*application identity/);
+
+    const mockLogin = {
+      query: async () => ({ rows: [{ name: 'fintrack_app_login' }] }),
+    };
+    await expect(
+      validateMaintenanceRole(mockLogin as unknown as Parameters<typeof validateMaintenanceRole>[0])
+    ).rejects.toThrow(/fintrack_app_login.*application identity/);
+
+    // Non-application role is accepted
+    const mockOperator = {
+      query: async () => ({ rows: [{ name: 'postgres' }] }),
+    };
+    const roleName = await validateMaintenanceRole(mockOperator as unknown as Parameters<typeof validateMaintenanceRole>[0]);
+    expect(roleName).toBe('postgres');
+  });
+
+  it('(CF) valid localhost source/restore/maintenance triplet succeeds', () => {
+    withDestructive(() => {
+      // validateTestDbUrls accepts a valid loopback pair
+      const result = validateTestDbUrls(
+        'postgres://postgres:pw@127.0.0.1:5432/fintrack_test',
+        'postgres://postgres:pw@127.0.0.1:5432/fintrack_restore'
+      );
+      expect(result.sourceDb).toBe('fintrack_test');
+      expect(result.restoreDb).toBe('fintrack_restore');
+    });
+
+    // validateMaintenanceUrl accepts maintenance targeting same cluster admin db
+    const maintResult = validateMaintenanceUrl(
+      'postgres://admin:pw@127.0.0.1:5432/postgres',
+      sourceUrl
+    );
+    expect(maintResult.maintDb).toBe('postgres');
+    expect(maintResult.maintHost).toBe('127.0.0.1');
+    expect(maintResult.maintPort).toBe('5432');
+  });
+
+  it('(CG) URL-encoded database path remains rejected (path encoding is always rejected)', () => {
+    withDestructive(() => {
+      // Encoded path segments in source database name are rejected
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/%66intrack_test',
+          'postgres://user:pw@127.0.0.1:5432/fintrack_restore'
+        )
+      ).toThrow(/suspicious percent-encoding/);
+
+      // Also rejected in restore db path
+      expect(() =>
+        validateTestDbUrls(
+          'postgres://user:pw@127.0.0.1:5432/fintrack_test',
+          'postgres://user:pw@127.0.0.1:5432/fintrack%5frestore'
+        )
+      ).toThrow(/suspicious percent-encoding/);
+
+      // Encoded path in maintenance URL is rejected
+      expect(() =>
+        validateMaintenanceUrl(
+          'postgres://admin:pw@127.0.0.1:5432/%70ostgres',
+          sourceUrl
+        )
+      ).toThrow(/suspicious percent-encoding/);
+    });
+  });
+
+  it('(CH) URL-encoded password in source URL is accepted (credential encoding is valid)', () => {
+    withDestructive(() => {
+      // p%40ssword is a valid URL-encoded password (@ sign encoded)
+      // The database path /fintrack_test has no encoding, so it should pass
+      const result = validateTestDbUrls(
+        'postgres://user:p%40ssword@127.0.0.1:5432/fintrack_test',
+        'postgres://user:p%40ssword@127.0.0.1:5432/fintrack_restore'
+      );
+      expect(result.sourceDb).toBe('fintrack_test');
+      expect(result.restoreDb).toBe('fintrack_restore');
+    });
+
+    // Encoded password in maintenance URL is also accepted
+    const maintResult = validateMaintenanceUrl(
+      'postgres://admin:p%40ssword@127.0.0.1:5432/postgres',
+      sourceUrl
+    );
+    expect(maintResult.maintDb).toBe('postgres');
+  });
+
+  it('(CI) remote source/restore host is rejected unconditionally (no opt-in gate exists)', () => {
+    withDestructive(() => {
+      // Setting ALLOW_REMOTE_DESTRUCTIVE_DB_TESTS no longer unlocks remote hosts
+      const prevRemote = process.env.ALLOW_REMOTE_DESTRUCTIVE_DB_TESTS;
+      process.env.ALLOW_REMOTE_DESTRUCTIVE_DB_TESTS = 'I_UNDERSTAND_THIS_MAY_DESTROY_A_REMOTE_CLUSTER';
+      try {
+        expect(() =>
+          validateTestDbUrls(
+            'postgres://user:pw@prod.example.com:5432/fintrack_test',
+            'postgres://user:pw@prod.example.com:5432/fintrack_restore'
+          )
+        ).toThrow(/Remote source host.*is forbidden/);
+
+        expect(() =>
+          validateTestDbUrls(
+            'postgres://user:pw@127.0.0.1:5432/fintrack_test',
+            'postgres://user:pw@prod.example.com:5432/fintrack_restore'
+          )
+        ).toThrow(/Remote restore host.*is forbidden/);
+      } finally {
+        if (prevRemote !== undefined) process.env.ALLOW_REMOTE_DESTRUCTIVE_DB_TESTS = prevRemote;
+        else delete process.env.ALLOW_REMOTE_DESTRUCTIVE_DB_TESTS;
+      }
+    });
+  });
+
+  it('(CJ) backup drill script uses MAINTENANCE URL for all cluster-global operations', () => {
+    // Structural proof: parse the drill script text to verify the safety invariant.
+    // The pattern "${BASE_URL%/*}/postgres" is the forbidden derivation.
+    // All cluster-global psql calls must use $MAINT_URL.
+    const drillScript = readFileSync('scripts/backup-restore-drill.sh', 'utf-8');
+
+    // The forbidden pattern must be absent
+    expect(drillScript).not.toMatch(/\$\{BASE_URL%\/\*\}/);
+    expect(drillScript).not.toMatch(/\$\{DATABASE_TEST_URL%\/\*\}/);
+
+    // MAINTENANCE_URL must be required before any connection
+    expect(drillScript).toMatch(/DATABASE_MAINTENANCE_URL.*is strictly required/);
+
+    // Cluster-global DDL must use MAINT_URL
+    // DROP DATABASE / CREATE DATABASE must not use BASE_URL
+    const dropDbMatches = [...drillScript.matchAll(/psql\s+"?\$[{(]?[A-Z_]+[})]?"?\s+.*DROP DATABASE/g)];
+    for (const match of dropDbMatches) {
+      expect(match[0]).toContain('MAINT_URL');
+    }
+    const createDbMatches = [...drillScript.matchAll(/psql\s+"?\$[{(]?[A-Z_]+[})]?"?\s+.*CREATE DATABASE/g)];
+    for (const match of createDbMatches) {
+      expect(match[0]).toContain('MAINT_URL');
+    }
+    // ALTER ROLE must not use BASE_URL
+    const alterRoleMatches = [...drillScript.matchAll(/psql\s+"?\$[{(]?[A-Z_]+[})]?"?\s+.*ALTER ROLE/g)];
+    for (const match of alterRoleMatches) {
+      expect(match[0]).toContain('MAINT_URL');
+    }
+  });
+
+  it('(CK) obsolete session-maintenance.mjs delegates to backend-maintenance.mjs (no independent implementation)', () => {
+    const sessionMaint = readFileSync('scripts/session-maintenance.mjs', 'utf-8');
+    const backendMaint = readFileSync('scripts/backend-maintenance.mjs', 'utf-8');
+
+    // session-maintenance.mjs must import from backend-maintenance.mjs
+    expect(sessionMaint).toMatch(/from ['"]\.\/backend-maintenance\.mjs['"]/);
+
+    // session-maintenance.mjs must NOT contain independent SQL DELETE statements
+    expect(sessionMaint).not.toMatch(/DELETE FROM fintrack\.sessions/);
+    expect(sessionMaint).not.toMatch(/DELETE FROM fintrack\.idempotency/);
+
+    // The canonical implementation is in backend-maintenance.mjs
+    expect(backendMaint).toMatch(/DELETE FROM fintrack\.sessions/);
+    expect(backendMaint).toMatch(/DELETE FROM fintrack\.idempotency/);
   });
 });

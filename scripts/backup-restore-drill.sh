@@ -8,18 +8,28 @@ set -euo pipefail
 # cluster-wide role definitions (pg_roles), cluster recovery requires bootstrapping application roles
 # (fintrack_runtime, fintrack_app_login) via version-controlled migration/bootstrap logic.
 
-# Safety Guard: Ensure test safety environment flag and disposable database names
+# Safety Guard: Require all three explicit URLs. No derivation from DATABASE_TEST_URL.
 if [ -z "${DATABASE_TEST_URL:-}" ] || [ -z "${DATABASE_RESTORE_URL:-}" ]; then
   echo "ERROR: DATABASE_TEST_URL and DATABASE_RESTORE_URL are strictly required." >&2
   echo "Destructive scripts refuse execution without explicit test database URLs." >&2
   exit 1
 fi
 
-# Strict safety validation and dedicated cluster verification before any destructive command
-node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL" "${DATABASE_MAINTENANCE_URL:-${DATABASE_TEST_URL%/*}/postgres}"
+if [ -z "${DATABASE_MAINTENANCE_URL:-}" ]; then
+  echo "ERROR: DATABASE_MAINTENANCE_URL is strictly required for cluster-global operations." >&2
+  echo "Do NOT derive a maintenance connection from DATABASE_TEST_URL." >&2
+  echo "Provide an explicit admin/operator URL targeting the same loopback cluster." >&2
+  exit 1
+fi
+
+# Strict safety validation:
+# - Source, restore, and maintenance URLs validated and bound to the same loopback cluster.
+# - Cluster enumerated via maintenance URL; rejected if unexpected non-template databases exist.
+node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL" "$DATABASE_MAINTENANCE_URL"
 
 BASE_URL="$DATABASE_TEST_URL"
 RESTORE_URL="$DATABASE_RESTORE_URL"
+MAINT_URL="$DATABASE_MAINTENANCE_URL"
 RESTORE_DB="$(node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL" --print-restore-name)"
 RESTORE_DB_QUOTED="$(node scripts/validate-test-db.mjs "$DATABASE_TEST_URL" "$DATABASE_RESTORE_URL" --print-quoted-restore-name)"
 
@@ -31,7 +41,8 @@ BACKUP_FILE="$(mktemp -t fintrack_logical_backup_XXXXXX.sql)"
 cleanup() {
   echo "=== [Cleanup] Removing temporary backup file & cleaning disposable databases ==="
   rm -f "$BACKUP_FILE"
-  psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};" -c "DROP DATABASE IF EXISTS \"fintrack_upgrade_test\";" >/dev/null 2>&1 || true
+  # Use MAINTENANCE URL for cluster-global database drop
+  psql "$MAINT_URL" -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};" -c "DROP DATABASE IF EXISTS \"fintrack_upgrade_test\";" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -44,10 +55,27 @@ fi
 echo "Verified: Temporary backup file created with owner-only permissions (0600)."
 
 echo "=== [1/8] Initializing source database via production migration runner ==="
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};" -c "DROP DATABASE IF EXISTS \"fintrack_upgrade_test\";"
-psql "$BASE_URL" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS fintrack CASCADE; DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime') THEN DROP OWNED BY fintrack_runtime; DROP ROLE fintrack_runtime; END IF; IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_app_login') THEN DROP OWNED BY fintrack_app_login; DROP ROLE fintrack_app_login; END IF; END \$\$;"
+# All cluster-global DDL goes through MAINTENANCE URL (never derived from BASE_URL)
+psql "$MAINT_URL" -v ON_ERROR_STOP=1 \
+  -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};" \
+  -c "DROP DATABASE IF EXISTS \"fintrack_upgrade_test\";"
+
+psql "$BASE_URL" -v ON_ERROR_STOP=1 -c \
+  "DROP SCHEMA IF EXISTS fintrack CASCADE;"
+
+# Cluster-global role cleanup must use MAINTENANCE URL (roles may own objects across databases)
+psql "$MAINT_URL" -v ON_ERROR_STOP=1 -c \
+  "DO \$\$ BEGIN
+     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_runtime') THEN
+       DROP OWNED BY fintrack_runtime; DROP ROLE fintrack_runtime;
+     END IF;
+     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fintrack_app_login') THEN
+       DROP OWNED BY fintrack_app_login; DROP ROLE fintrack_app_login;
+     END IF;
+   END \$\$;"
 
 # Initialize source database using PRODUCTION migration runner (not direct psql -f)
+# DATABASE_MAINTENANCE_URL here is the operator connection TO the source application database.
 DATABASE_MAINTENANCE_URL="$BASE_URL" node scripts/migrate.mjs
 
 # Verify source schema_migrations table has all expected repository migration checksums
@@ -94,8 +122,9 @@ fi
 echo "Verified: Logical backup does NOT carry cluster-global roles (bootstrap required on new clusters)."
 
 echo "=== [4/8] Creating fresh isolated restore database ==="
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};"
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${RESTORE_DB_QUOTED};"
+# Cluster-global CREATE/DROP DATABASE must go through MAINTENANCE URL
+psql "$MAINT_URL" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ${RESTORE_DB_QUOTED};"
+psql "$MAINT_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${RESTORE_DB_QUOTED};"
 
 echo "=== [5/8] Restoring logical backup into isolated database ==="
 psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_FILE"
@@ -151,12 +180,13 @@ node scripts/verify-migration-history.mjs "$RESTORE_URL"
 echo "Verified: Restored database contains full migration history matching repository files."
 
 # Verify migration runner accepts restored database (0 pending, checksums verified, no history mismatch)
+# DATABASE_MAINTENANCE_URL here is the operator connection TO the restored application database.
 DATABASE_MAINTENANCE_URL="$RESTORE_URL" node scripts/migrate.mjs
 echo "Verified: Restored database is fully accepted by migration runner with 0 pending migrations."
 
 echo "=== [8/8] Verifying application login role connection & Alice/Bob tenant isolation ==="
-# Altering role password only happens after all test guards have verified disposable cluster
-psql "${BASE_URL%/*}/postgres" -v ON_ERROR_STOP=1 -c "ALTER ROLE fintrack_app_login WITH PASSWORD 'ci-only-disposable-password';"
+# ALTER ROLE is a cluster-global operation — must use MAINTENANCE URL
+psql "$MAINT_URL" -v ON_ERROR_STOP=1 -c "ALTER ROLE fintrack_app_login WITH PASSWORD 'ci-only-disposable-password';"
 APP_RESTORE_URL="$(echo "$RESTORE_URL" | sed -E 's/\/\/[^:]+:[^@]+@/\/\/fintrack_app_login:ci-only-disposable-password@/')"
 
 psql "$APP_RESTORE_URL" -v ON_ERROR_STOP=1 <<'EOF'

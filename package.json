@@ -9,6 +9,7 @@
     "test": "vitest run",
     "typecheck": "next typegen && tsc --noEmit",
     "test:backend": "vitest run tests/backend-security.test.ts tests/backend-db.test.ts tests/route-integration.test.ts",
+    "maintenance:backend": "node scripts/backend-maintenance.mjs",
     "verify:evidence": "node scripts/verify-evidence.mjs"
   },
   "dependencies": {

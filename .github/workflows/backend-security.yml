@@ -42,6 +42,8 @@ jobs:
         run: npm run test:backend
         env:
           DATABASE_TEST_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
+          DATABASE_RESTORE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_restore
+          DATABASE_MAINTENANCE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/postgres
           ALLOW_DESTRUCTIVE_DB_TESTS: "true"
       - name: Next.js Production Build
         run: npm run build
@@ -54,4 +56,5 @@ jobs:
         env:
           DATABASE_TEST_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
           DATABASE_RESTORE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_restore
+          DATABASE_MAINTENANCE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/postgres
           ALLOW_DESTRUCTIVE_DB_TESTS: "true"
