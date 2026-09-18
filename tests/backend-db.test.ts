@@ -79,11 +79,13 @@ beforeAll(async () => {
     await realClient.query("ALTER ROLE fintrack_app_login WITH PASSWORD 'test-login-password'");
   } else {
     db = new PGlite();
-    // Apply migrations 001, 002, 003, and 004
+    // Apply migrations 001 through 006
     await db.exec(readFileSync('db/migrations/001_backend_foundation.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/002_backend_security_hardening.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/003_backend_deployment_closure.sql', 'utf8'));
     await db.exec(readFileSync('db/migrations/004_runtime_role_hardening.sql', 'utf8'));
+    await db.exec(readFileSync('db/migrations/005_session_revocation_hardening.sql', 'utf8'));
+    await db.exec(readFileSync('db/migrations/006_auth_identity.sql', 'utf8'));
   }
 
   await db.query('INSERT INTO fintrack.users(id) VALUES($1),($2)', [alice, bob]);
@@ -679,7 +681,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
       CREATE OR REPLACE FUNCTION fintrack.fail_on_atomicity_test()
       RETURNS trigger AS $$
       BEGIN
-        IF NEW.version = '006_atomicity_probe.sql' THEN
+        IF NEW.version = '007_atomicity_probe.sql' THEN
           RAISE EXCEPTION 'SIMULATED_CHECKSUM_FAILURE_TRIGGERED';
         END IF;
         RETURN NEW;
@@ -692,7 +694,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
       FOR EACH ROW EXECUTE FUNCTION fintrack.fail_on_atomicity_test();
     `);
 
-    const probeFile = 'db/migrations/006_atomicity_probe.sql';
+    const probeFile = 'db/migrations/007_atomicity_probe.sql';
     writeFileSync(probeFile, 'CREATE TABLE fintrack.atomicity_probe_table (id int);');
 
     try {
@@ -707,9 +709,9 @@ describe('PostgreSQL schema and security hardening integration', () => {
       `);
       expect(tableCheck.rows[0].exists).toBe(false);
 
-      // And schema_migrations does not have entry for 006
+      // And schema_migrations does not have entry for 007
       const migCheck = await adminClient.query(
-        "SELECT 1 FROM fintrack.schema_migrations WHERE version = '006_atomicity_probe.sql'"
+        "SELECT 1 FROM fintrack.schema_migrations WHERE version = '007_atomicity_probe.sql'"
       );
       expect(migCheck.rows.length).toBe(0);
     } finally {
@@ -1052,13 +1054,14 @@ describe('PostgreSQL schema and security hardening integration', () => {
 
   it.skipIf(!realUrl)('(AZ) backup source contains complete migration checksum history', async () => {
     const history = await verifyMigrationHistory(realUrl!);
-    expect(history.total).toBe(5);
+    expect(history.total).toBe(6);
     expect(history.versions).toEqual([
       '001_backend_foundation.sql',
       '002_backend_security_hardening.sql',
       '003_backend_deployment_closure.sql',
       '004_runtime_role_hardening.sql',
       '005_session_revocation_hardening.sql',
+      '006_auth_identity.sql',
     ]);
   });
 
@@ -1078,7 +1081,7 @@ describe('PostgreSQL schema and security hardening integration', () => {
 
       // Verify all rows in schema_migrations survived restore
       const history = await verifyMigrationHistory(restoreUrl);
-      expect(history.total).toBe(5);
+      expect(history.total).toBe(6);
 
       // Verify migration runner accepts restored DB with 0 pending
       const res = await runMigrations(restoreUrl);
@@ -1935,5 +1938,131 @@ describe('operator credential and maintenance URL safety (CA–CK)', () => {
     // The canonical implementation is in backend-maintenance.mjs
     expect(backendMaint).toMatch(/DELETE FROM fintrack\.sessions/);
     expect(backendMaint).toMatch(/DELETE FROM fintrack\.idempotency/);
+  });
+
+  it('(CL / AUTH-29) fintrack_auth_runtime has zero access to wallets (cannot read or write)', async () => {
+    // 1. Read permission denied
+    await db.exec('BEGIN; SET LOCAL ROLE fintrack_auth_runtime');
+    try {
+      await expect(db.query('SELECT * FROM fintrack.wallets')).rejects.toThrow(/permission denied/i);
+    } finally {
+      await db.exec('ROLLBACK');
+    }
+
+    // 2. Write permission denied
+    await db.exec('BEGIN; SET LOCAL ROLE fintrack_auth_runtime');
+    try {
+      await expect(
+        db.query(
+          "INSERT INTO fintrack.wallets (id, user_id, name, type, opening_balance, balance) VALUES (gen_random_uuid(), gen_random_uuid(), 'Test', 'BANK', 1000, 1000)"
+        )
+      ).rejects.toThrow(/permission denied/i);
+    } finally {
+      await db.exec('ROLLBACK');
+    }
+  });
+
+  it('(CM / AUTH-30) fintrack_auth_runtime cannot create transfers', async () => {
+    await db.exec('BEGIN; SET LOCAL ROLE fintrack_auth_runtime');
+    try {
+      await expect(
+        db.query(
+          'INSERT INTO fintrack.transfers (id, user_id, from_wallet_id, to_wallet_id, amount, fee) VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 100, 0)'
+        )
+      ).rejects.toThrow(/permission denied/i);
+    } finally {
+      await db.exec('ROLLBACK');
+    }
+  });
+
+  it('(CN / AUTH-31) fintrack_runtime cannot create auth identities (read only for current session)', async () => {
+    await db.exec('BEGIN; SET LOCAL ROLE fintrack_runtime');
+    try {
+      await expect(
+        db.query(
+          "INSERT INTO fintrack.auth_identities (user_id, provider, provider_subject) VALUES (gen_random_uuid(), 'google', 'unauthorized-sub')"
+        )
+      ).rejects.toThrow(/permission denied/i);
+    } finally {
+      await db.exec('ROLLBACK');
+    }
+  });
+
+  it('(CO / AUTH-32) fintrack_runtime cannot issue sessions (INSERT denied)', async () => {
+    await db.exec('BEGIN; SET LOCAL ROLE fintrack_runtime');
+    try {
+      const dummyHash = createHash('sha256').update('unauthorized-session-token-43chars').digest('hex');
+      await expect(
+        db.query(
+          "INSERT INTO fintrack.sessions (token_hash, user_id, expires_at) VALUES ($1, gen_random_uuid(), now() + interval '1 hour')",
+          [dummyHash]
+        )
+      ).rejects.toThrow(/permission denied/i);
+    } finally {
+      await db.exec('ROLLBACK');
+    }
+  });
+
+  it('(CP / AUTH-33) OAuth state maintenance removes stale rows (expired and consumed retention)', async () => {
+    const expiredHash = createHash('sha256').update('expired-state-key-probe').digest('hex');
+    const validHash = createHash('sha256').update('valid-state-key-probe').digest('hex');
+    const oldConsumedHash = createHash('sha256').update('old-consumed-state-key-probe').digest('hex');
+    const recentConsumedHash = createHash('sha256').update('recent-consumed-state-key-probe').digest('hex');
+
+    // Insert expired unconsumed state
+    await db.query(
+      `INSERT INTO fintrack.oauth_login_states (state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at)
+       VALUES ($1, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() - interval '10 minutes')`,
+      [expiredHash, expiredHash]
+    );
+
+    // Insert active valid state
+    await db.query(
+      `INSERT INTO fintrack.oauth_login_states (state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at)
+       VALUES ($1, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() + interval '10 minutes')`,
+      [validHash, validHash]
+    );
+
+    // Insert old consumed state (> 30 days)
+    await db.query(
+      `INSERT INTO fintrack.oauth_login_states (state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at, consumed_at)
+       VALUES ($1, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() - interval '40 days', now() - interval '35 days')`,
+      [oldConsumedHash, oldConsumedHash]
+    );
+
+    // Insert recently consumed state (< 30 days)
+    await db.query(
+      `INSERT INTO fintrack.oauth_login_states (state_hash, provider, code_verifier, nonce_hash, redirect_path, expires_at, consumed_at)
+       VALUES ($1, 'google', 'verifier43charslongminlengthneeded12345678901', $2, '/', now() + interval '10 minutes', now() - interval '1 hour')`,
+      [recentConsumedHash, recentConsumedHash]
+    );
+
+    // Perform maintenance cleanup query
+    await db.query(`
+      DELETE FROM fintrack.oauth_login_states
+      WHERE (consumed_at IS NOT NULL AND consumed_at < now() - interval '30 days')
+         OR (consumed_at IS NULL AND expires_at < now());
+    `);
+
+    const remaining = await db.query<{ state_hash: string }>('SELECT state_hash FROM fintrack.oauth_login_states');
+    const remainingHashes = remaining.rows.map((r) => r.state_hash);
+
+    expect(remainingHashes).not.toContain(expiredHash);
+    expect(remainingHashes).not.toContain(oldConsumedHash);
+    expect(remainingHashes).toContain(validHash);
+    expect(remainingHashes).toContain(recentConsumedHash);
+  });
+
+  it('(CQ / AUTH-34) fintrack_auth_login has zero direct table DML privileges on fintrack schema', async () => {
+    // Assert session role has NO direct table DML grants on fintrack schema
+    const privRes = await db.query<{ count: string }>(`
+      SELECT count(*)::text AS count
+      FROM pg_class tbl
+      JOIN pg_namespace n ON n.oid = tbl.relnamespace
+      CROSS JOIN LATERAL aclexplode(COALESCE(tbl.relacl, acldefault('r', tbl.relowner))) a
+      WHERE n.nspname = 'fintrack' AND a.grantee = 'fintrack_auth_login'::regrole
+        AND a.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+    `);
+    expect(parseInt(privRes.rows[0]?.count ?? '0', 10)).toBe(0);
   });
 });

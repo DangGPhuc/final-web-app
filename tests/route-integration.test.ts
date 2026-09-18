@@ -2,6 +2,7 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { Client } from 'pg';
 import { createHash } from 'node:crypto';
 import { POST as logoutPost } from '../src/app/api/v2/session/logout/route';
+import { GET as meGet } from '../src/app/api/v2/session/me/route';
 import { POST as walletPost, GET as walletGet } from '../src/app/api/v2/wallets/route';
 import { POST as transferPost } from '../src/app/api/v2/transfers/route';
 import { resetPoolForTesting } from '../src/server/database';
@@ -46,6 +47,8 @@ describe.skipIf(!shouldRun)('Next.js API route integration (wallet, transfer, lo
     await adminClient.query('DROP SCHEMA IF EXISTS fintrack CASCADE');
     try { await adminClient.query('DROP ROLE IF EXISTS fintrack_runtime'); } catch {}
     try { await adminClient.query('DROP ROLE IF EXISTS fintrack_app_login'); } catch {}
+    try { await adminClient.query('DROP ROLE IF EXISTS fintrack_auth_runtime'); } catch {}
+    try { await adminClient.query('DROP ROLE IF EXISTS fintrack_auth_login'); } catch {}
 
     await runMigrations(ADMIN_URL);
 
@@ -513,5 +516,36 @@ describe.skipIf(!shouldRun)('Next.js API route integration (wallet, transfer, lo
     } finally {
       delete process.env.MAX_TRANSFERS_PER_USER_PER_DAY;
     }
+  });
+
+  it('(SESSION-ME-01) authenticated /api/v2/session/me returns safe profile fields only', async () => {
+    const req = new Request('https://fintrack.example/api/v2/session/me', {
+      method: 'GET',
+      headers: {
+        cookie: aliceCookie,
+      },
+    });
+    const res = await meGet(req);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.data).toHaveProperty('userId', aliceId);
+    expect(body.data).not.toHaveProperty('tokenHash');
+    expect(body.data).not.toHaveProperty('rawToken');
+  });
+
+  it('(SESSION-ME-02) unauthenticated /api/v2/session/me returns 401 UNAUTHENTICATED', async () => {
+    const req = new Request('https://fintrack.example/api/v2/session/me', {
+      method: 'GET',
+    });
+    const res = await meGet(req);
+    expect(res.status).toBe(401);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+
+    const body = await res.json();
+    expect(body.success).toBe(false);
+    expect(body.code).toBe('UNAUTHENTICATED');
   });
 });
