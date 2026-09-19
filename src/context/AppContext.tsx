@@ -1,617 +1,505 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import {
-  Wallet,
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import type {
   Transaction,
-  Category,
-  Budget,
-  RecurringBill,
-  SavingsGoal,
-  IncomeBudgetPlanner,
-  FinancialSummary,
-  FilterPeriod,
+  Fund,
+  FundStatus,
+  MonthlySnapshot,
+  MerchantRule,
+  PaperTradeScenario,
+  AppSettings,
+  AppTab,
+  EmailConnectionState,
+  ToastNotification,
+  AppDataSnapshot,
 } from '@/types';
 import {
-  INITIAL_WALLETS,
-  INITIAL_TRANSACTIONS,
-  INITIAL_BUDGETS,
-  INITIAL_BILLS,
-  INITIAL_GOALS,
-  INITIAL_PLANNER,
+  calculateBalance,
+  calculateMonthlyCashflow,
+  calculateAllFundStatuses,
+  calculateMonthlySnapshot,
+  getCurrentYearMonth,
+  generateId,
+  classifyTransaction,
+  type MonthlyCashflow,
+} from '@/lib/finance/calculations';
+import { LocalStorageAdapter } from '@/lib/storage/local-storage-adapter';
+import {
+  loadSnapshot,
+  saveSnapshot,
+  createEmptySnapshot,
+  SCHEMA_VERSION,
+} from '@/lib/storage/persistence';
+import {
+  DEMO_FUNDS,
+  DEMO_TRANSACTIONS,
+  DEMO_MONTHLY_SNAPSHOTS,
+  DEMO_MERCHANT_RULES,
+  DEMO_PAPER_TRADES,
 } from '@/lib/mock-data';
-import { DEFAULT_CATEGORIES } from '@/lib/constants';
-import { calculateFinancialSummary } from '@/lib/utils';
 
 interface AppContextType {
-  wallets: Wallet[];
+  // State
   transactions: Transaction[];
-  categories: Category[];
-  budgets: Budget[];
-  bills: RecurringBill[];
-  goals: SavingsGoal[];
-  planner: IncomeBudgetPlanner;
-  currentMonth: string;
-  activeTab: string;
-  setActiveTab: (tab: string) => void;
+  funds: Fund[];
+  monthlySnapshots: MonthlySnapshot[];
+  merchantRules: MerchantRule[];
+  paperTrades: PaperTradeScenario[];
+  settings: AppSettings;
+  emailConnection: EmailConnectionState;
+  activeTab: AppTab;
+  selectedMonth: string;
   quickAddOpen: boolean;
+  toast: ToastNotification | null;
+
+  // Derived metrics
+  balance: number;
+  currentMonthCashflow: MonthlyCashflow;
+  selectedMonthCashflow: MonthlyCashflow;
+  fundStatuses: FundStatus[];
+  needsReviewTransactions: Transaction[];
+
+  // Navigation & UI
+  setActiveTab: (tab: AppTab) => void;
+  setSelectedMonth: (month: string) => void;
   setQuickAddOpen: (open: boolean) => void;
-  quickAddDefaultType: 'EXPENSE' | 'INCOME' | 'TRANSFER';
-  openQuickAdd: (type?: 'EXPENSE' | 'INCOME' | 'TRANSFER') => void;
-  financialSummary: FinancialSummary;
+  showToast: (text: string, type?: 'success' | 'error' | 'info') => void;
 
-  // Transactions
-  addTransaction: (tx: Omit<Transaction, 'id' | 'createdAt'>) => void;
-  editTransaction: (id: string, tx: Partial<Transaction>) => void;
+  // Transaction Operations
+  addTransaction: (tx: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => void;
+  editTransaction: (id: string, updates: Partial<Transaction>) => void;
   deleteTransaction: (id: string) => void;
+  approveTransaction: (id: string) => void;
+  ignoreTransaction: (id: string) => void;
 
-  // Wallets
-  addWallet: (wallet: Omit<Wallet, 'id' | 'createdAt'>) => void;
-  editWallet: (id: string, wallet: Partial<Wallet>) => void;
-  deleteWallet: (id: string) => void;
-  transferFunds: (fromWalletId: string, toWalletId: string, amount: number, fee: number, note?: string) => void;
+  // Fund Operations
+  createFund: (fund: Omit<Fund, 'id' | 'createdAt' | 'active'>) => void;
+  editFund: (id: string, updates: Partial<Fund>) => void;
+  deleteFund: (id: string) => void;
 
-  // Budgets
-  addBudget: (budget: Omit<Budget, 'id'>) => void;
-  editBudget: (id: string, budget: Partial<Budget>) => void;
-  deleteBudget: (id: string) => void;
-  updatePlanner: (planner: IncomeBudgetPlanner) => void;
+  // Month Snapshot / Close Operations
+  closeMonth: (month: string) => void;
 
-  // Bills
-  addBill: (bill: Omit<RecurringBill, 'id'>) => void;
-  editBill: (id: string, bill: Partial<RecurringBill>) => void;
-  deleteBill: (id: string) => void;
-  payBill: (billId: string, walletId: string) => void;
+  // Merchant Rules
+  addMerchantRule: (rule: Omit<MerchantRule, 'id' | 'createdAt'>) => void;
+  deleteMerchantRule: (id: string) => void;
 
-  // Goals
-  addGoal: (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => void;
-  editGoal: (id: string, goal: Partial<SavingsGoal>) => void;
-  deleteGoal: (id: string) => void;
-  depositToGoal: (goalId: string, amount: number, walletId: string, note?: string) => void;
-  withdrawFromGoal: (goalId: string, amount: number, walletId: string, note?: string) => void;
+  // Paper Trading Operations
+  savePaperTrade: (trade: Omit<PaperTradeScenario, 'id' | 'createdAt'>) => void;
+  deletePaperTrade: (id: string) => void;
 
-  // Backup & Reset
-  resetToDefaultData: () => void;
-  clearAllData: () => void;
-  exportDatabaseJSON: () => void;
-  importDatabaseJSON: (jsonStr: string) => boolean;
+  // Settings & Sync
+  updateSettings: (settings: Partial<AppSettings>) => void;
+  syncEmail: (useDemoIfUnconfigured?: boolean) => Promise<void>;
+  seedDemoData: () => void;
+  clearData: () => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'quan_ly_chi_tieu_data_v2';
+const storageAdapter = new LocalStorageAdapter();
 
-export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [mounted, setMounted] = useState(false);
-  const [wallets, setWallets] = useState<Wallet[]>(INITIAL_WALLETS);
-  const [transactions, setTransactions] = useState<Transaction[]>(INITIAL_TRANSACTIONS);
-  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
-  const [budgets, setBudgets] = useState<Budget[]>(INITIAL_BUDGETS);
-  const [bills, setBills] = useState<RecurringBill[]>(INITIAL_BILLS);
-  const [goals, setGoals] = useState<SavingsGoal[]>(INITIAL_GOALS);
-  const [planner, setPlanner] = useState<IncomeBudgetPlanner>(INITIAL_PLANNER);
-  const [currentMonth, setCurrentMonth] = useState<string>('2026-09');
+export function AppProvider({ children }: { children: React.ReactNode }) {
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [activeTab, setActiveTab] = useState<AppTab>('dashboard');
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => getCurrentYearMonth());
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [toast, setToast] = useState<ToastNotification | null>(null);
 
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
-  const [quickAddOpen, setQuickAddOpen] = useState<boolean>(false);
-  const [quickAddDefaultType, setQuickAddDefaultType] = useState<'EXPENSE' | 'INCOME' | 'TRANSFER'>('EXPENSE');
+  // Core domain data
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [funds, setFunds] = useState<Fund[]>([]);
+  const [monthlySnapshots, setMonthlySnapshots] = useState<MonthlySnapshot[]>([]);
+  const [merchantRules, setMerchantRules] = useState<MerchantRule[]>([]);
+  const [paperTrades, setPaperTrades] = useState<PaperTradeScenario[]>([]);
+  const [settings, setSettings] = useState<AppSettings>({
+    openingBalance: 0,
+    defaultCurrency: 'VND',
+    trustedSenders: ['vietcombank@vcb.com.vn', 'alert@techcombank.com.vn'],
+    autoPostMinConfidence: 0.8,
+  });
 
-  // Load from local storage
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.wallets) setWallets(parsed.wallets);
-        if (parsed.transactions) setTransactions(parsed.transactions);
-        if (parsed.categories) setCategories(parsed.categories);
-        if (parsed.budgets) setBudgets(parsed.budgets);
-        if (parsed.bills) setBills(parsed.bills);
-        if (parsed.goals) setGoals(parsed.goals);
-        if (parsed.planner) setPlanner(parsed.planner);
-      }
-    } catch (e) {
-      console.error('Failed to load storage data:', e);
-    }
-    setMounted(true);
+  // Email connection state
+  const [emailConnection, setEmailConnection] = useState<EmailConnectionState>({
+    provider: 'gmail',
+    connected: false,
+    syncStatus: 'idle',
+  });
+
+  const showToast = useCallback((text: string, type: 'success' | 'error' | 'info' = 'info') => {
+    const id = generateId();
+    setToast({ id, text, type });
+    setTimeout(() => {
+      setToast(prev => (prev?.id === id ? null : prev));
+    }, 3500);
   }, []);
 
-  // Save to local storage
+  // Initialize from storage adapter on mount
   useEffect(() => {
-    if (!mounted) return;
-    try {
-      const payload = {
-        wallets,
-        transactions,
-        categories,
-        budgets,
-        bills,
-        goals,
-        planner,
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch (e) {
-      console.error('Failed to save to localStorage:', e);
+    const result = loadSnapshot(storageAdapter);
+    if (result.status === 'OK') {
+      setTransactions(result.data.transactions);
+      setFunds(result.data.funds);
+      setMonthlySnapshots(result.data.monthlySnapshots);
+      setMerchantRules(result.data.merchantRules);
+      setPaperTrades(result.data.paperTrades);
+      setSettings(result.data.settings);
+    } else if (result.status === 'MIGRATION') {
+      showToast(result.message, 'info');
     }
-  }, [mounted, wallets, transactions, categories, budgets, bills, goals, planner]);
+    setIsLoaded(true);
 
-  const openQuickAdd = (type: 'EXPENSE' | 'INCOME' | 'TRANSFER' = 'EXPENSE') => {
-    setQuickAddDefaultType(type);
-    setQuickAddOpen(true);
-  };
-
-  // Financial summary
-  const financialSummary = calculateFinancialSummary(wallets, transactions, currentMonth);
-
-  // Add Transaction
-  const addTransaction = (tx: Omit<Transaction, 'id' | 'createdAt'>) => {
-    const id = `tx-${Date.now()}`;
-    const createdAt = new Date().toISOString();
-    const newTx: Transaction = {
-      ...tx,
-      id,
-      createdAt,
-    };
-
-    // Update wallet balances
-    setWallets((prevWallets) =>
-      prevWallets.map((w) => {
-        if (tx.type === 'EXPENSE' && w.id === tx.walletId) {
-          return { ...w, balance: w.balance - tx.amount };
-        }
-        if (tx.type === 'INCOME' && w.id === tx.walletId) {
-          return { ...w, balance: w.balance + tx.amount };
-        }
-        if (tx.type === 'TRANSFER') {
-          if (w.id === tx.walletId) {
-            return { ...w, balance: w.balance - (tx.amount + (tx.fee || 0)) };
-          }
-          if (w.id === tx.toWalletId) {
-            return { ...w, balance: w.balance + tx.amount };
-          }
-        }
-        return w;
+    // Check email status
+    fetch('/api/email/status')
+      .then(res => res.json())
+      .then(data => {
+        setEmailConnection(prev => ({
+          ...prev,
+          connected: data.connected ?? false,
+          email: data.email,
+        }));
       })
-    );
+      .catch(() => {
+        // Network or offline, keep default
+      });
+  }, [showToast]);
 
-    setTransactions((prev) => [newTx, ...prev]);
-  };
-
-  // Edit Transaction
-  const editTransaction = (id: string, updated: Partial<Transaction>) => {
-    const oldTx = transactions.find((t) => t.id === id);
-    if (!oldTx) return;
-
-    // Rollback old transaction on wallets
-    let adjustedWallets = [...wallets];
-    adjustedWallets = adjustedWallets.map((w) => {
-      if (oldTx.type === 'EXPENSE' && w.id === oldTx.walletId) {
-        return { ...w, balance: w.balance + oldTx.amount };
-      }
-      if (oldTx.type === 'INCOME' && w.id === oldTx.walletId) {
-        return { ...w, balance: w.balance - oldTx.amount };
-      }
-      if (oldTx.type === 'TRANSFER') {
-        if (w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance + (oldTx.amount + (oldTx.fee || 0)) };
-        }
-        if (w.id === oldTx.toWalletId) {
-          return { ...w, balance: w.balance - oldTx.amount };
-        }
-      }
-      return w;
-    });
-
-    const newTx: Transaction = { ...oldTx, ...updated };
-
-    // Apply new transaction to wallets
-    adjustedWallets = adjustedWallets.map((w) => {
-      if (newTx.type === 'EXPENSE' && w.id === newTx.walletId) {
-        return { ...w, balance: w.balance - newTx.amount };
-      }
-      if (newTx.type === 'INCOME' && w.id === newTx.walletId) {
-        return { ...w, balance: w.balance + newTx.amount };
-      }
-      if (newTx.type === 'TRANSFER') {
-        if (w.id === newTx.walletId) {
-          return { ...w, balance: w.balance - (newTx.amount + (newTx.fee || 0)) };
-        }
-        if (w.id === newTx.toWalletId) {
-          return { ...w, balance: w.balance + newTx.amount };
-        }
-      }
-      return w;
-    });
-
-    setWallets(adjustedWallets);
-    setTransactions((prev) => prev.map((t) => (t.id === id ? newTx : t)));
-  };
-
-  // Delete Transaction
-  const deleteTransaction = (id: string) => {
-    const oldTx = transactions.find((t) => t.id === id);
-    if (!oldTx) return;
-
-    // Rollback wallet balance
-    setWallets((prevWallets) =>
-      prevWallets.map((w) => {
-        if (oldTx.type === 'EXPENSE' && w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance + oldTx.amount };
-        }
-        if (oldTx.type === 'INCOME' && w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance - oldTx.amount };
-        }
-        if (oldTx.type === 'TRANSFER') {
-          if (w.id === oldTx.walletId) {
-            return { ...w, balance: w.balance + (oldTx.amount + (oldTx.fee || 0)) };
-          }
-          if (w.id === oldTx.toWalletId) {
-            return { ...w, balance: w.balance - oldTx.amount };
-          }
-        }
-        return w;
-      })
-    );
-
-    setTransactions((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  // Wallets
-  const addWallet = (wallet: Omit<Wallet, 'id' | 'createdAt'>) => {
-    const newWallet: Wallet = {
-      ...wallet,
-      id: `wal-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-    };
-    setWallets((prev) => [...prev, newWallet]);
-  };
-
-  const editWallet = (id: string, updated: Partial<Wallet>) => {
-    setWallets((prev) => prev.map((w) => (w.id === id ? { ...w, ...updated } : w)));
-  };
-
-  const deleteWallet = (id: string) => {
-    setWallets((prev) => prev.filter((w) => w.id !== id));
-  };
-
-  const transferFunds = (
-    fromWalletId: string,
-    toWalletId: string,
-    amount: number,
-    fee: number,
-    note?: string
-  ) => {
-    const fromW = wallets.find((w) => w.id === fromWalletId);
-    const toW = wallets.find((w) => w.id === toWalletId);
-
-    addTransaction({
-      type: 'TRANSFER',
-      amount,
-      fee,
-      walletId: fromWalletId,
-      walletName: fromW?.name,
-      toWalletId,
-      toWalletName: toW?.name,
-      date: new Date().toISOString(),
-      note: note || `Chuyển khoản từ ${fromW?.name || 'Ví'} sang ${toW?.name || 'Ví'}`,
-      tags: ['Chuyển khoản nội bộ'],
-    });
-  };
-
-  // Budgets
-  const addBudget = (budget: Omit<Budget, 'id'>) => {
-    const newBudget: Budget = {
-      ...budget,
-      id: `bud-${Date.now()}`,
-    };
-    setBudgets((prev) => [...prev, newBudget]);
-  };
-
-  const editBudget = (id: string, updated: Partial<Budget>) => {
-    setBudgets((prev) => prev.map((b) => (b.id === id ? { ...b, ...updated } : b)));
-  };
-
-  const deleteBudget = (id: string) => {
-    setBudgets((prev) => prev.filter((b) => b.id !== id));
-  };
-
-  const updatePlanner = (newPlanner: IncomeBudgetPlanner) => {
-    setPlanner(newPlanner);
-  };
-
-  // Bills
-  const addBill = (bill: Omit<RecurringBill, 'id'>) => {
-    const newBill: RecurringBill = {
-      ...bill,
-      id: `bill-${Date.now()}`,
-    };
-    setBills((prev) => [...prev, newBill]);
-  };
-
-  const editBill = (id: string, updated: Partial<RecurringBill>) => {
-    setBills((prev) => prev.map((b) => (b.id === id ? { ...b, ...updated } : b)));
-  };
-
-  const deleteBill = (id: string) => {
-    setBills((prev) => prev.filter((b) => b.id !== id));
-  };
-
-  const payBill = (billId: string, walletId: string) => {
-    const bill = bills.find((b) => b.id === billId);
-    if (!bill) return;
-
-    const targetWallet = wallets.find((w) => w.id === walletId) || wallets[0];
-    const billCategory = categories.find((c) => c.id === bill.categoryId);
-
-    // 1. Mark bill as PAID
-    setBills((prev) =>
-      prev.map((b) =>
-        b.id === billId
-          ? {
-              ...b,
-              status: 'PAID',
-              lastPaidDate: new Date().toISOString().split('T')[0],
-              walletId,
-            }
-          : b
-      )
-    );
-
-    // 2. Automatically record transaction
-    addTransaction({
-      type: 'EXPENSE',
-      amount: bill.amount,
-      categoryId: bill.categoryId,
-      categoryName: billCategory?.name || bill.categoryName || 'Hóa đơn',
-      walletId: targetWallet.id,
-      walletName: targetWallet.name,
-      date: new Date().toISOString(),
-      note: `Thanh toán hóa đơn: ${bill.name}`,
-      tags: ['Hóa đơn định kỳ'],
-    });
-  };
-
-  // Goals
-  const addGoal = (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => {
-    const newGoal: SavingsGoal = {
-      ...goal,
-      id: `goal-${Date.now()}`,
-      history: [],
-      createdAt: new Date().toISOString(),
-    };
-    setGoals((prev) => [...prev, newGoal]);
-  };
-
-  const editGoal = (id: string, updated: Partial<SavingsGoal>) => {
-    setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, ...updated } : g)));
-  };
-
-  const deleteGoal = (id: string) => {
-    setGoals((prev) => prev.filter((g) => g.id !== id));
-  };
-
-  const depositToGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
-    const goal = goals.find((g) => g.id === goalId);
-    const wallet = wallets.find((w) => w.id === walletId);
-    if (!goal || !wallet) return;
-
-    // Deduct from wallet
-    setWallets((prev) =>
-      prev.map((w) => (w.id === walletId ? { ...w, balance: w.balance - amount } : w))
-    );
-
-    // Add to goal
-    const newHistoryItem = {
-      id: `gh-${Date.now()}`,
-      date: new Date().toISOString().split('T')[0],
-      amount,
-      type: 'DEPOSIT' as const,
-      walletId,
-      note: note || `Nạp từ ${wallet.name}`,
-    };
-
-    setGoals((prev) =>
-      prev.map((g) =>
-        g.id === goalId
-          ? {
-              ...g,
-              currentAmount: g.currentAmount + amount,
-              history: [newHistoryItem, ...g.history],
-            }
-          : g
-      )
-    );
-
-    // Log transaction
-    addTransaction({
-      type: 'EXPENSE',
-      amount,
-      categoryId: 'cat-invest-exp',
-      categoryName: 'Đầu tư & Tích lũy',
-      walletId,
-      walletName: wallet.name,
-      date: new Date().toISOString(),
-      note: `Tích lũy vào hũ: ${goal.name}`,
-      tags: ['Tích lũy mục tiêu'],
-    });
-  };
-
-  const withdrawFromGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
-    const goal = goals.find((g) => g.id === goalId);
-    const wallet = wallets.find((w) => w.id === walletId);
-    if (!goal || !wallet) return;
-
-    // Add back to wallet
-    setWallets((prev) =>
-      prev.map((w) => (w.id === walletId ? { ...w, balance: w.balance + amount } : w))
-    );
-
-    // Deduct from goal
-    const newHistoryItem = {
-      id: `gh-${Date.now()}`,
-      date: new Date().toISOString().split('T')[0],
-      amount,
-      type: 'WITHDRAW' as const,
-      walletId,
-      note: note || `Rút về ${wallet.name}`,
-    };
-
-    setGoals((prev) =>
-      prev.map((g) =>
-        g.id === goalId
-          ? {
-              ...g,
-              currentAmount: Math.max(0, g.currentAmount - amount),
-              history: [newHistoryItem, ...g.history],
-            }
-          : g
-      )
-    );
-
-    // Log income transaction
-    addTransaction({
-      type: 'INCOME',
-      amount,
-      categoryId: 'cat-other-inc',
-      categoryName: 'Thu nhập khác',
-      walletId,
-      walletName: wallet.name,
-      date: new Date().toISOString(),
-      note: `Rút từ hũ tích lũy: ${goal.name}`,
-      tags: ['Rút hũ tiết kiệm'],
-    });
-  };
-
-  // Backup & Reset
-  const resetToDefaultData = () => {
-    setWallets(INITIAL_WALLETS);
-    setTransactions(INITIAL_TRANSACTIONS);
-    setCategories(DEFAULT_CATEGORIES);
-    setBudgets(INITIAL_BUDGETS);
-    setBills(INITIAL_BILLS);
-    setGoals(INITIAL_GOALS);
-    setPlanner(INITIAL_PLANNER);
-    localStorage.removeItem(STORAGE_KEY);
-  };
-
-  const clearAllData = () => {
-    setWallets([
-      {
-        id: 'wal-cash-empty',
-        name: 'Tiền mặt',
-        type: 'CASH',
-        balance: 0,
-        initialBalance: 0,
-        currency: 'VND',
-        color: '#10b981',
-        icon: 'Banknote',
-        createdAt: new Date().toISOString(),
-      },
-    ]);
-    setTransactions([]);
-    setBudgets([]);
-    setBills([]);
-    setGoals([]);
-    setPlanner({
-      monthlyIncome: 0,
-      needsPercent: 50,
-      wantsPercent: 30,
-      savingsPercent: 20,
-    });
-  };
-
-  const exportDatabaseJSON = () => {
-    const data = {
-      wallets,
-      transactions,
-      categories,
-      budgets,
-      bills,
-      goals,
-      planner,
+  // Persist snapshot whenever domain data changes
+  useEffect(() => {
+    if (!isLoaded) return;
+    const snapshot: AppDataSnapshot = {
+      schemaVersion: SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
-      version: '2.0',
+      transactions,
+      funds,
+      monthlySnapshots,
+      merchantRules,
+      emailParserRules: [],
+      paperTrades,
+      settings,
     };
-    const jsonStr = JSON.stringify(data, null, 2);
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `quan-ly-chi-tieu-backup-${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
+    saveSnapshot(storageAdapter, snapshot);
+  }, [isLoaded, transactions, funds, monthlySnapshots, merchantRules, paperTrades, settings]);
 
-  const importDatabaseJSON = (jsonStr: string): boolean => {
-    try {
-      const data = JSON.parse(jsonStr);
-      if (data.wallets && Array.isArray(data.wallets)) setWallets(data.wallets);
-      if (data.transactions && Array.isArray(data.transactions)) setTransactions(data.transactions);
-      if (data.categories && Array.isArray(data.categories)) setCategories(data.categories);
-      if (data.budgets && Array.isArray(data.budgets)) setBudgets(data.budgets);
-      if (data.bills && Array.isArray(data.bills)) setBills(data.bills);
-      if (data.goals && Array.isArray(data.goals)) setGoals(data.goals);
-      if (data.planner) setPlanner(data.planner);
-      return true;
-    } catch (e) {
-      console.error('Import failed:', e);
-      return false;
+  // Pure derived calculations
+  const balance = useMemo(() => {
+    return calculateBalance(settings.openingBalance, transactions);
+  }, [settings.openingBalance, transactions]);
+
+  const currentMonthStr = useMemo(() => getCurrentYearMonth(), []);
+
+  const currentMonthCashflow = useMemo(() => {
+    return calculateMonthlyCashflow(transactions, currentMonthStr);
+  }, [transactions, currentMonthStr]);
+
+  const selectedMonthCashflow = useMemo(() => {
+    return calculateMonthlyCashflow(transactions, selectedMonth);
+  }, [transactions, selectedMonth]);
+
+  const fundStatuses = useMemo(() => {
+    return calculateAllFundStatuses(funds, transactions, selectedMonth);
+  }, [funds, transactions, selectedMonth]);
+
+  const needsReviewTransactions = useMemo(() => {
+    return transactions.filter(tx => tx.status === 'NEEDS_REVIEW');
+  }, [transactions]);
+
+  // Transaction Operations
+  const addTransaction = useCallback((txData: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const now = new Date().toISOString();
+    // Check auto classification if category is not set or default
+    let assignedCategory = txData.category;
+    let assignedFundId = txData.fundId;
+
+    if (!assignedCategory || assignedCategory === 'Khác') {
+      const classified = classifyTransaction(txData.description, txData.counterparty, merchantRules);
+      assignedCategory = classified.category;
+      if (!assignedFundId && classified.fundId) {
+        assignedFundId = classified.fundId;
+      }
     }
-  };
 
-  return (
-    <AppContext.Provider
-      value={{
-        wallets,
-        transactions,
-        categories,
-        budgets,
-        bills,
-        goals,
-        planner,
-        currentMonth,
-        activeTab,
-        setActiveTab,
-        quickAddOpen,
-        setQuickAddOpen,
-        quickAddDefaultType,
-        openQuickAdd,
-        financialSummary,
-        addTransaction,
-        editTransaction,
-        deleteTransaction,
-        addWallet,
-        editWallet,
-        deleteWallet,
-        transferFunds,
-        addBudget,
-        editBudget,
-        deleteBudget,
-        updatePlanner,
-        addBill,
-        editBill,
-        deleteBill,
-        payBill,
-        addGoal,
-        editGoal,
-        deleteGoal,
-        depositToGoal,
-        withdrawFromGoal,
-        resetToDefaultData,
-        clearAllData,
-        exportDatabaseJSON,
-        importDatabaseJSON,
-      }}
-    >
-      {children}
-    </AppContext.Provider>
+    const newTx: Transaction = {
+      ...txData,
+      id: generateId(),
+      category: assignedCategory,
+      fundId: assignedFundId,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    setTransactions(prev => [newTx, ...prev]);
+    showToast('Đã ghi nhận giao dịch', 'success');
+  }, [merchantRules, showToast]);
+
+  const editTransaction = useCallback((id: string, updates: Partial<Transaction>) => {
+    setTransactions(prev =>
+      prev.map(tx => {
+        if (tx.id !== id) return tx;
+        return {
+          ...tx,
+          ...updates,
+          updatedAt: new Date().toISOString(),
+        };
+      })
+    );
+    showToast('Đã cập nhật giao dịch', 'success');
+  }, [showToast]);
+
+  const deleteTransaction = useCallback((id: string) => {
+    setTransactions(prev => prev.filter(tx => tx.id !== id));
+    showToast('Đã xóa giao dịch', 'info');
+  }, [showToast]);
+
+  const approveTransaction = useCallback((id: string) => {
+    editTransaction(id, { status: 'POSTED' });
+    showToast('Đã duyệt giao dịch', 'success');
+  }, [editTransaction, showToast]);
+
+  const ignoreTransaction = useCallback((id: string) => {
+    editTransaction(id, { status: 'IGNORED' });
+    showToast('Đã bỏ qua giao dịch email', 'info');
+  }, [editTransaction, showToast]);
+
+  // Fund Operations
+  const createFund = useCallback((fundData: Omit<Fund, 'id' | 'createdAt' | 'active'>) => {
+    const newFund: Fund = {
+      ...fundData,
+      id: generateId(),
+      createdAt: new Date().toISOString(),
+      active: true,
+    };
+    setFunds(prev => [...prev, newFund]);
+    showToast(`Đã tạo quỹ "${newFund.name}"`, 'success');
+  }, [showToast]);
+
+  const editFund = useCallback((id: string, updates: Partial<Fund>) => {
+    setFunds(prev =>
+      prev.map(f => (f.id === id ? { ...f, ...updates } : f))
+    );
+    showToast('Đã cập nhật quỹ', 'success');
+  }, [showToast]);
+
+  const deleteFund = useCallback((id: string) => {
+    setFunds(prev => prev.filter(f => f.id !== id));
+    showToast('Đã xóa quỹ', 'info');
+  }, [showToast]);
+
+  // Close month snapshot
+  const closeMonth = useCallback((month: string) => {
+    const snapshot = calculateMonthlySnapshot(month, transactions, funds);
+    setMonthlySnapshots(prev => {
+      const filtered = prev.filter(s => s.month !== month);
+      return [...filtered, snapshot].sort((a, b) => a.month.localeCompare(b.month));
+    });
+    showToast(`Đã chốt sổ và lưu báo cáo tháng ${month}`, 'success');
+  }, [transactions, funds, showToast]);
+
+  // Merchant Rules
+  const addMerchantRule = useCallback((ruleData: Omit<MerchantRule, 'id' | 'createdAt'>) => {
+    const newRule: MerchantRule = {
+      ...ruleData,
+      id: generateId(),
+      createdAt: new Date().toISOString(),
+    };
+    setMerchantRules(prev => [...prev, newRule]);
+    showToast(`Đã lưu quy tắc cho từ khóa "${newRule.pattern}"`, 'success');
+  }, [showToast]);
+
+  const deleteMerchantRule = useCallback((id: string) => {
+    setMerchantRules(prev => prev.filter(r => r.id !== id));
+    showToast('Đã xóa quy tắc', 'info');
+  }, [showToast]);
+
+  // Paper Trading Operations
+  const savePaperTrade = useCallback((tradeData: Omit<PaperTradeScenario, 'id' | 'createdAt'>) => {
+    const newTrade: PaperTradeScenario = {
+      ...tradeData,
+      id: generateId(),
+      createdAt: new Date().toISOString(),
+    };
+    setPaperTrades(prev => [newTrade, ...prev]);
+    showToast('Đã lưu kịch bản mô phỏng giao dịch', 'success');
+  }, [showToast]);
+
+  const deletePaperTrade = useCallback((id: string) => {
+    setPaperTrades(prev => prev.filter(t => t.id !== id));
+    showToast('Đã xóa kịch bản mô phỏng', 'info');
+  }, [showToast]);
+
+  // Settings
+  const updateSettings = useCallback((newSettings: Partial<AppSettings>) => {
+    setSettings(prev => ({ ...prev, ...newSettings }));
+    showToast('Đã lưu cài đặt', 'success');
+  }, [showToast]);
+
+  // Email Sync via API
+  const syncEmail = useCallback(async (useDemoIfUnconfigured = true) => {
+    setEmailConnection(prev => ({ ...prev, syncStatus: 'syncing', syncError: undefined }));
+    try {
+      const res = await fetch('/api/email/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          existingTransactions: transactions,
+          merchantRules,
+          trustedSenders: settings.trustedSenders,
+          autoPostMinConfidence: settings.autoPostMinConfidence,
+          useDemoIfUnconfigured,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Lỗi đồng bộ email');
+      }
+
+      if (data.transactions?.length > 0) {
+        setTransactions(prev => [...data.transactions, ...prev]);
+        showToast(
+          `Đồng bộ hoàn tất: +${data.stats.totalNew} giao dịch mới${
+            data.stats.totalNeedsReview > 0 ? ` (${data.stats.totalNeedsReview} cần duyệt)` : ''
+          }`,
+          'success'
+        );
+      } else {
+        showToast('Không có giao dịch mới từ email', 'info');
+      }
+
+      setEmailConnection(prev => ({
+        ...prev,
+        syncStatus: 'idle',
+        lastSyncAt: data.syncedAt || new Date().toISOString(),
+      }));
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Lỗi đồng bộ email';
+      setEmailConnection(prev => ({
+        ...prev,
+        syncStatus: 'error',
+        syncError: errorMsg,
+      }));
+      showToast(errorMsg, 'error');
+    }
+  }, [transactions, merchantRules, settings, showToast]);
+
+  // Seed Demo Data for development / evaluation
+  const seedDemoData = useCallback(() => {
+    setFunds(DEMO_FUNDS);
+    setTransactions(DEMO_TRANSACTIONS);
+    setMonthlySnapshots(DEMO_MONTHLY_SNAPSHOTS);
+    setMerchantRules(DEMO_MERCHANT_RULES);
+    setPaperTrades(DEMO_PAPER_TRADES);
+    setSettings({
+      openingBalance: 5000000,
+      defaultCurrency: 'VND',
+      trustedSenders: ['vietcombank@vcb.com.vn', 'alert@techcombank.com.vn'],
+      autoPostMinConfidence: 0.8,
+    });
+    showToast('Đã nạp dữ liệu mẫu thành công', 'success');
+  }, [showToast]);
+
+  // Clear data
+  const clearData = useCallback(() => {
+    const empty = createEmptySnapshot();
+    setTransactions(empty.transactions);
+    setFunds(empty.funds);
+    setMonthlySnapshots(empty.monthlySnapshots);
+    setMerchantRules(empty.merchantRules);
+    setPaperTrades(empty.paperTrades);
+    setSettings(empty.settings);
+    storageAdapter.removeItem('personal_finance_v3');
+    showToast('Đã xóa toàn bộ dữ liệu cục bộ', 'info');
+  }, [showToast]);
+
+  const value = useMemo(
+    () => ({
+      transactions,
+      funds,
+      monthlySnapshots,
+      merchantRules,
+      paperTrades,
+      settings,
+      emailConnection,
+      activeTab,
+      selectedMonth,
+      quickAddOpen,
+      toast,
+      balance,
+      currentMonthCashflow,
+      selectedMonthCashflow,
+      fundStatuses,
+      needsReviewTransactions,
+      setActiveTab,
+      setSelectedMonth,
+      setQuickAddOpen,
+      showToast,
+      addTransaction,
+      editTransaction,
+      deleteTransaction,
+      approveTransaction,
+      ignoreTransaction,
+      createFund,
+      editFund,
+      deleteFund,
+      closeMonth,
+      addMerchantRule,
+      deleteMerchantRule,
+      savePaperTrade,
+      deletePaperTrade,
+      updateSettings,
+      syncEmail,
+      seedDemoData,
+      clearData,
+    }),
+    [
+      transactions,
+      funds,
+      monthlySnapshots,
+      merchantRules,
+      paperTrades,
+      settings,
+      emailConnection,
+      activeTab,
+      selectedMonth,
+      quickAddOpen,
+      toast,
+      balance,
+      currentMonthCashflow,
+      selectedMonthCashflow,
+      fundStatuses,
+      needsReviewTransactions,
+      setActiveTab,
+      setSelectedMonth,
+      setQuickAddOpen,
+      showToast,
+      addTransaction,
+      editTransaction,
+      deleteTransaction,
+      approveTransaction,
+      ignoreTransaction,
+      createFund,
+      editFund,
+      deleteFund,
+      closeMonth,
+      addMerchantRule,
+      deleteMerchantRule,
+      savePaperTrade,
+      deletePaperTrade,
+      updateSettings,
+      syncEmail,
+      seedDemoData,
+      clearData,
+    ]
   );
-};
 
-export const useApp = () => {
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}
+
+export function useApp(): AppContextType {
   const context = useContext(AppContext);
   if (!context) {
     throw new Error('useApp must be used within an AppProvider');
   }
   return context;
-};
+}

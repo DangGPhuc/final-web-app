@@ -8,6 +8,7 @@ node_modules/
 out/
 dist/
 build/
+*.tsbuildinfo
 
 # Logs
 npm-debug.log*
@@ -15,10 +16,16 @@ yarn-debug.log*
 yarn-error.log*
 *.log
 
-# Environment
+# Environment & Secrets
 .env
 .env.local
 .env.*.local
+*.credentials.json
+*token*.json
+*.token
+email-dump*
+*.dump
+personal-financial-export*
 
 # OS
 .DS_Store
