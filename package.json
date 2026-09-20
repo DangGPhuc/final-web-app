@@ -15,7 +15,7 @@
     "prisma:studio:real": "node scripts/run-prisma-real-env.mjs studio"
   },
   "dependencies": {
-    "@prisma/client": "^6.19.3",
+    "@prisma/client": "^7.10.0",
     "clsx": "^2.1.1",
     "exceljs": "^4.4.0",
     "lucide-react": "^1.16.0",
