@@ -23,6 +23,7 @@ import {
   type MonthlyCashflow,
 } from '@/lib/finance/calculations';
 import { DEMO_PAPER_TRADES } from '@/lib/mock-data';
+import { executeFactoryReset } from '@/lib/data/factory-reset-client';
 
 interface AppContextType {
   // State
@@ -491,25 +492,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [refreshData, showToast]);
 
-  // Data Management: Factory Reset (wipes everything)
+  // Data Management: Factory Reset (wipes everything and terminates owner session)
   const factoryReset = useCallback(async () => {
-    try {
-      const res = await fetch('/api/data/factory-reset', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Lỗi khôi phục hệ thống');
-      }
-      setTransactions([]);
-      setFunds([]);
-      setCategories([]);
-      setGmailAccounts([]);
-      setMonthlySnapshots([]);
-      showToast(data.message || 'Đã khôi phục cài đặt gốc', 'info');
-      await refreshData();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Lỗi khôi phục hệ thống', 'error');
-    }
-  }, [refreshData, showToast]);
+    await executeFactoryReset({
+      setTransactions,
+      setFunds,
+      setCategories,
+      setGmailAccounts,
+      setMonthlySnapshots,
+      setClassifyingTransaction,
+      setIsSyncing,
+      setIsOwnerAuthenticated,
+      showToast,
+    });
+  }, [showToast]);
 
   const value = useMemo(
     () => ({

@@ -2,14 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptToken } from '@/lib/security/crypto';
 import { revokeGoogleToken } from '@/lib/oauth/google-oauth';
-import { OWNER_COOKIE_NAME, verifyOwnerSessionToken } from '@/lib/security/owner-auth';
+import { OWNER_COOKIE_NAME, verifyOwnerSessionToken, clearOwnerSessionCookie } from '@/lib/security/owner-auth';
 
 export async function POST(req: NextRequest) {
   const sessionCookie = req.cookies.get(OWNER_COOKIE_NAME)?.value;
   const testBypass = req.headers.get('x-owner-test-bypass');
   const isTest = process.env.NODE_ENV === 'test' && testBypass === 'test-authorized-owner';
 
-  if (!isTest && !verifyOwnerSessionToken(sessionCookie)) {
+  if (!isTest && !(await verifyOwnerSessionToken(sessionCookie))) {
     return NextResponse.json(
       { success: false, error: 'Unauthorized: Phiên chủ sở hữu không hợp lệ (Owner session required).' },
       { status: 401 }
@@ -41,10 +41,12 @@ export async function POST(req: NextRequest) {
       prisma.paperTrade.deleteMany(),
     ]);
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
-      message: 'Hệ thống đã được khôi phục về trạng thái ban đầu (đã thu hồi token và xóa toàn bộ tài khoản liên kết).',
+      message: 'Hệ thống đã được khôi phục về trạng thái ban đầu (đã thu hồi token, xóa dữ liệu và kết thúc phiên làm việc).',
     });
+    clearOwnerSessionCookie(response);
+    return response;
   } catch (error) {
     return NextResponse.json(
       {

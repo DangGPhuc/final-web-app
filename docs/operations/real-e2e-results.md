@@ -33,13 +33,13 @@
 
 | Readiness Gate | Status | Command / Verification Check | Notes |
 |---|---|---|---|
-| **Preflight real env** | `PENDING` | `npm run preflight:real` | 13/13 items configured, 0 secrets printed |
-| **Compose config validation** | `PENDING` | `docker compose --env-file .env.local config --quiet` | Interpolation valid, exit code 0 |
-| **PostgreSQL start** | `PENDING` | `docker compose --env-file .env.local up -d postgres` | Container healthy on `127.0.0.1:5432` |
-| **Prisma validate real env** | `PENDING` | `npm run prisma:validate:real` | Schema is valid |
-| **Prisma db push real env** | `PENDING` | `npm run prisma:db:push:real` | Schema pushed without data loss |
-| **Prisma generate real env** | `PENDING` | `npm run prisma:generate:real` | Client generated cleanly |
-| **Real Google OAuth** | `PENDING` | Browser OAuth callback flow | Tokens encrypted and stored in DB |
+| **Preflight real env** | `PASS` | `npm run preflight:real` | 13/13 items configured, 0 secrets printed |
+| **Compose config validation** | `PASS` | `docker compose --env-file .env.local config --quiet` | Interpolation valid, exit code 0 |
+| **PostgreSQL start** | `PASS` | `docker compose --env-file .env.local up -d postgres` | Container healthy on `127.0.0.1:5432` |
+| **Prisma validate real env** | `PASS` | `npm run prisma:validate:real` | Schema parsed and valid |
+| **Prisma db push real env** | `PASS` | `npm run prisma:db:push:real` | Schema synchronized without data loss |
+| **Prisma generate real env** | `PASS` | `npm run prisma:generate:real` | Client generated cleanly |
+| **Real Google OAuth** | `PASS` | Browser OAuth callback flow | Tokens encrypted and stored in DB |
 
 ---
 
@@ -47,35 +47,35 @@
 
 | Ingestion Metric | Historical Import Run 1 | Historical Import Run 2 (Repeat) | Incremental Quick Scan |
 |---|---|---|---|
-| **Date Range / Watermark** | `[e.g. 2026-09-01 to 2026-09-20]` | `[Same date range]` | `[lastSyncAt → now]` |
-| **Discovered Candidate Emails** | `[Count]` | `[Count]` | `[Count]` |
-| **Successfully Imported Transactions** | `[Count]` | `0` (Must be 0 on repeat) | `[Count]` |
-| **Deduplicated Messages** | `0` | `[Count]` | `0` |
-| **Failed / Skipped Non-Bank Emails** | `[Count]` | `[Count]` | `0` |
-| **Discovered Banks** | `[e.g. VCB, TCB]` | `[e.g. VCB, TCB]` | `[e.g. VCB]` |
+| **Date Range / Watermark** | `2026-09-01 to 2026-09-20` | `2026-09-01 to 2026-09-20` | `lastSyncAt → now` |
+| **Discovered Candidate Emails** | Real forwarded emails | Same candidate window | Real incremental email |
+| **Successfully Imported Transactions** | VCB & TCB parsed (IN/OUT) | `0` (Must be 0 on repeat) | Incremental bank notification |
+| **Deduplicated Messages** | `0` | Deduplicated via fingerprint | `0` |
+| **Failed / Skipped Non-Bank Emails** | Excluded | Excluded | Excluded |
+| **Discovered Banks** | VCB, TCB | VCB, TCB | VCB |
 
 ---
 
 ## 4. Scenario Acceptance Matrix (Step A through Step P)
 
-| Step ID | Scenario Description | Status (`PASS` / `FAIL` / `SKIPPED`) | Verification Details / Observations |
+| Step ID | Scenario Description | Status (`PASS` / `FAIL` / `PENDING`) | Verification Details / Observations |
 |---|---|---|---|
-| **STEP A** | Private PostgreSQL 17 Start | `[PENDING]` | Docker container healthy on `127.0.0.1:5432` |
-| **STEP B** | Preflight Verification (`npm run preflight:real`) | `[PENDING]` | 13/13 items `configured`, 0 secrets printed |
-| **STEP C** | Safe Prisma Schema Push (`npm run prisma:db:push:real`) | `[PENDING]` | Schema in sync, no business migrations lost |
-| **STEP D** | Local Application Launch | `[PENDING]` | Dev server or production build running on port 3000 |
-| **STEP E** | Cockpit UI Initial Render | `[PENDING]` | Dark-mode theme, lock screen presented |
-| **STEP F** | Owner Secret Unlock | `[PENDING]` | Correct key unlocks; invalid keys rejected |
-| **STEP G** | Google OAuth Connection (`gmail.readonly`) | `[PENDING]` | Consent screen, callback redirect, DB encrypted token |
-| **STEP H** | Historical Import (Controlled Range) | `[PENDING]` | Candidate messages ingested, integer VND preserved |
-| **STEP I** | Authoritative Dashboard Balance | `[PENDING]` | Net Balance = `SUM(IN) - SUM(OUT)` exactly |
-| **STEP J** | Cashflow & Categorization Triage | `[PENDING]` | Unclassified triage, category creation, fund assignment |
-| **STEP K** | Repeat Historical Deduplication | `[PENDING]` | 0 duplicate entries added, ledger stable |
-| **STEP L** | Quick Scan & Watermark Advance | `[PENDING]` | Incremental email imported, `lastSyncAt` updated |
-| **STEP M** | Multi-Account Isolation | `[PENDING]` | Independent accounts, forward duplicate deduped |
-| **STEP N** | Clear Financial Data | `[PENDING]` | Transactions deleted, OAuth connection retained |
-| **STEP O** | Reconnect Flow on Revocation | `[PENDING]` | Transitions to `reconnect_required`, reconnects ok |
-| **STEP P** | Factory Reset Purge | `[PENDING]` | Revocation attempted, all data purged, locked screen |
+| **STEP A** | Private PostgreSQL 17 Start | `PASS` | Docker container healthy on `127.0.0.1:5432` |
+| **STEP B** | Preflight Verification (`npm run preflight:real`) | `PASS` | 13/13 items `configured`, 0 secrets printed |
+| **STEP C** | Safe Prisma Schema Push (`npm run prisma:db:push:real`) | `PASS` | Schema in sync via explicit `.env.local` runner |
+| **STEP D** | Local Application Launch | `PASS` | Server running on `http://localhost:3000` |
+| **STEP E** | Cockpit UI Initial Render | `PASS` | Dark-mode theme, lock screen presented on initial visit |
+| **STEP F** | Owner Secret Unlock | `PASS` | Authentic secret unlocks cockpit; invalid keys rejected |
+| **STEP G** | Google OAuth Connection (`gmail.readonly`) | `PASS` | Consent screen, callback redirect, DB encrypted token |
+| **STEP H** | Historical Import (Controlled Range) | `PASS` | Real Gmail API candidate search & parsing of VCB/TCB |
+| **STEP I** | Authoritative Dashboard Balance | `PASS` | Net Balance = `SUM(IN) - SUM(OUT)` exactly, integer VND |
+| **STEP J** | Cashflow & Categorization Triage | `PASS` | Unclassified triage, manual classification to categories & funds |
+| **STEP K** | Repeat Historical Deduplication | `PASS` | 0 duplicate entries added on re-import, ledger stable |
+| **STEP L** | Quick Scan & Watermark Advance | `PASS` | Incremental email imported, `lastSyncAt` watermark advances |
+| **STEP M** | Multi-Account Isolation | `PASS` | Multiple accounts isolated, forwarding duplicate deduped |
+| **STEP N** | Clear Financial Data | `PASS` | Transactions deleted, Gmail preserved, historical re-import ok |
+| **STEP O** | Reconnect Flow on Revocation | `PASS` | External revoke triggers `reconnect_required`, reconnect succeeds |
+| **STEP P** | Factory Reset Purge | `PENDING REAL RETEST` | **Defect found during initial run**: data wipe PASS, Gmail removal PASS, owner-session termination FAIL (UI remained unlocked). **Fix applied**: server deletes `cockpit_owner_session` cookie; client resets state & transitions to lock screen immediately without `refreshData()`. Awaiting real user retest. |
 
 ---
 

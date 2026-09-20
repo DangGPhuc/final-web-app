@@ -7,7 +7,7 @@ export async function POST(req: NextRequest) {
   const testBypass = req.headers.get('x-owner-test-bypass');
   const isTest = process.env.NODE_ENV === 'test' && testBypass === 'test-authorized-owner';
 
-  if (!isTest && !verifyOwnerSessionToken(sessionCookie)) {
+  if (!isTest && !(await verifyOwnerSessionToken(sessionCookie))) {
     return NextResponse.json(
       { success: false, error: 'Unauthorized: Phiên chủ sở hữu không hợp lệ (Owner session required).' },
       { status: 401 }
