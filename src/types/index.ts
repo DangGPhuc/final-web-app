@@ -115,7 +115,10 @@ export interface AccountSyncResult {
   status: 'ok' | 'reconnect_required' | 'error';
   errorMessage?: string;
   truncated?: boolean;
+  continuationToken?: string;
+  /** @deprecated use continuationToken */
   nextPageToken?: string;
+  /** @deprecated handled server-side in continuationToken */
   quickScanBounds?: QuickScanBounds;
 }
 
@@ -128,9 +131,14 @@ export interface SyncResultStats {
   accountEmail?: string;
   dateRange?: string;
   truncated?: boolean;
-  nextPageToken?: string;
+  continuationTokens?: Record<string, string>;
+  continuationToken?: string;
   accountResults?: AccountSyncResult[];
+  /** @deprecated use continuationTokens */
   accountContinuationTokens?: Record<string, string>;
+  /** @deprecated use continuationToken */
+  nextPageToken?: string;
+  /** @deprecated handled server-side in continuationTokens */
   quickScanBounds?: Record<string, QuickScanBounds>;
 }
 

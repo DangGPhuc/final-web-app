@@ -12,6 +12,13 @@ import {
 } from '@/lib/email/gmail-client';
 import { parseBankNotification } from '@/lib/email/bank-parsers';
 import { getVietnamDateRangeBoundaries, parseAndValidateIsoDate } from '@/lib/date';
+import {
+  signContinuationToken,
+  verifyContinuationToken,
+  ContinuationExpiredError,
+  InvalidContinuationError,
+  type ContinuationData,
+} from '@/lib/security/continuation-token';
 import type { SyncResultStats, AccountSyncResult } from '@/types';
 
 const NO_CACHE_HEADERS = {
@@ -40,22 +47,103 @@ export async function POST(req: NextRequest) {
       fromDate, // optional ISO string (YYYY-MM-DD)
       toDate, // optional ISO string (YYYY-MM-DD)
       isDemoMode = false,
-      pageToken,
-      accountContinuationTokens,
-      quickScanBounds,
+      continuationTokens, // Record<string, string>: accountId -> opaque signed token
+      continuationToken, // optional string for single-account
+      accountContinuationTokens, // deprecated alias
+      pageToken, // deprecated alias
+      quickScanBounds, // deprecated alias
     } = body as {
       mode?: 'QUICK' | 'HISTORICAL';
       accountId?: string;
       fromDate?: string;
       toDate?: string;
       isDemoMode?: boolean;
-      pageToken?: string;
+      continuationTokens?: Record<string, string>;
+      continuationToken?: string;
       accountContinuationTokens?: Record<string, string>;
+      pageToken?: string;
       quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
     };
 
     const effectiveMode: 'QUICK' | 'HISTORICAL' =
       mode || (fromDate || toDate ? 'HISTORICAL' : 'QUICK');
+
+    // Build incoming continuation tokens map
+    const incomingTokens: Record<string, string> = {
+      ...(accountContinuationTokens || {}),
+      ...(continuationTokens || {}),
+    };
+    if (continuationToken && accountId && accountId !== 'ALL') {
+      incomingTokens[accountId] = continuationToken;
+    }
+    if (pageToken && accountId && accountId !== 'ALL' && !incomingTokens[accountId]) {
+      incomingTokens[accountId] = pageToken;
+    }
+
+    const isAllAccounts = !accountId || accountId === 'ALL';
+    const isContinuationMode = Object.keys(incomingTokens).length > 0;
+    const verifiedContinuationMap: Record<string, ContinuationData> = {};
+
+    // Validate and authenticate continuation tokens server-side
+    if (isContinuationMode) {
+      for (const [accId, tokenStr] of Object.entries(incomingTokens)) {
+        try {
+          const verified = verifyContinuationToken(tokenStr);
+          // Check that token's gmailConnectionId matches the requested account
+          if (verified.gmailConnectionId !== accId) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: 'invalid_continuation_token',
+                message: 'Token tiếp tục không khớp với tài khoản Gmail được yêu cầu.',
+              },
+              { status: 400, headers: NO_CACHE_HEADERS }
+            );
+          }
+          if (verified.mode !== effectiveMode) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: 'invalid_continuation_token',
+                message: 'Chế độ quét trong token tiếp tục không khớp với chế độ yêu cầu.',
+              },
+              { status: 400, headers: NO_CACHE_HEADERS }
+            );
+          }
+          verifiedContinuationMap[accId] = verified;
+        } catch (err) {
+          if (err instanceof ContinuationExpiredError) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: 'continuation_expired',
+                message: err.message,
+              },
+              { status: 400, headers: NO_CACHE_HEADERS }
+            );
+          }
+          return NextResponse.json(
+            {
+              success: false,
+              error: 'invalid_continuation_token',
+              message: err instanceof Error ? err.message : 'Token tiếp tục không hợp lệ hoặc đã bị thay đổi.',
+            },
+            { status: 400, headers: NO_CACHE_HEADERS }
+          );
+        }
+      }
+
+      if (!isAllAccounts && accountId && !verifiedContinuationMap[accountId]) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'invalid_continuation_token',
+            message: 'Token tiếp tục không khớp với tài khoản Gmail được yêu cầu.',
+          },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
+      }
+    }
 
     // 2. Validate date range parameters for Historical Mode
     let fromDateObj: Date | undefined;
@@ -111,20 +199,13 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    const isAllAccounts = !accountId || accountId === 'ALL';
-    const hasAccountTokens =
-      Boolean(accountContinuationTokens && Object.keys(accountContinuationTokens).length > 0);
-    const isContinuationMode = isAllAccounts
-      ? hasAccountTokens
-      : Boolean(pageToken || (hasAccountTokens && accountContinuationTokens?.[accountId!]));
-
     // Determine target connections to process
     let targetConnections = connections;
     if (isAllAccounts && isContinuationMode) {
       // In ALL-accounts continuation mode:
       // Process ONLY accounts that currently have an active continuation token!
       // Completed accounts are NOT restarted!
-      const activeAccountIds = Object.keys(accountContinuationTokens || {});
+      const activeAccountIds = Object.keys(verifiedContinuationMap);
       targetConnections = connections.filter(conn => activeAccountIds.includes(conn.id));
     }
 
@@ -137,6 +218,7 @@ export async function POST(req: NextRequest) {
       dateRange: effectiveMode === 'HISTORICAL' && fromDate && toDate ? `${fromDate} → ${toDate}` : undefined,
       truncated: false,
       accountResults: [],
+      continuationTokens: {},
       accountContinuationTokens: {},
       quickScanBounds: {},
     };
@@ -265,29 +347,20 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      let specificPageToken: string | undefined = undefined;
-      if (isAllAccounts) {
-        // In ALL-accounts mode, use ONLY accountContinuationTokens[conn.id]!
-        // Never fallback to global pageToken or another account's token!
-        specificPageToken = accountContinuationTokens?.[conn.id];
-      } else {
-        // In single-account mode, use specific token or pageToken
-        specificPageToken = accountContinuationTokens?.[conn.id] || pageToken;
-      }
+      const continuationData = verifiedContinuationMap[conn.id];
+      const specificPageToken: string | undefined = continuationData?.pageToken;
 
       // Quick Scan bounded snapshot calculations
       let connLowerBoundEpoch: number | undefined;
       let connQuickScanUpperBoundEpoch: number | undefined;
+      let effectiveFromDate = fromDate;
+      let effectiveToDate = toDate;
 
       if (effectiveMode === 'QUICK') {
-        if (
-          quickScanBounds?.[conn.id] &&
-          Number.isFinite(quickScanBounds[conn.id].lowerBoundEpoch) &&
-          Number.isFinite(quickScanBounds[conn.id].quickScanUpperBoundEpoch)
-        ) {
-          // Carry existing stable bounds across continuation pages
-          connLowerBoundEpoch = quickScanBounds[conn.id].lowerBoundEpoch;
-          connQuickScanUpperBoundEpoch = quickScanBounds[conn.id].quickScanUpperBoundEpoch;
+        if (continuationData && continuationData.mode === 'QUICK') {
+          // Carry server-signed authenticated bounds across continuation pages
+          connLowerBoundEpoch = continuationData.lowerBoundEpoch;
+          connQuickScanUpperBoundEpoch = continuationData.upperBoundEpoch;
         } else {
           // Initial Quick Scan: capture current server instant as fixed upper watermark
           const serverInstant = new Date();
@@ -295,6 +368,11 @@ export async function POST(req: NextRequest) {
           // Lower bound: last completed Quick Scan watermark, or connectedAt fallback
           const lowerBoundDate = conn.lastSyncAt || conn.connectedAt;
           connLowerBoundEpoch = Math.floor(lowerBoundDate.getTime() / 1000);
+        }
+      } else {
+        if (continuationData && continuationData.mode === 'HISTORICAL') {
+          if (continuationData.fromDate) effectiveFromDate = continuationData.fromDate;
+          if (continuationData.toDate) effectiveToDate = continuationData.toDate;
         }
       }
 
@@ -310,8 +388,8 @@ export async function POST(req: NextRequest) {
         } else {
           ingestionResult = await ingestFromGmail(refreshToken, {
             mode: 'HISTORICAL',
-            fromDate,
-            toDate,
+            fromDate: effectiveFromDate,
+            toDate: effectiveToDate,
             pageToken: specificPageToken,
           });
         }
@@ -384,8 +462,17 @@ export async function POST(req: NextRequest) {
             continue;
           }
         }
-        // In QUICK mode: newly arrived candidates are NOT excluded merely because occurredAt is older
-        // (e.g. a forwarded notification received today for yesterday's transaction is admitted).
+        // In QUICK mode: enforce exact half-open interval [lowerBoundEpoch * 1000, upperBoundEpoch * 1000)
+        // on emailReceivedAt (which is sourced from Gmail internalDate):
+        if (effectiveMode === 'QUICK') {
+          const receivedMs = event.emailReceivedAt.getTime();
+          if (connLowerBoundEpoch !== undefined && receivedMs < connLowerBoundEpoch * 1000) {
+            continue;
+          }
+          if (connQuickScanUpperBoundEpoch !== undefined && receivedMs >= connQuickScanUpperBoundEpoch * 1000) {
+            continue;
+          }
+        }
 
         // Multi-account authoritative deduplication priority rules:
         // Rule A: Same Gmail account + same Gmail message ID -> Authoritative duplicate
@@ -520,13 +607,39 @@ export async function POST(req: NextRequest) {
         aggregateStats.quickScanBounds[conn.id] = accountBounds;
       }
 
+      let signedContinuationToken: string | undefined;
       if (ingestionResult.truncated && ingestionResult.nextPageToken) {
         aggregateStats.truncated = true;
+        signedContinuationToken =
+          effectiveMode === 'QUICK'
+            ? signContinuationToken({
+                mode: 'QUICK',
+                gmailConnectionId: conn.id,
+                pageToken: ingestionResult.nextPageToken,
+                lowerBoundEpoch: connLowerBoundEpoch!,
+                upperBoundEpoch: connQuickScanUpperBoundEpoch!,
+              })
+            : signContinuationToken({
+                mode: 'HISTORICAL',
+                gmailConnectionId: conn.id,
+                pageToken: ingestionResult.nextPageToken,
+                fromDate: effectiveFromDate,
+                toDate: effectiveToDate,
+              });
+
+        if (!aggregateStats.continuationTokens) {
+          aggregateStats.continuationTokens = {};
+        }
+        aggregateStats.continuationTokens[conn.id] = signedContinuationToken;
+
+        if (!aggregateStats.continuationToken) {
+          aggregateStats.continuationToken = signedContinuationToken;
+        }
         if (!aggregateStats.nextPageToken) {
-          aggregateStats.nextPageToken = ingestionResult.nextPageToken;
+          aggregateStats.nextPageToken = signedContinuationToken;
         }
         if (aggregateStats.accountContinuationTokens) {
-          aggregateStats.accountContinuationTokens[conn.id] = ingestionResult.nextPageToken;
+          aggregateStats.accountContinuationTokens[conn.id] = signedContinuationToken;
         }
       }
 
@@ -539,7 +652,8 @@ export async function POST(req: NextRequest) {
         failedCount: ingestionResult.failedCount,
         status: 'ok',
         truncated: ingestionResult.truncated,
-        nextPageToken: ingestionResult.nextPageToken,
+        continuationToken: signedContinuationToken,
+        nextPageToken: signedContinuationToken,
         quickScanBounds: accountBounds,
       });
     }

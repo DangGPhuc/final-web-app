@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { prisma } from '../src/lib/db';
 import { encryptToken, decryptToken, setTestEncryptionKey } from '../src/lib/security/crypto';
 import {
@@ -7,6 +7,10 @@ import {
   setTestOwnerSecretKey,
 } from '../src/lib/security/owner-auth';
 import { calculateBalance } from '../src/lib/finance/calculations';
+import { POST as syncRoute } from '../src/app/api/email/sync/route';
+import { NextRequest } from 'next/server';
+import * as gmailClient from '../src/lib/email/gmail-client';
+import { signContinuationToken } from '../src/lib/security/continuation-token';
 import type { BankTransaction } from '../src/types';
 
 const TEST_KEY = Buffer.alloc(32, 3).toString('hex');
@@ -803,6 +807,365 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
 
       // In QUICK mode, it is NOT excluded!
       expect(shouldExclude).toBe(false);
+    });
+  });
+
+  describe('Route-Level Sync & Continuation Tests (PostgreSQL Integration)', () => {
+    function createSyncRequest(body: Record<string, any>) {
+      return new NextRequest('http://localhost:3000/api/email/sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-owner-test-bypass': 'test-authorized-owner',
+        },
+        body: JSON.stringify(body),
+      });
+    }
+
+    let connAId: string;
+    let connBId: string;
+
+    beforeAll(async () => {
+      // Create test accounts
+      const connA = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'google_sub_route_test_A',
+          email: 'route_test_A@gmail.com',
+          encryptedRefreshToken: encryptToken('refresh-token-A'),
+          connectedAt: new Date('2026-09-01T00:00:00.000Z'),
+          lastSyncAt: new Date('2026-09-05T00:00:00.000Z'),
+        },
+      });
+      connAId = connA.id;
+
+      const connB = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'google_sub_route_test_B',
+          email: 'route_test_B@gmail.com',
+          encryptedRefreshToken: encryptToken('refresh-token-B'),
+          connectedAt: new Date('2026-09-01T00:00:00.000Z'),
+          lastSyncAt: new Date('2026-09-05T00:00:00.000Z'),
+        },
+      });
+      connBId = connB.id;
+    });
+
+    afterAll(async () => {
+      await prisma.bankTransaction.deleteMany({
+        where: { gmailConnectionId: { in: [connAId, connBId] } },
+      });
+      await prisma.syncRun.deleteMany({
+        where: { gmailConnectionId: { in: [connAId, connBId] } },
+      });
+      await prisma.gmailConnection.deleteMany({
+        where: { id: { in: [connAId, connBId] } },
+      });
+    });
+
+    it('HISTORICAL request does not change lastSyncAt', async () => {
+      const spy = vi.spyOn(gmailClient, 'ingestFromGmail').mockResolvedValueOnce({
+        events: [
+          {
+            gmailMessageId: 'msg-hist-route-1',
+            bankCode: 'VCB',
+            bankName: 'Vietcombank',
+            direction: 'OUT',
+            amount: 50000,
+            currency: 'VND',
+            occurredAt: new Date('2026-01-15T09:30:00.000Z'),
+            emailReceivedAt: new Date('2026-01-15T09:30:00.000Z'),
+            summary: 'Chi tieu thang 1',
+            fingerprint: 'fp-hist-1',
+          },
+        ],
+        totalFetched: 1,
+        failedCount: 0,
+        truncated: false,
+      });
+
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'HISTORICAL',
+          accountId: connAId,
+          fromDate: '2026-01-01',
+          toDate: '2026-01-31',
+        })
+      );
+      expect(res.status).toBe(200);
+
+      const refreshed = await prisma.gmailConnection.findUnique({ where: { id: connAId } });
+      // Watermark MUST NOT change on historical import!
+      expect(refreshed?.lastSyncAt?.toISOString()).toBe('2026-09-05T00:00:00.000Z');
+      spy.mockRestore();
+    });
+
+    it('initial QUICK request captures a bound and commits when untruncated', async () => {
+      const spy = vi.spyOn(gmailClient, 'ingestFromGmail').mockResolvedValueOnce({
+        events: [],
+        totalFetched: 0,
+        failedCount: 0,
+        truncated: false,
+      });
+
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connAId,
+        })
+      );
+      expect(res.status).toBe(200);
+
+      const refreshed = await prisma.gmailConnection.findUnique({ where: { id: connAId } });
+      // lastSyncAt must have advanced to around now (> 2026-09-05)
+      expect(refreshed?.lastSyncAt?.getTime()).toBeGreaterThan(new Date('2026-09-05').getTime());
+      spy.mockRestore();
+    });
+
+    it('truncated QUICK does not update lastSyncAt and returns signed continuationToken', async () => {
+      // Reset lastSyncAt
+      await prisma.gmailConnection.update({
+        where: { id: connAId },
+        data: { lastSyncAt: new Date('2026-09-05T00:00:00.000Z') },
+      });
+
+      const spy = vi.spyOn(gmailClient, 'ingestFromGmail').mockResolvedValueOnce({
+        events: [],
+        totalFetched: 50,
+        failedCount: 0,
+        truncated: true,
+        nextPageToken: 'page_token_abc_1',
+      });
+
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connAId,
+        })
+      );
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.stats.truncated).toBe(true);
+      expect(json.stats.continuationTokens[connAId]).toBeDefined();
+
+      const refreshed = await prisma.gmailConnection.findUnique({ where: { id: connAId } });
+      // Truncated scan MUST NOT advance lastSyncAt!
+      expect(refreshed?.lastSyncAt?.toISOString()).toBe('2026-09-05T00:00:00.000Z');
+      spy.mockRestore();
+    });
+
+    it('QUICK continuation uses original signed bound and completed continuation commits original upper bound', async () => {
+      const fixedLower = 1788195600;
+      const fixedUpper = 1788200000;
+      const signedToken = signContinuationToken({
+        mode: 'QUICK',
+        gmailConnectionId: connAId,
+        pageToken: 'continuation_page_token_2',
+        lowerBoundEpoch: fixedLower,
+        upperBoundEpoch: fixedUpper,
+      });
+
+      let receivedOptions: any;
+      const spy = vi.spyOn(gmailClient, 'ingestFromGmail').mockImplementation(async (_, opts) => {
+        receivedOptions = opts;
+        return {
+          events: [],
+          totalFetched: 10,
+          failedCount: 0,
+          truncated: false, // final page!
+        };
+      });
+
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connAId,
+          continuationTokens: { [connAId]: signedToken },
+        })
+      );
+      expect(res.status).toBe(200);
+
+      // Verify that options passed to ingestFromGmail used the signed bounds
+      expect(receivedOptions.lowerBoundEpoch).toBe(fixedLower);
+      expect(receivedOptions.upperBoundEpoch).toBe(fixedUpper);
+      expect(receivedOptions.pageToken).toBe('continuation_page_token_2');
+
+      // Verify that upon un-truncated completion, lastSyncAt commits exactly to fixedUpper
+      const refreshed = await prisma.gmailConnection.findUnique({ where: { id: connAId } });
+      expect(refreshed?.lastSyncAt?.toISOString()).toBe(new Date(fixedUpper * 1000).toISOString());
+      spy.mockRestore();
+    });
+
+    it('tampered continuation token is rejected with 400 invalid_continuation_token', async () => {
+      const signedToken = signContinuationToken({
+        mode: 'QUICK',
+        gmailConnectionId: connAId,
+        pageToken: 'token_valid',
+        lowerBoundEpoch: 1788195600,
+        upperBoundEpoch: 1788200000,
+      });
+      const parts = signedToken.split('.');
+      const tamperedSig = parts[1].slice(0, -2) + (parts[1].slice(-2) === 'AA' ? 'BB' : 'AA');
+      const tamperedToken = `${parts[0]}.${tamperedSig}`;
+
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connAId,
+          continuationTokens: { [connAId]: tamperedToken },
+        })
+      );
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.error).toBe('invalid_continuation_token');
+    });
+
+    it('expired continuation token is rejected with 400 continuation_expired', async () => {
+      const expiredToken = signContinuationToken(
+        {
+          mode: 'QUICK',
+          gmailConnectionId: connAId,
+          pageToken: 'token_expired',
+          lowerBoundEpoch: 1788195600,
+          upperBoundEpoch: 1788200000,
+        },
+        -10 // expired 10 seconds ago
+      );
+
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connAId,
+          continuationTokens: { [connAId]: expiredToken },
+        })
+      );
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.error).toBe('continuation_expired');
+    });
+
+    it('token for Gmail A cannot be used for Gmail B', async () => {
+      const tokenForA = signContinuationToken({
+        mode: 'QUICK',
+        gmailConnectionId: connAId,
+        pageToken: 'token_for_account_A',
+        lowerBoundEpoch: 1788195600,
+        upperBoundEpoch: 1788200000,
+      });
+
+      // Present token for A against connB
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connBId,
+          continuationTokens: { [connBId]: tokenForA },
+        })
+      );
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.error).toBe('invalid_continuation_token');
+      expect(json.message).toContain('không khớp');
+    });
+
+    it('ALL-account continuation only processes pending accounts and completed accounts are not restarted', async () => {
+      const tokenForA = signContinuationToken({
+        mode: 'QUICK',
+        gmailConnectionId: connAId,
+        pageToken: 'token_for_A_only',
+        lowerBoundEpoch: 1788195600,
+        upperBoundEpoch: 1788200000,
+      });
+
+      const calledAccountIds: string[] = [];
+      const spy = vi.spyOn(gmailClient, 'ingestFromGmail').mockImplementation(async (_, opts) => {
+        // Find which connection this was called for
+        if (opts?.pageToken === 'token_for_A_only') {
+          calledAccountIds.push(connAId);
+        } else {
+          calledAccountIds.push(connBId);
+        }
+        return {
+          events: [],
+          totalFetched: 0,
+          failedCount: 0,
+          truncated: false,
+        };
+      });
+
+      // Request ALL accounts with continuation token only for connA
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: 'ALL',
+          continuationTokens: { [connAId]: tokenForA },
+        })
+      );
+      expect(res.status).toBe(200);
+
+      // Verify connA was processed and connB was NOT restarted
+      expect(calledAccountIds).toEqual([connAId]);
+      spy.mockRestore();
+    });
+
+    it('overlap does not create duplicate persisted transactions', async () => {
+      // Clear bank transactions for connA
+      await prisma.bankTransaction.deleteMany({ where: { gmailConnectionId: connAId } });
+
+      const duplicateEvent = {
+        gmailMessageId: 'msg-overlap-1',
+        bankCode: 'VCB',
+        bankName: 'Vietcombank',
+        direction: 'OUT' as const,
+        amount: 250000,
+        currency: 'VND',
+        occurredAt: new Date('2026-09-05T02:30:00.000Z'),
+        emailReceivedAt: new Date('2026-09-05T02:30:00.000Z'),
+        summary: 'Giao dich bi trung do overlap',
+        bankRefId: 'FT_OVERLAP_001',
+        fingerprint: 'fp-overlap-001',
+      };
+
+      const spy = vi.spyOn(gmailClient, 'ingestFromGmail').mockResolvedValue({
+        events: [duplicateEvent],
+        totalFetched: 1,
+        failedCount: 0,
+        truncated: false,
+      });
+
+      // Scan 1
+      const res1 = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connAId,
+        })
+      );
+      expect(res1.status).toBe(200);
+      const json1 = await res1.json();
+      expect(json1.stats.totalNew).toBe(1);
+
+      // Reset lastSyncAt to simulate an overlapping scan interval
+      await prisma.gmailConnection.update({
+        where: { id: connAId },
+        data: { lastSyncAt: new Date('2026-09-05T00:00:00.000Z') },
+      });
+
+      // Scan 2 (overlapping message returned again)
+      const res2 = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connAId,
+        })
+      );
+      expect(res2.status).toBe(200);
+      const json2 = await res2.json();
+      expect(json2.stats.totalNew).toBe(0);
+      expect(json2.stats.totalDuplicates).toBe(1);
+
+      // Prove only ONE record exists in DB
+      const dbRecords = await prisma.bankTransaction.findMany({
+        where: { gmailConnectionId: connAId, gmailMessageId: 'msg-overlap-1' },
+      });
+      expect(dbRecords).toHaveLength(1);
+      spy.mockRestore();
     });
   });
 });

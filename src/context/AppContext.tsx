@@ -78,6 +78,8 @@ interface AppContextType {
     fromDate?: string;
     toDate?: string;
     isDemoMode?: boolean;
+    continuationTokens?: Record<string, string>;
+    continuationToken?: string;
     pageToken?: string;
     accountContinuationTokens?: Record<string, string>;
     quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
@@ -380,6 +382,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       fromDate?: string;
       toDate?: string;
       isDemoMode?: boolean;
+      continuationTokens?: Record<string, string>;
+      continuationToken?: string;
       pageToken?: string;
       accountContinuationTokens?: Record<string, string>;
       quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;

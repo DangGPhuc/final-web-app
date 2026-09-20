@@ -57,20 +57,27 @@ Dự án phục vụ đồ án tốt nghiệp với cơ chế tự động đọ
 
 ### 3.1. Phân định Ngữ nghĩa Đồng bộ: Quick Scan vs Historical Import
 - **Định nghĩa Bất biến Watermark (`lastSyncAt`)**:
-  $$\text{lastSyncAt} = \text{Upper watermark của lần Quét Nhanh (Quick Scan) hoàn tất 100\%}$$
+  $$\text{lastSyncAt} = \text{Upper snapshot watermark của lần Quét Nhanh (Quick Scan) hoàn tất 100\%}$$
 - **Historical Import không thay đổi watermark**: Nhập lịch sử (ví dụ: 01/01/2026 → 31/01/2026) **tuyệt đối không cập nhật `lastSyncAt`**, bảo đảm lần Quick Scan tiếp theo không bị nhảy cóc hoặc bỏ sót email từ tháng 2 đến tháng 9.
-- **Quick Scan Bounded Snapshot**:
-  1. Khi bắt đầu Quick Scan, hệ thống ghi nhận `quickScanUpperBound = server instant`.
+- **Quick Scan Bounded Snapshot & Nửa khoảng logic chính xác $[lowerBound, upperBound)$**:
+  1. Khi bắt đầu Quick Scan, hệ thống ghi nhận `quickScanUpperBound = server instant (epoch seconds)`.
   2. Mốc dưới `lowerBound = conn.lastSyncAt || conn.connectedAt`.
-  3. Query Gmail sử dụng epoch seconds chính xác: `after:<lowerBoundEpoch> before:<quickScanUpperBoundEpoch>`.
-  4. Nếu quét bị ngắt phân trang (truncated), `lastSyncAt` **giữ nguyên không đổi**.
-  5. Chỉ khi trang cuối cùng hoàn tất thành công (`truncated === false`), `lastSyncAt` mới được cam kết tiến tới `quickScanUpperBound`.
-  6. Các email đến sau mốc `quickScanUpperBound` được cố ý để dành cho lần Quick Scan tiếp theo.
+  3. Khoảng thời gian logic tuyệt đối của Quick Scan là **nửa khoảng mở phải**:
+     $$[\text{lowerBoundEpoch}, \text{quickScanUpperBoundEpoch})$$
+  4. **Defensive Boundary Overlap**: Câu truy vấn ứng viên Gmail (candidate query) chủ động nới rộng biên an toàn 2 giây:
+     `after:(lowerBoundEpoch - 2) before:(upperBoundEpoch + 2)`
+     nhằm loại trừ hoàn toàn sự nhập nhằng trong tính đóng/mở của toán tử tìm kiếm Gmail.
+  5. **Bộ lọc Gmail `internalDate` độc quyền & tối cao**: Sau khi nạp chi tiết message, hệ thống đối soát chính xác Gmail `internalDate`:
+     $$\text{internalDate} \ge \text{lowerBoundEpoch} \times 1000 \quad \text{AND} \quad \text{internalDate} < \text{upperBoundEpoch} \times 1000$$
+     Chỉ các email nằm chính xác trong nửa khoảng này mới trở thành giao dịch của đợt quét. Nhờ đó không có bất kỳ tích tắc nào bị bỏ sót (zero boundary-gap) giữa 2 lần quét liên tiếp, không phát sinh trùng lặp (kết hợp với DB deduplication độc quyền), và email sau mốc upper snapshot được để dành nguyên vẹn cho lần quét kế tiếp.
+  6. **Không dùng `occurredAt` cho Quick Scan**: Cửa sổ nhận thư Quick Scan căn cứ vào Gmail `internalDate`. Chế độ Historical Import tiếp tục sử dụng candidate cushion và lọc theo `occurredAt` trong khoảng ngày Việt Nam.
+  7. Nếu quét bị ngắt phân trang (truncated), `lastSyncAt` **giữ nguyên không đổi**.
+  8. Chỉ khi trang cuối cùng hoàn tất thành công (`truncated === false`), `lastSyncAt` mới được cam kết tiến tới `quickScanUpperBound`.
 - **Watermark độc lập theo từng tài khoản**: Khi quét nhiều tài khoản (A xong, B dở dang, C lỗi), watermark của A tiến lên độc lập, B và C giữ nguyên watermark cũ.
 
 ### 3.2. Phân biệt Thời gian Giao dịch (`occurredAt`) và Thời gian Nhận Mail (`emailReceivedAt`)
 - `occurredAt`: Bóc tách trực tiếp ngày giờ giao dịch ghi trong thông báo ngân hàng (chuẩn múi giờ `Asia/Ho_Chi_Minh` / UTC+7). Dùng để ghi sổ cái, phân tích dòng tiền và nhóm theo tháng. Một email nhận trễ hay được forward 1 ngày sau vẫn giữ đúng ngày giao dịch gốc.
-- `emailReceivedAt`: Ghi nhận thời điểm nhận thư của Gmail (`internalDate` ưu tiên hơn RFC Header `Date`). Dùng cho mục đích kiểm toán/debug.
+- `emailReceivedAt`: Ghi nhận thời điểm nhận thư của Gmail (`internalDate` ưu tiên hơn RFC Header `Date`). Dùng cho cửa sổ lọc Quick Scan và đối soát kiểm toán.
 
 ### 3.3. Cơ chế Chống Trùng Lặp Thận trọng (Conservative Deduplication)
 - **Authoritative Identity**:
@@ -80,13 +87,24 @@ Dự án phục vụ đồ án tốt nghiệp với cơ chế tự động đọ
   - Chỉ áp dụng heuristic vân tay tài chính (`fingerprint`) giữa các tài khoản Gmail **khác nhau** khi chuyển tiếp email.
   - Các giao dịch độc lập cùng số tiền xảy ra trong cùng một phút (ví dụ: thanh toán 2 cốc Highland cách nhau vài chục giây) được **giữ nguyên toàn vẹn**.
 
-### 3.4. Phân trang An toàn & Giao diện Tiếp tục Nhập/Quét (Continuation UX)
-- Quét email có safety cap để bảo vệ bộ nhớ và tốc độ phản hồi.
-- Tách bạch giao diện tiếp tục theo ngữ cảnh:
+### 3.4. Opaque Server-Authenticated Continuation Tokens & Phân trang An toàn
+- **Không tin tưởng raw query state từ client**: Trình duyệt tuyệt đối không được tự ý sửa đổi tham số truy vấn (`pageToken`, mốc `quickScanBounds`, ngày `fromDate`/`toDate`) khi tiếp tục quét.
+- **HMAC-SHA256 Signed Opaque Token**:
+  - Server ký số payload phân trang bằng HMAC-SHA256 với khóa phái sinh từ `OWNER_SECRET_KEY`:
+    $$\text{Signing Key} = \text{HMAC}(\text{OWNER\_SECRET\_KEY}, \text{"gmail-continuation:v1"})$$
+  - Payload bao gồm: `version`, `mode`, `gmailConnectionId`, `pageToken`, các mốc thời gian đã khóa (`lowerBoundEpoch`/`upperBoundEpoch` cho QUICK, hoặc `fromDate`/`toDate` cho HISTORICAL), và `expiresAt`.
+  - Client chỉ nhận và gửi lại chuỗi token mờ (opaque string) qua trường `continuationTokens: Record<accountId, opaqueToken>`.
+- **Thẩm định Server-side nghiêm ngặt**:
+  - Xác thực chữ ký cryptographic, từ chối mọi token bị giả mạo hoặc chỉnh sửa (`400 invalid_continuation_token`).
+  - Đối chiếu đúng `gmailConnectionId` (token của Gmail A không thể đem sang dùng cho Gmail B).
+  - Đối chiếu đúng `mode` (token QUICK không thể dùng cho HISTORICAL).
+  - Kiểm tra thời hạn hết hạn (TTL 15 phút): trả về lỗi an toàn `400 continuation_expired` nếu quá hạn, không tự ý khởi động lại quét với mốc mới.
+- **Cách ly đa tài khoản trong ALL-account mode**:
+  - Trả về bản đồ `continuationTokens` theo từng tài khoản.
+  - Lần gửi tiếp theo chỉ xử lý các tài khoản còn dở dang (`pending`), các tài khoản đã hoàn tất (`completed`) không bao giờ bị chạy lại.
+- **Tách bạch giao diện tiếp tục theo ngữ cảnh**:
   - **Quick Scan**: Hiển thị banner *"Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý."* cùng nút **[ Tiếp tục quét ]**.
   - **Historical Import**: Hiển thị banner *"Đã nhập một phần lịch sử. Vẫn còn email cần quét theo phân trang an toàn."* cùng nút **[ Tiếp tục nhập ]**.
-- Token phân trang (`accountContinuationTokens`) được lưu độc lập theo từng tài khoản, không chia sẻ hay tái sử dụng nhầm lẫn giữa các Gmail connections.
-- Trạng thái tiếp tục nhập được gắn chặt với bộ lọc ban đầu (tài khoản, từ ngày, đến ngày); thay đổi bộ lọc sẽ tự động hủy token phân trang cũ.
 
 ### 3.5. Phân loại Lỗi & Trạng thái Reconnect
 - Phát hiện chính xác `invalid_grant` / token bị thu hồi: đánh dấu `reconnect_required` (`revokedAt = new Date()`) và hiển thị badge cảnh báo yêu cầu kết nối lại trên giao diện.

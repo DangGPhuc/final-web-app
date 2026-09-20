@@ -58,6 +58,7 @@ export interface FetchEmailOptions {
   maxMessages?: number;
   pageToken?: string;
   candidateCushionSeconds?: number;
+  safetyOverlapSeconds?: number;
 }
 
 export interface IngestionResult {
@@ -154,6 +155,7 @@ export function buildBankSearchQuery(options: {
   lowerBoundEpoch?: number;
   upperBoundEpoch?: number;
   candidateCushionSeconds?: number;
+  safetyOverlapSeconds?: number;
 } = {}): string {
   const bankClauses = BANK_NOTIFICATION_REGISTRY.map(
     entry => `(${entry.senderQuery} AND ${entry.signatureQuery})`
@@ -167,7 +169,9 @@ export function buildBankSearchQuery(options: {
 
   // Exact epoch boundaries take precedence (used by Quick Scan snapshot)
   if (options.lowerBoundEpoch !== undefined) {
-    parts.push(`after:${options.lowerBoundEpoch}`);
+    const overlap = options.safetyOverlapSeconds ?? 2;
+    const queryAfter = Math.max(0, options.lowerBoundEpoch - overlap);
+    parts.push(`after:${queryAfter}`);
   } else if (options.fromDate) {
     const cushion = options.candidateCushionSeconds ?? 0;
     let startSec: number;
@@ -181,7 +185,9 @@ export function buildBankSearchQuery(options: {
   }
 
   if (options.upperBoundEpoch !== undefined) {
-    parts.push(`before:${options.upperBoundEpoch}`);
+    const overlap = options.safetyOverlapSeconds ?? 2;
+    const queryBefore = options.upperBoundEpoch + overlap;
+    parts.push(`before:${queryBefore}`);
   } else if (options.toDate) {
     const cushion = options.candidateCushionSeconds ?? 0;
     let endSec: number;
@@ -210,6 +216,8 @@ export async function ingestFromGmail(
     ...options,
     candidateCushionSeconds:
       options.mode === 'QUICK' ? 0 : (options.candidateCushionSeconds ?? 86400),
+    safetyOverlapSeconds:
+      options.mode === 'QUICK' ? (options.safetyOverlapSeconds ?? 2) : 0,
   });
   const maxMessages = options.maxMessages || 1000;
 
@@ -309,6 +317,39 @@ export async function ingestFromGmail(
         date: dateStr,
         internalDate: msgData.internalDate,
       };
+
+      // In QUICK mode, enforce authoritative half-open interval filter on Gmail internalDate:
+      // [lowerBoundEpoch * 1000, upperBoundEpoch * 1000)
+      if (options.mode === 'QUICK') {
+        let msgInternalDateMs: number | undefined;
+        if (msgData.internalDate) {
+          const parsedMs = Number(msgData.internalDate);
+          if (!isNaN(parsedMs) && parsedMs > 0) {
+            msgInternalDateMs = parsedMs;
+          }
+        }
+        if (msgInternalDateMs === undefined && dateStr) {
+          const parsedHeader = new Date(dateStr).getTime();
+          if (!isNaN(parsedHeader) && parsedHeader > 0) {
+            msgInternalDateMs = parsedHeader;
+          }
+        }
+
+        if (msgInternalDateMs !== undefined) {
+          if (
+            options.lowerBoundEpoch !== undefined &&
+            msgInternalDateMs < options.lowerBoundEpoch * 1000
+          ) {
+            continue;
+          }
+          if (
+            options.upperBoundEpoch !== undefined &&
+            msgInternalDateMs >= options.upperBoundEpoch * 1000
+          ) {
+            continue;
+          }
+        }
+      }
 
       const parsed = parseBankNotification(rawEmail);
       if (parsed) {

@@ -346,17 +346,161 @@ describe('Gmail Ingestion & Bank Parsing', () => {
       }
     });
 
-    it('generates exact instant bounds for Quick Scan snapshot mode without calendar rounding', () => {
-      const query = buildBankSearchQuery({
+    it('generates exact instant bounds with defensive overlap for Quick Scan snapshot mode', () => {
+      // Default safety overlap of 2 seconds
+      const queryWithOverlap = buildBankSearchQuery({
         mode: 'QUICK',
         lowerBoundEpoch: 1788195600,
         upperBoundEpoch: 1788199200,
       });
 
-      expect(query).toContain('after:1788195600');
-      expect(query).toContain('before:1788199200');
-      // Messages arriving after upperBoundEpoch are excluded from the candidate search query
-      expect(query).not.toContain('after:1788199200');
+      // lowerBoundEpoch - 2s = 1788195598
+      expect(queryWithOverlap).toContain('after:1788195598');
+      // upperBoundEpoch + 2s = 1788199202
+      expect(queryWithOverlap).toContain('before:1788199202');
+
+      // Without overlap (exact seconds)
+      const exactQuery = buildBankSearchQuery({
+        mode: 'QUICK',
+        lowerBoundEpoch: 1788195600,
+        upperBoundEpoch: 1788199200,
+        safetyOverlapSeconds: 0,
+      });
+      expect(exactQuery).toContain('after:1788195600');
+      expect(exactQuery).toContain('before:1788199200');
+    });
+
+    describe('Authoritative Half-Open internalDate Boundary Filter ([lowerBoundEpoch, upperBoundEpoch))', () => {
+      const lowerBoundEpoch = 1788195600; // e.g. T0
+      const upperBoundEpoch = 1788199200; // e.g. T1
+      const lowerBoundMs = lowerBoundEpoch * 1000;
+      const upperBoundMs = upperBoundEpoch * 1000;
+
+      async function testMessageWithInternalDate(internalDateStr: string) {
+        const origFetch = global.fetch;
+        try {
+          global.fetch = vi.fn().mockImplementation(async (urlStr: string) => {
+            if (urlStr.includes('/messages?')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  messages: [{ id: 'msg-boundary-test', threadId: 'th-1' }],
+                }),
+              };
+            }
+            if (urlStr.includes('/messages/msg-boundary-test')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  id: 'msg-boundary-test',
+                  snippet: 'VCB: TK 1234| GD: -10,000 VND | 05/09/2026',
+                  internalDate: internalDateStr,
+                  payload: {
+                    headers: [
+                      { name: 'From', value: 'vietcombank@vcb.com.vn' },
+                      { name: 'Subject', value: 'VCB: TK 1234| GD: -10,000 VND | 05/09/2026' },
+                      { name: 'Date', value: 'Sat, 05 Sep 2026 09:30:00 +0700' },
+                    ],
+                    body: {
+                      data: Buffer.from('VCB: TK 1234| GD: -10,000 VND | 05/09/2026').toString('base64'),
+                    },
+                  },
+                }),
+              };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+          });
+
+          return await ingestFromGmail('test-refresh-token', {
+            mode: 'QUICK',
+            lowerBoundEpoch,
+            upperBoundEpoch,
+          });
+        } finally {
+          global.fetch = origFetch;
+        }
+      }
+
+      it('message internalDate = lower bound → INCLUDED', async () => {
+        const res = await testMessageWithInternalDate(String(lowerBoundMs));
+        expect(res.events).toHaveLength(1);
+        expect(res.events[0].gmailMessageId).toBe('msg-boundary-test');
+      });
+
+      it('message internalDate = lower bound - 1 ms → EXCLUDED', async () => {
+        const res = await testMessageWithInternalDate(String(lowerBoundMs - 1));
+        expect(res.events).toHaveLength(0);
+      });
+
+      it('message internalDate = upper bound - 1 ms → INCLUDED', async () => {
+        const res = await testMessageWithInternalDate(String(upperBoundMs - 1));
+        expect(res.events).toHaveLength(1);
+        expect(res.events[0].gmailMessageId).toBe('msg-boundary-test');
+      });
+
+      it('message internalDate = upper bound → EXCLUDED', async () => {
+        const res = await testMessageWithInternalDate(String(upperBoundMs));
+        expect(res.events).toHaveLength(0);
+      });
+
+      it('two consecutive scans sharing the same watermark have no uncovered instant', async () => {
+        const watermarkInstant = String(upperBoundMs); // This instant sits right on the shared watermark boundary
+
+        // Scan 1: [T0, T1) - should exclude watermarkInstant
+        const scan1 = await testMessageWithInternalDate(watermarkInstant);
+        expect(scan1.events).toHaveLength(0);
+
+        // Scan 2: [T1, T2) where lowerBoundEpoch = T1 - should include watermarkInstant
+        const origFetch = global.fetch;
+        try {
+          global.fetch = vi.fn().mockImplementation(async (urlStr: string) => {
+            if (urlStr.includes('/messages?')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  messages: [{ id: 'msg-boundary-test', threadId: 'th-1' }],
+                }),
+              };
+            }
+            if (urlStr.includes('/messages/msg-boundary-test')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  id: 'msg-boundary-test',
+                  snippet: 'VCB: TK 1234| GD: -10,000 VND | 05/09/2026',
+                  internalDate: watermarkInstant,
+                  payload: {
+                    headers: [
+                      { name: 'From', value: 'vietcombank@vcb.com.vn' },
+                      { name: 'Subject', value: 'VCB: TK 1234| GD: -10,000 VND | 05/09/2026' },
+                      { name: 'Date', value: 'Sat, 05 Sep 2026 09:30:00 +0700' },
+                    ],
+                    body: {
+                      data: Buffer.from('VCB: TK 1234| GD: -10,000 VND | 05/09/2026').toString('base64'),
+                    },
+                  },
+                }),
+              };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+          });
+
+          const scan2 = await ingestFromGmail('test-refresh-token', {
+            mode: 'QUICK',
+            lowerBoundEpoch: upperBoundEpoch, // T1
+            upperBoundEpoch: upperBoundEpoch + 3600, // T2
+          });
+
+          expect(scan2.events).toHaveLength(1);
+          expect(scan2.events[0].gmailMessageId).toBe('msg-boundary-test');
+        } finally {
+          global.fetch = origFetch;
+        }
+      });
     });
   });
 });

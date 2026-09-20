@@ -44,7 +44,6 @@ export function SettingsView() {
   // Continuation binding to lock query params
   const [quickScanContinuationBinding, setQuickScanContinuationBinding] = useState<{
     accountId?: string;
-    quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
   } | null>(null);
 
   const [historicalContinuationBinding, setHistoricalContinuationBinding] = useState<{
@@ -105,7 +104,6 @@ export function SettingsView() {
       if (stats.truncated) {
         setQuickScanContinuationBinding({
           accountId: selectedAccountForSync,
-          quickScanBounds: stats.quickScanBounds,
         });
       } else {
         setQuickScanContinuationBinding(null);
@@ -119,16 +117,14 @@ export function SettingsView() {
     const stats = await syncEmail({
       mode: 'QUICK',
       accountId: quickScanContinuationBinding.accountId,
-      pageToken: lastSyncStats.nextPageToken,
-      accountContinuationTokens: lastSyncStats.accountContinuationTokens,
-      quickScanBounds: quickScanContinuationBinding.quickScanBounds,
+      continuationTokens: lastSyncStats.continuationTokens,
+      continuationToken: lastSyncStats.continuationToken,
     });
     if (stats) {
       setLastSyncStats(stats);
       if (stats.truncated) {
         setQuickScanContinuationBinding({
           accountId: quickScanContinuationBinding.accountId,
-          quickScanBounds: stats.quickScanBounds || quickScanContinuationBinding.quickScanBounds,
         });
       } else {
         setQuickScanContinuationBinding(null);
@@ -174,8 +170,8 @@ export function SettingsView() {
       accountId: historicalContinuationBinding.accountId,
       fromDate: historicalContinuationBinding.fromDate,
       toDate: historicalContinuationBinding.toDate,
-      pageToken: lastSyncStats.nextPageToken,
-      accountContinuationTokens: lastSyncStats.accountContinuationTokens,
+      continuationTokens: lastSyncStats.continuationTokens,
+      continuationToken: lastSyncStats.continuationToken,
     });
     if (stats) {
       setLastSyncStats(stats);
