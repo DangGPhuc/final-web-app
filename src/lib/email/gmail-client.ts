@@ -7,6 +7,13 @@ import {
   type RawEmailData,
 } from './bank-parsers';
 
+export class GmailTokenExpiredError extends Error {
+  constructor(message: string = 'Gmail refresh token is expired or revoked') {
+    super(message);
+    this.name = 'GmailTokenExpiredError';
+  }
+}
+
 interface GmailMessageListResponse {
   messages?: { id: string; threadId: string }[];
   nextPageToken?: string;
@@ -46,6 +53,55 @@ export interface IngestionResult {
   nextPageToken?: string;
 }
 
+export interface BankRegistryEntry {
+  bankCode: string;
+  bankName: string;
+  senderQuery: string;
+  signatureQuery: string;
+}
+
+/**
+ * Internal registry of recognized Vietnamese banks with strict sender domains and signatures
+ */
+export const BANK_NOTIFICATION_REGISTRY: BankRegistryEntry[] = [
+  {
+    bankCode: 'VCB',
+    bankName: 'Vietcombank',
+    senderQuery: 'from:(@vietcombank.com.vn OR @vcb.com.vn)',
+    signatureQuery: '("biến động" OR "số dư" OR "giao dịch" OR "VCB:" OR "TK ••••")',
+  },
+  {
+    bankCode: 'TCB',
+    bankName: 'Techcombank',
+    senderQuery: 'from:(@techcombank.com.vn OR @tcb.com.vn)',
+    signatureQuery: '("biến động" OR "số dư" OR "ghi nợ" OR "ghi có" OR "Techcombank")',
+  },
+  {
+    bankCode: 'MB',
+    bankName: 'MB Bank',
+    senderQuery: 'from:(@mbbank.com.vn)',
+    signatureQuery: '("biến động" OR "số dư" OR "giao dịch" OR "MBBank")',
+  },
+  {
+    bankCode: 'ACB',
+    bankName: 'ACB',
+    senderQuery: 'from:(@acb.com.vn)',
+    signatureQuery: '("biến động" OR "số dư" OR "ACB")',
+  },
+  {
+    bankCode: 'VPB',
+    bankName: 'VPBank',
+    senderQuery: 'from:(@vpbank.com.vn)',
+    signatureQuery: '("biến động" OR "số dư" OR "VPBank")',
+  },
+  {
+    bankCode: 'BIDV',
+    bankName: 'BIDV',
+    senderQuery: 'from:(@bidv.com.vn)',
+    signatureQuery: '("biến động" OR "số dư" OR "BIDV")',
+  },
+];
+
 /**
  * Recursively extract text content from Gmail payload parts
  */
@@ -79,20 +135,19 @@ export function formatGmailDateQuery(d: Date): string {
 }
 
 /**
- * Build privacy-preserving targeted Gmail search query for bank notification emails
+ * Build privacy-preserving targeted Gmail search query strictly from BANK_NOTIFICATION_REGISTRY
+ * Form: ( (Bank A sender AND signature) OR (Bank B sender AND signature) ... OR (Forwarded Bank Notification) )
  */
 export function buildBankSearchQuery(options: { fromDate?: Date; toDate?: Date } = {}): string {
-  // Exact controlled bank sender domains
-  const senderFilter =
-    'from:(@vietcombank.com.vn OR @vcb.com.vn OR @techcombank.com.vn OR @tcb.com.vn OR @mbbank.com.vn OR @acb.com.vn OR @vpbank.com.vn OR @bidv.com.vn)';
+  const bankClauses = BANK_NOTIFICATION_REGISTRY.map(
+    entry => `(${entry.senderQuery} AND ${entry.signatureQuery})`
+  );
 
-  // Controlled bank subject / notification signatures
-  const subjectFilter =
-    'subject:("biến động" OR "số dư" OR "ghi nợ" OR "ghi có" OR "giao dịch" OR "VCB:" OR "Techcombank")';
+  const forwardedClause =
+    '(("Fwd:" OR "chuyển tiếp" OR "forwarded message") AND ("vietcombank" OR "techcombank" OR "mbbank" OR "acb" OR "vpbank" OR "bidv") AND ("biến động" OR "số dư" OR "giao dịch"))';
 
-  // Strict grouping ensures we never scan unrelated personal emails
-  const coreFilter = `(${senderFilter} OR ${subjectFilter})`;
-  const parts = [coreFilter];
+  const combinedClauses = `(${bankClauses.join(' OR ')} OR ${forwardedClause})`;
+  const parts = [combinedClauses];
 
   if (options.fromDate) {
     parts.push(`after:${formatGmailDateQuery(options.fromDate)}`);
@@ -112,7 +167,16 @@ export async function ingestFromGmail(
   refreshToken: string,
   options: FetchEmailOptions = {}
 ): Promise<IngestionResult> {
-  const accessToken = await refreshAccessToken(refreshToken);
+  let accessToken: string;
+  try {
+    accessToken = await refreshAccessToken(refreshToken);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('400') || msg.includes('invalid_grant') || msg.includes('revoked')) {
+      throw new GmailTokenExpiredError('Token đã hết hạn hoặc bị thu hồi (Reconnect required).');
+    }
+    throw err;
+  }
 
   const query = buildBankSearchQuery(options);
   const maxMessages = options.maxMessages || 1000;
@@ -136,6 +200,9 @@ export async function ingestFromGmail(
     });
 
     if (!listRes.ok) {
+      if (listRes.status === 401 || listRes.status === 403) {
+        throw new GmailTokenExpiredError(`Gmail API unauthorized: ${listRes.status}`);
+      }
       throw new Error(`Gmail API list failed: ${listRes.status}`);
     }
 
@@ -206,7 +273,6 @@ export async function ingestFromGmail(
       if (parsed) {
         events.push(parsed);
       } else {
-        // Did not contain reliable financial amounts -> recorded as unparseable
         failedCount++;
       }
     } catch {
@@ -223,41 +289,41 @@ export async function ingestFromGmail(
   };
 }
 
-// ─── Demo Fixture Fallback (For offline classroom demo when no Google API key) ──
+// ─── Demo Fixture Fallback (For offline classroom demo when explicitly enabled) ──
 
 export function getDemoBankEmails(): RawEmailData[] {
   return [
     {
       id: 'demo_msg_vcb_001',
       from: 'vietcombank@vcb.com.vn',
-      subject: 'VCB: TK ••••1234| GD: +25,000,000 VND | 05/09/2026 | Cong ty CP Cong nghe chuyen luong Thang 9',
-      snippet: 'VCB: TK ••••1234| GD: +25,000,000 VND | 05/09/2026 | Cong ty CP Cong nghe chuyen luong Thang 9',
-      bodyText: 'VCB: TK ••••1234| GD: +25,000,000 VND | 05/09/2026 | Cong ty CP Cong nghe chuyen luong Thang 9',
-      date: '2026-09-05T09:30:00.000Z',
+      subject: 'VCB: TK ••••1234| GD: +25,000,000 VND | 05/09/2026 09:30 | Cong ty CP Cong nghe chuyen luong Thang 9',
+      snippet: 'VCB: TK ••••1234| GD: +25,000,000 VND | 05/09/2026 09:30 | Cong ty CP Cong nghe chuyen luong Thang 9',
+      bodyText: 'VCB: TK ••••1234| GD: +25,000,000 VND | 05/09/2026 09:30 | Mã GD: FT262490001 | Cong ty CP Cong nghe chuyen luong Thang 9',
+      date: '2026-09-05T09:35:00.000Z',
     },
     {
       id: 'demo_msg_vcb_002',
       from: 'vietcombank@vcb.com.vn',
-      subject: 'VCB: TK ••••1234| GD: -120,000 VND | 06/09/2026 | Thanh toan Cafe Highland Nguyen Du',
-      snippet: 'VCB: TK ••••1234| GD: -120,000 VND | 06/09/2026 | Thanh toan Cafe Highland Nguyen Du',
-      bodyText: 'VCB: TK ••••1234| GD: -120,000 VND | 06/09/2026 | Thanh toan Cafe Highland Nguyen Du',
-      date: '2026-09-06T14:15:00.000Z',
+      subject: 'VCB: TK ••••1234| GD: -120,000 VND | 06/09/2026 14:15 | Thanh toan Cafe Highland Nguyen Du',
+      snippet: 'VCB: TK ••••1234| GD: -120,000 VND | 06/09/2026 14:15 | Thanh toan Cafe Highland Nguyen Du',
+      bodyText: 'VCB: TK ••••1234| GD: -120,000 VND | 06/09/2026 14:15 | Mã GD: FT262500002 | Thanh toan Cafe Highland Nguyen Du',
+      date: '2026-09-06T14:20:00.000Z',
     },
     {
       id: 'demo_msg_vcb_003',
       from: 'vietcombank@vcb.com.vn',
-      subject: 'VCB: TK ••••1234| GD: -350,000 VND | 08/09/2026 | Thanh toan Grab Car di lam',
-      snippet: 'VCB: TK ••••1234| GD: -350,000 VND | 08/09/2026 | Thanh toan Grab Car di lam',
-      bodyText: 'VCB: TK ••••1234| GD: -350,000 VND | 08/09/2026 | Thanh toan Grab Car di lam',
-      date: '2026-09-08T08:00:00.000Z',
+      subject: 'VCB: TK ••••1234| GD: -350,000 VND | 08/09/2026 08:00 | Thanh toan Grab Car di lam',
+      snippet: 'VCB: TK ••••1234| GD: -350,000 VND | 08/09/2026 08:00 | Thanh toan Grab Car di lam',
+      bodyText: 'VCB: TK ••••1234| GD: -350,000 VND | 08/09/2026 08:00 | Mã GD: FT262520003 | Thanh toan Grab Car di lam',
+      date: '2026-09-08T08:05:00.000Z',
     },
     {
       id: 'demo_msg_tcb_004',
       from: 'alert@techcombank.com.vn',
       subject: 'Thông báo biến động số dư tài khoản',
-      snippet: 'So tien ghi no: 1,850,000 VND luc 10/09/2026. Dien giai: Mua sam Shopee don hang 98231',
-      bodyText: 'So tien ghi no: 1,850,000 VND luc 10/09/2026 tai khoan 8821. Dien giai: Mua sam Shopee don hang 98231',
-      date: '2026-09-10T19:20:00.000Z',
+      snippet: 'So tien ghi no: 1,850,000 VND luc 10/09/2026 19:20. Dien giai: Mua sam Shopee don hang 98231',
+      bodyText: 'So tien ghi no: 1,850,000 VND luc 10/09/2026 19:20 tai khoan 8821. Mã GD: TCB98231. Dien giai: Mua sam Shopee don hang 98231',
+      date: '2026-09-10T19:25:00.000Z',
     },
     {
       id: 'demo_msg_unknown_005',

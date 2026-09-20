@@ -15,6 +15,7 @@ import {
   AlertCircle,
   ExternalLink,
   ShieldCheck,
+  Lock,
 } from 'lucide-react';
 
 export function SettingsView() {
@@ -25,6 +26,7 @@ export function SettingsView() {
     isSyncing,
     clearFinancialData,
     factoryReset,
+    lockCockpit,
   } = useApp();
 
   // Dynamic default dates: 1st of current month to today
@@ -64,6 +66,19 @@ export function SettingsView() {
       accountId: selectedAccountForSync,
       fromDate,
       toDate,
+    });
+    if (stats) setLastSyncStats(stats);
+  };
+
+  // Handle Continuation Import for truncated scans
+  const handleContinueImport = async () => {
+    if (!lastSyncStats?.truncated) return;
+    const stats = await syncEmail({
+      accountId: selectedAccountForSync,
+      fromDate,
+      toDate,
+      pageToken: lastSyncStats.nextPageToken,
+      accountContinuationTokens: lastSyncStats.accountContinuationTokens,
     });
     if (stats) setLastSyncStats(stats);
   };
@@ -184,18 +199,33 @@ export function SettingsView() {
                     <div className="text-[11px] text-[#9f9fa0] font-mono truncate">
                       {account.email}
                     </div>
-                    <div className="text-[10px] text-[#6b6b70] mt-0.5">
-                      Lần quét: {account.lastSyncAt ? formatDate(account.lastSyncAt, 'short') : 'Chưa quét'}
+                    <div className="text-[10px] text-[#6b6b70] mt-0.5 flex items-center gap-2">
+                      <span>Lần quét: {account.lastSyncAt ? formatDate(account.lastSyncAt, 'short') : 'Chưa quét'}</span>
+                      {account.connectionStatus === 'reconnect_required' && (
+                        <span className="text-[10px] text-amber-400 bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.2 rounded font-mono">
+                          Token hết hạn (Cần kết nối lại)
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
 
-                <button
-                  onClick={() => setDisconnectingAccount(account.id)}
-                  className="btn-secondary text-xs py-1 px-2.5 text-[#9f9fa0] hover:text-[#f43f5e] hover:border-[#f43f5e]/40 whitespace-nowrap flex-shrink-0"
-                >
-                  Ngắt kết nối
-                </button>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {account.connectionStatus === 'reconnect_required' && (
+                    <a
+                      href="/api/google/connect"
+                      className="btn-secondary text-xs py-1 px-2 text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
+                    >
+                      Kết nối lại
+                    </a>
+                  )}
+                  <button
+                    onClick={() => setDisconnectingAccount(account.id)}
+                    className="btn-secondary text-xs py-1 px-2.5 text-[#9f9fa0] hover:text-[#f43f5e] hover:border-[#f43f5e]/40 whitespace-nowrap"
+                  >
+                    Ngắt kết nối
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -305,10 +335,10 @@ export function SettingsView() {
 
         {/* Sync Result Summary Card */}
         {lastSyncStats && (
-          <div className="p-4 rounded-xl bg-[#090a0b] border border-[#00b3dd]/30 space-y-2 animate-in fade-in duration-200">
+          <div className="p-4 rounded-xl bg-[#090a0b] border border-[#00b3dd]/30 space-y-3 animate-in fade-in duration-200">
             <div className="flex items-center gap-2 text-xs font-medium text-[#00b3dd]">
               <CheckCircle2 className="w-4 h-4" />
-              <span>{lastSyncStats.truncated ? 'Quét một phần (Chưa hết trang)' : 'Quét hoàn tất'}</span>
+              <span>{lastSyncStats.truncated ? 'Đã nhập một phần lịch sử' : 'Quét hoàn tất'}</span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-[#232427] text-xs">
@@ -330,12 +360,51 @@ export function SettingsView() {
               </div>
             </div>
 
+            {/* Continuation Banner */}
             {lastSyncStats.truncated && (
-              <div className="p-2.5 rounded-lg bg-[#f59e0b]/15 border border-[#f59e0b]/30 text-xs text-[#f59e0b] flex items-center gap-2 mt-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>
-                  Quét một phần (giới hạn an toàn): Vẫn còn email tiếp theo trên Gmail. Bạn có thể chọn khoảng ngày hẹp hơn để quét toàn bộ.
-                </span>
+              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/25 text-xs text-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-2">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                  <div>
+                    <div className="font-medium text-white">Đã nhập một phần lịch sử.</div>
+                    <div className="text-[11px] text-amber-200/80">Vẫn còn email cần quét theo phân trang an toàn.</div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleContinueImport}
+                  disabled={isSyncing}
+                  className="btn-primary text-xs py-1.5 px-3 bg-amber-600 hover:bg-amber-500 text-white shrink-0 flex items-center gap-1.5"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>{isSyncing ? 'Đang tiếp tục...' : 'Tiếp tục nhập'}</span>
+                </button>
+              </div>
+            )}
+
+            {/* Per-Account Sync Accounting */}
+            {lastSyncStats.accountResults && lastSyncStats.accountResults.length > 0 && (
+              <div className="space-y-1.5 pt-2 border-t border-[#232427]">
+                <div className="text-[10px] font-mono-data text-[#828288] uppercase tracking-wider">
+                  Chi tiết theo tài khoản:
+                </div>
+                {lastSyncStats.accountResults.map(acc => (
+                  <div
+                    key={acc.accountId}
+                    className="flex items-center justify-between text-xs py-1.5 px-2.5 rounded-lg bg-[#121316] font-mono"
+                  >
+                    <span className="text-[#f5f5f7]">{acc.email}</span>
+                    {acc.status === 'reconnect_required' ? (
+                      <span className="text-amber-400 text-[11px]">✕ Token hết hạn / Cần kết nối lại</span>
+                    ) : acc.status === 'error' ? (
+                      <span className="text-rose-400 text-[11px]">✕ {acc.errorMessage || 'Lỗi'}</span>
+                    ) : (
+                      <span className="text-emerald-400 text-[11px]">
+                        ✓ {acc.fetchedCount} emails (+{acc.newCount} mới, {acc.duplicateCount} trùng)
+                      </span>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
 
@@ -365,7 +434,7 @@ export function SettingsView() {
             <div>
               <div className="text-xs font-medium text-[#f5f5f7]">Xóa dữ liệu tài chính</div>
               <p className="text-[11px] text-[#9f9fa0] mt-1">
-                Xóa biến động ngân hàng, danh mục, quỹ và snapshot. <strong>Giữ nguyên liên kết Gmail</strong> để bạn có thể bấm "Nhập lịch sử" nạp lại bất kỳ lúc nào.
+                Xóa biến động ngân hàng, danh mục, quỹ và snapshot. <strong>Giữ nguyên liên kết Gmail</strong> để bạn có thể bấm &quot;Nhập lịch sử&quot; nạp lại bất kỳ lúc nào.
               </p>
             </div>
             <button
@@ -414,6 +483,34 @@ export function SettingsView() {
               </button>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* D. BẢO MẬT & PHIÊN CHỦ SỞ HỮU */}
+      <div className="cockpit-card p-6 space-y-4">
+        <div className="flex items-center gap-2 text-sm font-medium text-[#f5f5f7]">
+          <Lock className="w-4 h-4 text-emerald-400" />
+          <span>D. BẢO MẬT &amp; PHIÊN CHỦ SỞ HỮU</span>
+        </div>
+        <p className="text-xs text-[#9f9fa0]">
+          Phiên làm việc của bạn đang được bảo vệ bởi cookie an toàn HTTP-only SameSite. Bạn có thể khóa Cockpit bất kỳ lúc nào để yêu cầu nhập lại khóa khi quay lại.
+        </p>
+
+        <div className="p-4 rounded-xl bg-[#090a0b] border border-[#232427] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="text-xs font-medium text-white">Khóa không gian Cockpit</div>
+            <p className="text-[11px] text-[#6b6b70] mt-0.5">
+              Đăng xuất phiên chủ sở hữu và trở về màn hình mở khóa bảo vệ.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => lockCockpit()}
+            className="btn-secondary text-xs text-rose-400 border-rose-500/30 hover:bg-rose-500/10 py-2 px-3 flex items-center gap-1.5 shrink-0"
+          >
+            <Lock className="w-3.5 h-3.5" />
+            <span>Khóa Cockpit</span>
+          </button>
         </div>
       </div>
 

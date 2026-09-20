@@ -145,11 +145,11 @@ describe('Gmail Ingestion & Bank Parsing', () => {
 
       expect(query).toContain('@vietcombank.com.vn');
       expect(query).toContain('@techcombank.com.vn');
-      expect(query).toContain('subject:(');
+      expect(query).toContain('biến động');
+      expect(query).toContain('Fwd:');
+      expect(query).toContain('chuyển tiếp');
       expect(query).toContain('after:2026/09/01');
       expect(query).toContain('before:2026/09/21');
-      // Ensure outer grouping with parentheses
-      expect(query).toMatch(/^\([^(].*\)\s+after:/);
     });
   });
 

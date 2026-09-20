@@ -14,14 +14,20 @@ export async function GET() {
       createdAt: f.createdAt.toISOString(),
     }));
 
-    return NextResponse.json({ success: true, funds: formatted });
+    return NextResponse.json(
+      { success: true, funds: formatted },
+      { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', Pragma: 'no-cache' } }
+    );
   } catch (error) {
     return NextResponse.json(
       {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to fetch funds',
       },
-      { status: 500 }
+      {
+        status: 500,
+        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', Pragma: 'no-cache' },
+      }
     );
   }
 }

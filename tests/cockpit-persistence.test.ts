@@ -4,15 +4,18 @@ import { encryptToken, decryptToken, setTestEncryptionKey } from '../src/lib/sec
 import {
   createOwnerSessionToken,
   verifyOwnerSessionToken,
+  setTestOwnerSecretKey,
 } from '../src/lib/security/owner-auth';
 import { calculateBalance } from '../src/lib/finance/calculations';
 import type { BankTransaction } from '../src/types';
 
 const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const TEST_OWNER_KEY = 'test-owner-secret-key-32-characters-len';
 
 describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
   beforeAll(async () => {
     setTestEncryptionKey(TEST_KEY);
+    setTestOwnerSecretKey(TEST_OWNER_KEY);
     // Clean slate before tests
     await prisma.bankTransaction.deleteMany();
     await prisma.category.deleteMany();
@@ -23,6 +26,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
 
   afterAll(async () => {
     setTestEncryptionKey(null);
+    setTestOwnerSecretKey(null);
     await prisma.$disconnect();
   });
 
@@ -232,6 +236,102 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
       expect(allCoffeeTxs[0].id).not.toBe(allCoffeeTxs[1].id);
     });
 
+    it('preserves two legitimate same-amount transactions occurring one minute apart', async () => {
+      const txMinute1 = await prisma.bankTransaction.create({
+        data: {
+          gmailMessageId: 'msg_coffee_min_1',
+          bankRefId: 'FT_COFFEE_01',
+          bankCode: 'VCB',
+          direction: 'OUT',
+          amount: BigInt(55000),
+          occurredAt: new Date('2026-09-08T10:00:00Z'),
+          summary: 'Highlands Coffee 1',
+          classificationState: 'UNCLASSIFIED',
+        },
+      });
+
+      const txMinute2 = await prisma.bankTransaction.create({
+        data: {
+          gmailMessageId: 'msg_coffee_min_2',
+          bankRefId: 'FT_COFFEE_02',
+          bankCode: 'VCB',
+          direction: 'OUT',
+          amount: BigInt(55000),
+          occurredAt: new Date('2026-09-08T10:01:00Z'),
+          summary: 'Highlands Coffee 2',
+          classificationState: 'UNCLASSIFIED',
+        },
+      });
+
+      expect(txMinute1.id).toBeDefined();
+      expect(txMinute2.id).toBeDefined();
+
+      const results = await prisma.bankTransaction.findMany({
+        where: { amount: BigInt(55000) },
+      });
+      expect(results.length).toBe(2);
+    });
+
+    it('preserves two legitimate identical transactions within same minute when having distinct bank references', async () => {
+      const txA = await prisma.bankTransaction.create({
+        data: {
+          gmailMessageId: 'msg_identical_same_min_A',
+          bankRefId: 'REF_BATCH_1001',
+          bankCode: 'TCB',
+          direction: 'OUT',
+          amount: BigInt(200000),
+          occurredAt: new Date('2026-09-08T15:30:00Z'),
+          summary: 'Nap tien Grab',
+          classificationState: 'UNCLASSIFIED',
+        },
+      });
+
+      const txB = await prisma.bankTransaction.create({
+        data: {
+          gmailMessageId: 'msg_identical_same_min_B',
+          bankRefId: 'REF_BATCH_1002', // distinct bank reference ID
+          bankCode: 'TCB',
+          direction: 'OUT',
+          amount: BigInt(200000),
+          occurredAt: new Date('2026-09-08T15:30:00Z'), // identical minute!
+          summary: 'Nap tien Grab',
+          classificationState: 'UNCLASSIFIED',
+        },
+      });
+
+      expect(txA.id).toBeDefined();
+      expect(txB.id).toBeDefined();
+
+      const identicalTxs = await prisma.bankTransaction.findMany({
+        where: { amount: BigInt(200000) },
+      });
+      expect(identicalTxs.length).toBe(2);
+    });
+
+    it('records revokedAt when Gmail connection requires reconnection', async () => {
+      const conn = await prisma.gmailConnection.findFirst({ where: { googleSub: 'google_sub_1001' } });
+      expect(conn).not.toBeNull();
+
+      const revokedTime = new Date();
+      const updated = await prisma.gmailConnection.update({
+        where: { id: conn!.id },
+        data: { revokedAt: revokedTime },
+      });
+
+      expect(updated.revokedAt).not.toBeNull();
+
+      const activeConns = await prisma.gmailConnection.findMany({
+        where: { revokedAt: null },
+      });
+      expect(activeConns.some(c => c.id === conn!.id)).toBe(false);
+
+      // Restore for subsequent tests
+      await prisma.gmailConnection.update({
+        where: { id: conn!.id },
+        data: { revokedAt: null },
+      });
+    });
+
     it('overlapping date ranges produce no duplicates', async () => {
       // Add a salary transaction
       await prisma.bankTransaction.create({
@@ -264,6 +364,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
         ...t,
         amount: Number(t.amount),
         occurredAt: t.occurredAt.toISOString(),
+        emailReceivedAt: t.emailReceivedAt ? t.emailReceivedAt.toISOString() : null,
         importedAt: t.importedAt.toISOString(),
         direction: t.direction as 'IN' | 'OUT',
         classificationState: t.classificationState as 'UNCLASSIFIED' | 'CLASSIFIED',
@@ -289,6 +390,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
         ...t,
         amount: Number(t.amount),
         occurredAt: t.occurredAt.toISOString(),
+        emailReceivedAt: t.emailReceivedAt ? t.emailReceivedAt.toISOString() : null,
         importedAt: t.importedAt.toISOString(),
         direction: t.direction as 'IN' | 'OUT',
         classificationState: t.classificationState as 'UNCLASSIFIED' | 'CLASSIFIED',

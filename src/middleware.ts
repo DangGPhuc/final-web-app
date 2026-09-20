@@ -53,7 +53,10 @@ export async function middleware(req: NextRequest) {
     );
   }
 
-  return NextResponse.next();
+  const res = NextResponse.next();
+  res.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.headers.set('Pragma', 'no-cache');
+  return res;
 }
 
 export const config = {

@@ -51,6 +51,11 @@ interface AppContextType {
   setClassifyingTransaction: (tx: BankTransaction | null) => void;
   showToast: (text: string, type?: 'success' | 'error' | 'info') => void;
 
+  // Single-Owner Authentication State
+  isOwnerAuthenticated: boolean | null;
+  unlockCockpit: (key: string) => Promise<{ success: boolean; error?: string }>;
+  lockCockpit: () => Promise<void>;
+
   // Data Loading & Refresh
   refreshData: () => Promise<void>;
 
@@ -67,7 +72,14 @@ interface AppContextType {
   createCategory: (name: string, direction?: string) => Promise<Category>;
 
   // Email Sync & OAuth
-  syncEmail: (params?: { accountId?: string; fromDate?: string; toDate?: string; isDemoMode?: boolean }) => Promise<SyncResultStats | null>;
+  syncEmail: (params?: {
+    accountId?: string;
+    fromDate?: string;
+    toDate?: string;
+    isDemoMode?: boolean;
+    pageToken?: string;
+    accountContinuationTokens?: Record<string, string>;
+  }) => Promise<SyncResultStats | null>;
   disconnectGmail: (accountId: string) => Promise<void>;
 
   // Month Snapshot / Close Operations
@@ -107,25 +119,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }, 4000);
   }, []);
 
+  // Single-owner authentication state (null = checking, false = locked, true = unlocked)
+  const [isOwnerAuthenticated, setIsOwnerAuthenticated] = useState<boolean | null>(null);
+
   // Refresh domain data from server
   const refreshData = useCallback(async () => {
     try {
-      // 1. Verify / bootstrap owner session
-      try {
-        const sessionCheck = await fetch('/api/owner/session');
-        const sessionData = await sessionCheck.json();
-        if (!sessionData.authenticated) {
-          await fetch('/api/owner/session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ secretKey: 'cockpit-owner-demo-secret-2026' }),
-          });
-        }
-      } catch {
-        // Network or offline
-      }
-
-      // 2. Fetch domain data
       const [txRes, fundsRes, catRes, accRes] = await Promise.all([
         fetch('/api/transactions'),
         fetch('/api/funds'),
@@ -154,10 +153,66 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Initial load
-  useEffect(() => {
-    refreshData();
+  // Check initial owner session status
+  const checkOwnerSession = useCallback(async () => {
+    try {
+      const res = await fetch('/api/owner/session');
+      const data = await res.json();
+      const authenticated = !!data.authenticated;
+      setIsOwnerAuthenticated(authenticated);
+      if (authenticated) {
+        await refreshData();
+      }
+      return authenticated;
+    } catch {
+      setIsOwnerAuthenticated(false);
+      return false;
+    }
   }, [refreshData]);
+
+  // Unlock cockpit with owner secret (never persisted to storage or kept in React state)
+  const unlockCockpit = useCallback(
+    async (secretKey: string) => {
+      try {
+        const res = await fetch('/api/owner/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ secretKey }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          setIsOwnerAuthenticated(true);
+          await refreshData();
+          showToast('Mở khóa Cockpit thành công.', 'success');
+          return { success: true };
+        }
+        return { success: false, error: data.error || 'Khóa chủ sở hữu không chính xác.' };
+      } catch {
+        return { success: false, error: 'Không thể kết nối đến máy chủ.' };
+      }
+    },
+    [refreshData, showToast]
+  );
+
+  // Lock cockpit (clears server cookie and local in-memory domain state)
+  const lockCockpit = useCallback(async () => {
+    try {
+      await fetch('/api/owner/session', { method: 'DELETE' });
+    } catch {
+      // Ignore network errors
+    }
+    setIsOwnerAuthenticated(false);
+    setTransactions([]);
+    setFunds([]);
+    setCategories([]);
+    setGmailAccounts([]);
+    showToast('Đã khóa Cockpit.', 'info');
+  }, [showToast]);
+
+  // Initial session verification
+  useEffect(() => {
+    checkOwnerSession();
+  }, [checkOwnerSession]);
 
   // Derived metrics
   const balance = useMemo(() => {
@@ -322,6 +377,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       fromDate?: string;
       toDate?: string;
       isDemoMode?: boolean;
+      pageToken?: string;
+      accountContinuationTokens?: Record<string, string>;
     }) => {
       setIsSyncing(true);
       try {
@@ -336,10 +393,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
 
         const stats: SyncResultStats = data.stats;
-        showToast(
-          `Quét hoàn tất: +${stats.totalNew} biến động mới, ${stats.totalDuplicates} đã tồn tại`,
-          'success'
-        );
+        if (stats.truncated) {
+          showToast(
+            `Đã nhập một phần lịch sử: +${stats.totalNew} biến động mới. Vẫn còn email cần quét.`,
+            'info'
+          );
+        } else {
+          showToast(
+            `Quét hoàn tất: +${stats.totalNew} biến động mới, ${stats.totalDuplicates} đã tồn tại`,
+            'success'
+          );
+        }
         await refreshData();
         return stats;
       } catch (err) {
@@ -465,6 +529,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setSelectedMonth,
       setClassifyingTransaction,
       showToast,
+      isOwnerAuthenticated,
+      unlockCockpit,
+      lockCockpit,
       refreshData,
       classifyTransaction,
       deleteTransaction,
@@ -497,6 +564,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       selectedMonthCashflow,
       fundStatuses,
       unclassifiedTransactions,
+      isOwnerAuthenticated,
+      unlockCockpit,
+      lockCockpit,
       setActiveTab,
       setSelectedMonth,
       setClassifyingTransaction,

@@ -37,6 +37,7 @@ model BankTransaction {
   amount              BigInt           // Integer minor units (VND) avoiding floating-point imprecision
   currency            String           @default("VND")
   occurredAt          DateTime
+  emailReceivedAt     DateTime?        // Raw email received timestamp (occurredAt holds the actual bank event time)
   counterparty        String?
   merchantLabel       String?          // Display hint only, does NOT classify automatically
   summary             String
@@ -52,6 +53,7 @@ model BankTransaction {
   @@unique([gmailConnectionId, gmailMessageId])
   @@index([gmailMessageId])
   @@index([bankRefId])
+  @@index([bankCode, bankRefId])
   @@index([fingerprint])
   @@index([occurredAt])
   @@index([classificationState])

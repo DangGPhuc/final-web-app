@@ -12,14 +12,20 @@ export async function GET() {
       createdAt: c.createdAt.toISOString(),
     }));
 
-    return NextResponse.json({ success: true, categories: formatted });
+    return NextResponse.json(
+      { success: true, categories: formatted },
+      { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', Pragma: 'no-cache' } }
+    );
   } catch (error) {
     return NextResponse.json(
       {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to fetch categories',
       },
-      { status: 500 }
+      {
+        status: 500,
+        headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', Pragma: 'no-cache' },
+      }
     );
   }
 }

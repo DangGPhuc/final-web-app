@@ -11,6 +11,7 @@ import { TradingView } from '@/components/trading/TradingView';
 import { SettingsView } from '@/components/settings/SettingsView';
 import { ClassificationModal } from '@/components/shared/ClassificationModal';
 import { Toast } from '@/components/shared/Toast';
+import { OwnerUnlockScreen } from '@/components/shared/OwnerUnlockScreen';
 
 function MainContent() {
   const {
@@ -60,10 +61,31 @@ function MainContent() {
   );
 }
 
+function CockpitApp() {
+  const { isOwnerAuthenticated } = useApp();
+
+  // Initial authentication check
+  if (isOwnerAuthenticated === null) {
+    return (
+      <div className="min-h-screen bg-[#090a0b] flex items-center justify-center">
+        <div className="w-8 h-8 rounded-full border-2 border-emerald-500/20 border-t-emerald-500 animate-spin" />
+      </div>
+    );
+  }
+
+  // Unauthenticated single-owner protection screen
+  if (isOwnerAuthenticated === false) {
+    return <OwnerUnlockScreen />;
+  }
+
+  // Authenticated owner view
+  return <MainContent />;
+}
+
 export default function Home() {
   return (
     <AppProvider>
-      <MainContent />
+      <CockpitApp />
     </AppProvider>
   );
 }

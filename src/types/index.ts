@@ -20,6 +20,7 @@ export interface BankTransaction {
   amount: number;
   currency: string;
   occurredAt: string; // ISO string
+  emailReceivedAt?: string | null; // ISO string of raw email receipt
   counterparty?: string | null;
   merchantLabel?: string | null; // Display hint only, does NOT automatically classify
   summary: string;
@@ -94,7 +95,20 @@ export interface GmailAccountInfo {
   avatarUrl?: string | null;
   connectedAt: string;
   lastSyncAt?: string | null;
-  connectionStatus: 'connected' | 'error' | 'syncing';
+  connectionStatus: 'connected' | 'error' | 'syncing' | 'reconnect_required';
+}
+
+export interface AccountSyncResult {
+  accountId: string;
+  email: string;
+  fetchedCount: number;
+  newCount: number;
+  duplicateCount: number;
+  failedCount: number;
+  status: 'ok' | 'reconnect_required' | 'error';
+  errorMessage?: string;
+  truncated?: boolean;
+  nextPageToken?: string;
 }
 
 export interface SyncResultStats {
@@ -106,6 +120,8 @@ export interface SyncResultStats {
   dateRange?: string;
   truncated?: boolean;
   nextPageToken?: string;
+  accountResults?: AccountSyncResult[];
+  accountContinuationTokens?: Record<string, string>;
 }
 
 // ─── Savings Forecast ───────────────────────────────────────────────────────

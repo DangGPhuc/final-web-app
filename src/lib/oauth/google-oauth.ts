@@ -47,9 +47,34 @@ export function generatePKCE(): { codeVerifier: string; codeChallenge: string } 
   return { codeVerifier, codeChallenge };
 }
 
+export function validateOAuthConfig(): void {
+  const missing: string[] = [];
+  if (!process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID.trim() === '') {
+    missing.push('GOOGLE_CLIENT_ID');
+  }
+  if (!process.env.GOOGLE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET.trim() === '') {
+    missing.push('GOOGLE_CLIENT_SECRET');
+  }
+  if (!process.env.GOOGLE_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI.trim() === '') {
+    missing.push('GOOGLE_REDIRECT_URI');
+  }
+  if (!process.env.TOKEN_ENCRYPTION_KEY || process.env.TOKEN_ENCRYPTION_KEY.trim() === '') {
+    missing.push('TOKEN_ENCRYPTION_KEY');
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Cấu hình Google OAuth chưa hoàn thiện: thiếu [${missing.join(', ')}].`
+    );
+  }
+}
+
 export function getAuthorizationUrl(state: string, codeChallenge: string): string {
-  const clientId = process.env.GOOGLE_CLIENT_ID || '';
-  const redirectUri = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/api/google/callback';
+  // Fail closed if OAuth or encryption configuration is missing
+  validateOAuthConfig();
+
+  const clientId = process.env.GOOGLE_CLIENT_ID!;
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI!;
 
   const params = new URLSearchParams({
     client_id: clientId,

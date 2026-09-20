@@ -3,7 +3,10 @@
  *
  * Requirements:
  * - Internal parser registry for known Vietnamese bank senders and notification patterns.
- * - Extracts objective financial facts: direction, amount, time, bank, account hint, counterparty.
+ * - Extracts actual bank transaction timestamp from email content in Asia/Ho_Chi_Minh (UTC+7).
+ * - Separates occurredAt (financial event time) and emailReceivedAt (email delivery time).
+ * - Extracts and normalizes bank transaction/reference IDs (Mã GD, Số GD, Reference, FT number).
+ * - Generates conservative normalized fingerprints for cross-account forwarding deduplication.
  * - Detects normalized merchant context (e.g. Highlands Coffee, Grab, Shopee) as display hint only.
  * - If amount or direction cannot be determined reliably, returns null (do NOT create transaction).
  */
@@ -32,19 +35,72 @@ export interface ParsedBankEvent {
   amount: number;
   currency: string;
   occurredAt: Date;
+  emailReceivedAt: Date;
   counterparty?: string;
   merchantLabel?: string;
   summary: string;
 }
 
 /**
- * Extract bank transaction or reference code from text
+ * Extract and normalize bank transaction or reference code from text
+ * Normalized: trimmed, uppercase, stripped of trailing punctuation
  */
 export function extractBankRefId(text: string): string | undefined {
   const refMatch =
-    text.match(/(?:mã\s*gd|số\s*gd|so\s*gd|ma\s*gd|ref(?:erence)?|ft\s*no\.?)[:\s#]*([a-zA-Z0-9.\-_]{5,30})/i) ||
-    text.match(/\b(FT[0-9]{8,22})\b/i);
-  return refMatch ? refMatch[1].trim() : undefined;
+    text.match(/(?:mã\s*gd|số\s*gd|so\s*gd|ma\s*gd|ref(?:erence)?|ft\s*no\.?)[:\s#]*([a-zA-Z0-9.\-_]{5,35})/i) ||
+    text.match(/\b(FT[0-9A-Z]{8,24})\b/i);
+
+  if (!refMatch) return undefined;
+
+  let raw = refMatch[1].trim().toUpperCase();
+  // Strip trailing punctuation
+  raw = raw.replace(/[.;,:\s]+$/, '');
+  return raw.length >= 4 ? raw : undefined;
+}
+
+/**
+ * Parse actual transaction timestamp from bank notification text.
+ * Vietnamese bank notifications are formatted in local time (Asia/Ho_Chi_Minh, UTC+7).
+ * Returns Date object in UTC, or null if no valid bank timestamp was found.
+ */
+export function parseVietnameseBankTimestamp(text: string): Date | null {
+  // Pattern 1: DD/MM/YYYY [at|lúc|,| ] HH:mm(:ss)?
+  // e.g. "05/09/2026 09:30:15", "05/09/2026 | 09:30", "05/09/2026 lúc 09:30", "10/09/2026 19:20"
+  const m1 = text.match(/\b([0-3]?\d)[\/\-.]([01]?\d)[\/\-.](\d{4})(?:[\s,|lúcat]+([0-2]?\d):([0-5]\d)(?::([0-5]\d))?)?/i);
+  if (m1) {
+    const day = m1[1].padStart(2, '0');
+    const month = m1[2].padStart(2, '0');
+    const year = m1[3];
+    const hour = m1[4] ? m1[4].padStart(2, '0') : '12';
+    const min = m1[5] ? m1[5].padStart(2, '0') : '00';
+    const sec = m1[6] ? m1[6].padStart(2, '0') : '00';
+
+    const isoString = `${year}-${month}-${day}T${hour}:${min}:${sec}+07:00`;
+    const d = new Date(isoString);
+    if (!isNaN(d.getTime())) {
+      return d;
+    }
+  }
+
+  // Pattern 2: HH:mm(:ss)? [ngày|on] DD/MM/YYYY
+  // e.g. "09:30 ngày 05/09/2026", "19:20:00 ngày 10/09/2026"
+  const m2 = text.match(/\b([0-2]?\d):([0-5]\d)(?::([0-5]\d))?[\s,a-zA-Zà-ỹÀ-Ỹ]*([0-3]?\d)[\/\-.]([01]?\d)[\/\-.](\d{4})/i);
+  if (m2) {
+    const hour = m2[1].padStart(2, '0');
+    const min = m2[2].padStart(2, '0');
+    const sec = m2[3] ? m2[3].padStart(2, '0') : '00';
+    const day = m2[4].padStart(2, '0');
+    const month = m2[5].padStart(2, '0');
+    const year = m2[6];
+
+    const isoString = `${year}-${month}-${day}T${hour}:${min}:${sec}+07:00`;
+    const d = new Date(isoString);
+    if (!isNaN(d.getTime())) {
+      return d;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -104,6 +160,12 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
   const lower = combined.toLowerCase();
   const fromLower = email.from.toLowerCase();
 
+  // Email received time
+  let emailReceivedAt = new Date(email.date);
+  if (isNaN(emailReceivedAt.getTime())) {
+    emailReceivedAt = new Date();
+  }
+
   // 1. Vietcombank Parser (VCB)
   if (
     fromLower.includes('vietcombank') ||
@@ -114,7 +176,6 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
     // Patterns:
     // VCB: TK 1234| GD: +25,000,000 VND | 05/09/2026 | Cong ty CP Cong nghe chuyen luong Thang 9
     // VCB: TK 1234| GD: -120,000 VND | 06/09/2026 | Thanh toan Cafe Highland Nguyen Du
-    // So tien: +/-X VND
     const vcbMatch =
       combined.match(/GD:\s*([+-])\s*([\d,.]+)\s*(?:VND|đ)/i) ||
       combined.match(/([+-])\s*([\d,.]+)\s*(?:VND|đ)/i) ||
@@ -143,8 +204,9 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
         const detailPart = parts.length >= 4 ? parts[3].trim() : email.subject;
         const merchantHint = detectMerchantContext(detailPart);
 
-        let date = new Date(email.date);
-        if (isNaN(date.getTime())) date = new Date();
+        // Extract bank transaction timestamp from text, fallback to emailReceivedAt
+        const bankTimestamp = parseVietnameseBankTimestamp(parts[2] || combined);
+        const occurredAt = bankTimestamp || emailReceivedAt;
 
         const bankRefId = extractBankRefId(combined);
         const fingerprint = generateFinancialFingerprint({
@@ -152,7 +214,7 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
           accountHint,
           direction,
           amount: cleanAmount,
-          occurredAt: date,
+          occurredAt,
           summary: detailPart,
         });
 
@@ -166,7 +228,8 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
           direction,
           amount: cleanAmount,
           currency: 'VND',
-          occurredAt: date,
+          occurredAt,
+          emailReceivedAt,
           counterparty: detailPart.slice(0, 80),
           merchantLabel: merchantHint || undefined,
           summary: detailPart.slice(0, 150) || email.subject,
@@ -181,9 +244,8 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
     fromLower.includes('tcb') ||
     lower.includes('techcombank')
   ) {
-    // Pattern: So tien ghi no/ghi co: 1,850,000 VND luc ... Dien giai: ...
+    // Pattern: So tien ghi no/ghi co: 1,850,000 VND luc 10/09/2026 19:20 ... Dien giai: ...
     const isCredit = lower.includes('ghi có') || lower.includes('ghi co') || lower.includes('nhận');
-    const isDebit = lower.includes('ghi nợ') || lower.includes('ghi no') || lower.includes('thanh toán');
 
     const amountMatch = combined.match(/(?:số tiền|so tien|ghi nợ|ghi có|ghi no|ghi co)[:\s]*([\d,.]+)\s*(?:VND|đ)?/i);
     if (amountMatch) {
@@ -198,8 +260,8 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
         const summary = descMatch ? descMatch[1].trim() : email.subject;
         const merchantHint = detectMerchantContext(summary);
 
-        let date = new Date(email.date);
-        if (isNaN(date.getTime())) date = new Date();
+        const bankTimestamp = parseVietnameseBankTimestamp(combined);
+        const occurredAt = bankTimestamp || emailReceivedAt;
 
         const bankRefId = extractBankRefId(combined);
         const fingerprint = generateFinancialFingerprint({
@@ -207,7 +269,7 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
           accountHint,
           direction,
           amount: cleanAmount,
-          occurredAt: date,
+          occurredAt,
           summary,
         });
 
@@ -221,7 +283,8 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
           direction,
           amount: cleanAmount,
           currency: 'VND',
-          occurredAt: date,
+          occurredAt,
+          emailReceivedAt,
           counterparty: summary.slice(0, 80),
           merchantLabel: merchantHint || undefined,
           summary: summary.slice(0, 150),
@@ -257,7 +320,6 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
 
     const cleanAmount = parseInt(rawAmount.replace(/[^\d]/g, ''), 10);
     if (!isNaN(cleanAmount) && cleanAmount > 0) {
-      // Determine bank name if mentioned
       let bankCode = 'GENERIC';
       let bankName = 'Ngân hàng';
       if (lower.includes('mb bank') || lower.includes('mbbank')) {
@@ -278,8 +340,8 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
       const accountHint = acctMatch ? acctMatch[1].trim().slice(-4) : undefined;
       const merchantHint = detectMerchantContext(combined);
 
-      let date = new Date(email.date);
-      if (isNaN(date.getTime())) date = new Date();
+      const bankTimestamp = parseVietnameseBankTimestamp(combined);
+      const occurredAt = bankTimestamp || emailReceivedAt;
 
       const bankRefId = extractBankRefId(combined);
       const summaryText = email.subject || email.snippet.slice(0, 100);
@@ -288,7 +350,7 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
         accountHint,
         direction,
         amount: cleanAmount,
-        occurredAt: date,
+        occurredAt,
         summary: summaryText,
       });
 
@@ -302,7 +364,8 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
         direction,
         amount: cleanAmount,
         currency: 'VND',
-        occurredAt: date,
+        occurredAt,
+        emailReceivedAt,
         counterparty: merchantHint || email.from.split('@')[0],
         merchantLabel: merchantHint || undefined,
         summary: summaryText,

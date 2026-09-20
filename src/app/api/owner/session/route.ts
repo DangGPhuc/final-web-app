@@ -4,16 +4,26 @@ import {
   verifyOwnerSessionToken,
   setOwnerSessionCookie,
   clearOwnerSessionCookie,
-  getOwnerSecretKey,
+  verifyOwnerCredential,
 } from '@/lib/security/owner-auth';
+
+const NO_CACHE_HEADERS = {
+  'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+  Pragma: 'no-cache',
+};
 
 export async function GET(req: NextRequest) {
   const token = req.cookies.get(OWNER_COOKIE_NAME)?.value;
   const isAuthenticated = await verifyOwnerSessionToken(token);
 
-  return NextResponse.json({
-    authenticated: isAuthenticated,
-  });
+  return NextResponse.json(
+    {
+      authenticated: isAuthenticated,
+    },
+    {
+      headers: NO_CACHE_HEADERS,
+    }
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -21,23 +31,36 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const { secretKey } = body as { secretKey?: string };
 
-    const expectedSecret = getOwnerSecretKey();
+    const ip =
+      req.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
+      req.headers.get('x-real-ip') ||
+      '127.0.0.1';
 
-    // If in dev or test and secretKey matches OR user clicked quick-unlock with default
-    if (!secretKey || secretKey.trim() !== expectedSecret) {
+    const result = verifyOwnerCredential(secretKey, ip);
+
+    if (!result.success) {
+      const status = result.rateLimited ? 429 : 401;
       return NextResponse.json(
         {
           success: false,
-          error: 'Khóa chủ sở hữu không chính xác (Invalid owner key).',
+          error: result.error || 'Owner key không hợp lệ',
         },
-        { status: 401 }
+        {
+          status,
+          headers: NO_CACHE_HEADERS,
+        }
       );
     }
 
-    const res = NextResponse.json({
-      success: true,
-      message: 'Xác thực chủ sở hữu thành công (Owner session established).',
-    });
+    const res = NextResponse.json(
+      {
+        success: true,
+        message: 'Mở khóa Cockpit thành công (Owner session established).',
+      },
+      {
+        headers: NO_CACHE_HEADERS,
+      }
+    );
 
     await setOwnerSessionCookie(res);
     return res;
@@ -45,18 +68,26 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: err instanceof Error ? err.message : 'Lỗi xác thực',
+        error: 'Lỗi xác thực khóa chủ sở hữu',
       },
-      { status: 500 }
+      {
+        status: 500,
+        headers: NO_CACHE_HEADERS,
+      }
     );
   }
 }
 
 export async function DELETE() {
-  const res = NextResponse.json({
-    success: true,
-    message: 'Đã đăng xuất phiên chủ sở hữu (Owner session cleared).',
-  });
+  const res = NextResponse.json(
+    {
+      success: true,
+      message: 'Đã khóa Cockpit (Owner session cleared).',
+    },
+    {
+      headers: NO_CACHE_HEADERS,
+    }
+  );
   clearOwnerSessionCookie(res);
   return res;
 }
