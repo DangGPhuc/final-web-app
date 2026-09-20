@@ -2,7 +2,8 @@
 useDefault = true
 
 [allowlist]
-description = "Allowlist sample template configuration"
+description = "Allowlist test suites and example configurations"
 paths = [
-  '''.env.example$'''
+  '''.env.example$''',
+  '''^tests/.*'''
 ]

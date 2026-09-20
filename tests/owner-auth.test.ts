@@ -14,7 +14,7 @@ import {
 } from '@/lib/security/owner-auth';
 
 describe('Single-Owner Access Boundary & Security Hardening', () => {
-  const TEST_KEY = 'test-secret-key-owner-32bytes-hex-val';
+  const TEST_KEY = Buffer.alloc(32, 5).toString('hex');
 
   beforeEach(() => {
     setTestOwnerSecretKey(TEST_KEY);

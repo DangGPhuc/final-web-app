@@ -9,8 +9,8 @@ import {
 import { calculateBalance } from '../src/lib/finance/calculations';
 import type { BankTransaction } from '../src/types';
 
-const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const TEST_OWNER_KEY = 'test-owner-secret-key-32-characters-len';
+const TEST_KEY = Buffer.alloc(32, 3).toString('hex');
+const TEST_OWNER_KEY = Buffer.alloc(32, 7).toString('hex');
 
 describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
   beforeAll(async () => {

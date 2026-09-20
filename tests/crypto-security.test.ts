@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { encryptToken, decryptToken, setTestEncryptionKey } from '../src/lib/security/crypto';
 
-const VALID_TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const VALID_TEST_KEY = Buffer.alloc(32, 1).toString('hex');
 
 describe('Token Security — AES-256-GCM Authenticated Encryption', () => {
   beforeEach(() => {

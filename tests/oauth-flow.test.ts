@@ -36,7 +36,7 @@ describe('Google OAuth 2.0 Flow with PKCE & CSRF Protection', () => {
     process.env.GOOGLE_CLIENT_ID = 'test-client-id.apps.googleusercontent.com';
     process.env.GOOGLE_CLIENT_SECRET = 'test-secret';
     process.env.GOOGLE_REDIRECT_URI = 'http://localhost:3000/api/google/callback';
-    process.env.TOKEN_ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    process.env.TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString('hex');
 
     try {
       const state = generateOAuthState();
