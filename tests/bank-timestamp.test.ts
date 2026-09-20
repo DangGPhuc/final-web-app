@@ -3,6 +3,7 @@ import {
   parseVietnameseBankTimestamp,
   extractBankRefId,
   parseBankNotification,
+  sanitizeHtmlToText,
   type RawEmailData,
 } from '@/lib/email/bank-parsers';
 import { buildBankSearchQuery, BANK_NOTIFICATION_REGISTRY } from '@/lib/email/gmail-client';
@@ -218,4 +219,36 @@ describe('Bank Transaction Timestamp & Notification Parsing', () => {
       expect(query).toContain('before:1789923600');
     });
   });
+
+  describe('HTML Email Sanitization (sanitizeHtmlToText)', () => {
+    it('strips script and style tags iteratively without leaving residual tags', () => {
+      const rawHtml = '<div><script><script>alert(1)</script></script>Hello <style>body{color:red;}</style>World</div>';
+      const clean = sanitizeHtmlToText(rawHtml);
+      expect(clean).toBe('Hello World');
+      expect(clean).not.toContain('<script');
+      expect(clean).not.toContain('alert');
+      expect(clean).not.toContain('color:red');
+    });
+
+    it('does not double unescape entities like &amp;lt;', () => {
+      const html = '<p>&amp;lt;script&amp;gt; &quot;safe&quot; &amp; &lt;b&gt;</p>';
+      const text = sanitizeHtmlToText(html);
+      // &amp;lt; should become &lt;, NOT <
+      expect(text).toContain('&lt;script&gt;');
+      expect(text).toContain('"safe"');
+      expect(text).toContain('&');
+      expect(text).not.toContain('<script>');
+    });
+  });
+
+  describe('Pattern 2 with Vietnamese Unicode Text', () => {
+    it('parses timestamps with Vietnamese words between time and date', () => {
+      const text = 'Giao dịch lúc 14:45 vào ngày 15/09/2026 thành công';
+      const parsed = parseVietnameseBankTimestamp(text);
+      expect(parsed).not.toBeNull();
+      // 14:45 in UTC+7 is 07:45 UTC
+      expect(parsed!.toISOString()).toBe('2026-09-15T07:45:00.000Z');
+    });
+  });
 });
+

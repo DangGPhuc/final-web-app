@@ -69,13 +69,13 @@ export function extractBankRefId(text: string): string | undefined {
 export function parseVietnameseBankTimestamp(text: string): Date | null {
   // Pattern 1: DD/MM/YYYY [at|lúc|,| ] HH:mm(:ss)?
   // e.g. "05/09/2026 09:30:15", "05/09/2026 | 09:30", "05/09/2026 lúc 09:30", "10/09/2026 19:20"
-  const m1 = text.match(/\b([0-3]?\d)[\/\-.]([01]?\d)[\/\-.](\d{4})(?:[\s,|lúcat]+([0-2]?\d):([0-5]\d)(?::([0-5]\d))?)?/i);
+  const m1 = text.match(/\b([0-3]?\d)[\/\-.]([01]?\d)[\/\-.](\d{4})[\s,|lúcat]+([0-2]?\d):([0-5]\d)(?::([0-5]\d))?/i);
   if (m1) {
     const day = m1[1].padStart(2, '0');
     const month = m1[2].padStart(2, '0');
     const year = m1[3];
-    const hour = m1[4] ? m1[4].padStart(2, '0') : '12';
-    const min = m1[5] ? m1[5].padStart(2, '0') : '00';
+    const hour = m1[4].padStart(2, '0');
+    const min = m1[5].padStart(2, '0');
     const sec = m1[6] ? m1[6].padStart(2, '0') : '00';
 
     const dNum = parseInt(day, 10);
@@ -94,8 +94,8 @@ export function parseVietnameseBankTimestamp(text: string): Date | null {
   }
 
   // Pattern 2: HH:mm(:ss)? [ngày|on] DD/MM/YYYY
-  // e.g. "09:30 ngày 05/09/2026", "19:20:00 ngày 10/09/2026"
-  const m2 = text.match(/\b([0-2]?\d):([0-5]\d)(?::([0-5]\d))?[\s,a-zA-Zà-ỹÀ-Ỹ]*([0-3]?\d)[\/\-.]([01]?\d)[\/\-.](\d{4})/i);
+  // e.g. "09:30 ngày 05/09/2026", "19:20:00 ngày 10/09/2026", "14:45 vào ngày 15/09/2026"
+  const m2 = text.match(/\b([0-2]?\d):([0-5]\d)(?::([0-5]\d))?[\s,\p{L}]*([0-3]?\d)[\/\-.]([01]?\d)[\/\-.](\d{4})/iu);
   if (m2) {
     const hour = m2[1].padStart(2, '0');
     const min = m2[2].padStart(2, '0');
@@ -113,6 +113,28 @@ export function parseVietnameseBankTimestamp(text: string): Date | null {
     }
 
     const isoString = `${year}-${month}-${day}T${hour}:${min}:${sec}+07:00`;
+    const d = new Date(isoString);
+    if (!isNaN(d.getTime())) {
+      return d;
+    }
+  }
+
+  // Pattern 3: DD/MM/YYYY (date only, default to noon UTC+7)
+  const m3 = text.match(/\b([0-3]?\d)[\/\-.]([01]?\d)[\/\-.](\d{4})/);
+  if (m3) {
+    const day = m3[1].padStart(2, '0');
+    const month = m3[2].padStart(2, '0');
+    const year = m3[3];
+
+    const dNum = parseInt(day, 10);
+    const mNum = parseInt(month, 10);
+    const yNum = parseInt(year, 10);
+
+    if (!isValidCalendarDate(yNum, mNum, dNum)) {
+      return null;
+    }
+
+    const isoString = `${year}-${month}-${day}T12:00:00+07:00`;
     const d = new Date(isoString);
     if (!isNaN(d.getTime())) {
       return d;
@@ -158,17 +180,32 @@ export function decodeBase64Url(data: string): string {
  * Sanitize HTML to plain text
  */
 export function sanitizeHtmlToText(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
+  if (!html) return '';
+
+  let text = html;
+  let prev = '';
+
+  // Remove script and style elements iteratively to prevent nested tag bypass
+  do {
+    prev = text;
+    text = text
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, '')
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '');
+  } while (text !== prev);
+
+  // Strip all other HTML tags
+  text = text.replace(/<[^>]+>/g, ' ');
+
+  // Decode HTML entities (unescape &amp; LAST to prevent double unescaping)
+  text = text
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
     .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/&amp;/gi, '&');
+
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 /**
