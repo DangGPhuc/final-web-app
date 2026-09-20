@@ -6,13 +6,24 @@ import {
   type ParsedBankEvent,
   type RawEmailData,
 } from './bank-parsers';
+import {
+  GmailTokenRevokedError,
+  GmailConfigError,
+  GmailTransientError,
+  GmailTokenExpiredError,
+} from './gmail-errors';
+import {
+  vietnamMidnightToEpochSeconds,
+  getNextDayVietnamMidnightToEpochSeconds,
+  formatLocalDate,
+} from '@/lib/date';
 
-export class GmailTokenExpiredError extends Error {
-  constructor(message: string = 'Gmail refresh token is expired or revoked') {
-    super(message);
-    this.name = 'GmailTokenExpiredError';
-  }
-}
+export {
+  GmailTokenRevokedError,
+  GmailConfigError,
+  GmailTransientError,
+  GmailTokenExpiredError,
+};
 
 interface GmailMessageListResponse {
   messages?: { id: string; threadId: string }[];
@@ -39,10 +50,11 @@ interface GmailMessageDetailResponse {
 }
 
 export interface FetchEmailOptions {
-  fromDate?: Date;
-  toDate?: Date;
+  fromDate?: Date | string;
+  toDate?: Date | string;
   maxMessages?: number;
   pageToken?: string;
+  candidateCushionSeconds?: number;
 }
 
 export interface IngestionResult {
@@ -62,43 +74,44 @@ export interface BankRegistryEntry {
 
 /**
  * Internal registry of recognized Vietnamese banks with strict sender domains and signatures
+ * Documented Gmail search syntax without ambiguous symbols
  */
 export const BANK_NOTIFICATION_REGISTRY: BankRegistryEntry[] = [
   {
     bankCode: 'VCB',
     bankName: 'Vietcombank',
-    senderQuery: 'from:(@vietcombank.com.vn OR @vcb.com.vn)',
-    signatureQuery: '("biến động" OR "số dư" OR "giao dịch" OR "VCB:" OR "TK ••••")',
+    senderQuery: '(from:vietcombank.com.vn OR from:vcb.com.vn)',
+    signatureQuery: '("biến động số dư" OR "biến động" OR "số dư" OR "giao dịch" OR "VCB:" OR "TK ••••")',
   },
   {
     bankCode: 'TCB',
     bankName: 'Techcombank',
-    senderQuery: 'from:(@techcombank.com.vn OR @tcb.com.vn)',
-    signatureQuery: '("biến động" OR "số dư" OR "ghi nợ" OR "ghi có" OR "Techcombank")',
+    senderQuery: '(from:techcombank.com.vn OR from:tcb.com.vn)',
+    signatureQuery: '("biến động số dư" OR "biến động" OR "số dư" OR "ghi nợ" OR "ghi có" OR "Techcombank")',
   },
   {
     bankCode: 'MB',
     bankName: 'MB Bank',
-    senderQuery: 'from:(@mbbank.com.vn)',
-    signatureQuery: '("biến động" OR "số dư" OR "giao dịch" OR "MBBank")',
+    senderQuery: 'from:mbbank.com.vn',
+    signatureQuery: '("biến động số dư" OR "biến động" OR "số dư" OR "giao dịch" OR "MBBank")',
   },
   {
     bankCode: 'ACB',
     bankName: 'ACB',
-    senderQuery: 'from:(@acb.com.vn)',
-    signatureQuery: '("biến động" OR "số dư" OR "ACB")',
+    senderQuery: 'from:acb.com.vn',
+    signatureQuery: '("biến động số dư" OR "biến động" OR "số dư" OR "ACB")',
   },
   {
     bankCode: 'VPB',
     bankName: 'VPBank',
-    senderQuery: 'from:(@vpbank.com.vn)',
-    signatureQuery: '("biến động" OR "số dư" OR "VPBank")',
+    senderQuery: 'from:vpbank.com.vn',
+    signatureQuery: '("biến động số dư" OR "biến động" OR "số dư" OR "VPBank")',
   },
   {
     bankCode: 'BIDV',
     bankName: 'BIDV',
-    senderQuery: 'from:(@bidv.com.vn)',
-    signatureQuery: '("biến động" OR "số dư" OR "BIDV")',
+    senderQuery: 'from:bidv.com.vn',
+    signatureQuery: '("biến động số dư" OR "biến động" OR "số dư" OR "BIDV")',
   },
 ];
 
@@ -125,36 +138,47 @@ function extractBodyText(part: GmailPart): string {
 }
 
 /**
- * Format Date as YYYY/MM/DD for Gmail search queries
+ * Build privacy-preserving targeted Gmail search query strictly from BANK_NOTIFICATION_REGISTRY.
+ * Uses exact Asia/Ho_Chi_Minh (+07:00) midnight boundaries converted to Unix epoch seconds.
+ * Form: ( (Bank A sender AND signature) OR (Bank B sender AND signature) ... OR (Forwarded Bank Notification) ) after:... before:...
  */
-export function formatGmailDateQuery(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}/${m}/${day}`;
-}
-
-/**
- * Build privacy-preserving targeted Gmail search query strictly from BANK_NOTIFICATION_REGISTRY
- * Form: ( (Bank A sender AND signature) OR (Bank B sender AND signature) ... OR (Forwarded Bank Notification) )
- */
-export function buildBankSearchQuery(options: { fromDate?: Date; toDate?: Date } = {}): string {
+export function buildBankSearchQuery(options: {
+  fromDate?: Date | string;
+  toDate?: Date | string;
+  candidateCushionSeconds?: number;
+} = {}): string {
   const bankClauses = BANK_NOTIFICATION_REGISTRY.map(
     entry => `(${entry.senderQuery} AND ${entry.signatureQuery})`
   );
 
   const forwardedClause =
-    '(("Fwd:" OR "chuyển tiếp" OR "forwarded message") AND ("vietcombank" OR "techcombank" OR "mbbank" OR "acb" OR "vpbank" OR "bidv") AND ("biến động" OR "số dư" OR "giao dịch"))';
+    '(("Fwd:" OR "chuyển tiếp" OR "forwarded message") AND (vietcombank OR techcombank OR mbbank OR acb OR vpbank OR bidv) AND ("biến động" OR "số dư" OR "giao dịch"))';
 
   const combinedClauses = `(${bankClauses.join(' OR ')} OR ${forwardedClause})`;
   const parts = [combinedClauses];
 
+  const cushion = options.candidateCushionSeconds ?? 0;
+
   if (options.fromDate) {
-    parts.push(`after:${formatGmailDateQuery(options.fromDate)}`);
+    let startSec: number;
+    if (typeof options.fromDate === 'string') {
+      startSec = vietnamMidnightToEpochSeconds(options.fromDate);
+    } else {
+      startSec = vietnamMidnightToEpochSeconds(formatLocalDate(options.fromDate));
+    }
+    const queryAfter = Math.max(0, startSec - cushion);
+    parts.push(`after:${queryAfter}`);
   }
+
   if (options.toDate) {
-    const endPlusOne = new Date(options.toDate.getTime() + 24 * 60 * 60 * 1000);
-    parts.push(`before:${formatGmailDateQuery(endPlusOne)}`);
+    let endSec: number;
+    if (typeof options.toDate === 'string') {
+      endSec = getNextDayVietnamMidnightToEpochSeconds(options.toDate);
+    } else {
+      endSec = getNextDayVietnamMidnightToEpochSeconds(formatLocalDate(options.toDate));
+    }
+    const queryBefore = endSec + cushion;
+    parts.push(`before:${queryBefore}`);
   }
 
   return parts.join(' ');
@@ -167,18 +191,12 @@ export async function ingestFromGmail(
   refreshToken: string,
   options: FetchEmailOptions = {}
 ): Promise<IngestionResult> {
-  let accessToken: string;
-  try {
-    accessToken = await refreshAccessToken(refreshToken);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('400') || msg.includes('invalid_grant') || msg.includes('revoked')) {
-      throw new GmailTokenExpiredError('Token đã hết hạn hoặc bị thu hồi (Reconnect required).');
-    }
-    throw err;
-  }
+  const accessToken = await refreshAccessToken(refreshToken);
 
-  const query = buildBankSearchQuery(options);
+  const query = buildBankSearchQuery({
+    ...options,
+    candidateCushionSeconds: options.candidateCushionSeconds ?? 86400,
+  });
   const maxMessages = options.maxMessages || 1000;
 
   let pageToken: string | undefined = options.pageToken;
@@ -200,8 +218,14 @@ export async function ingestFromGmail(
     });
 
     if (!listRes.ok) {
-      if (listRes.status === 401 || listRes.status === 403) {
-        throw new GmailTokenExpiredError(`Gmail API unauthorized: ${listRes.status}`);
+      if (listRes.status === 401) {
+        throw new GmailTokenRevokedError(`Gmail API unauthorized: ${listRes.status}`);
+      }
+      if (listRes.status === 403) {
+        throw new GmailConfigError(`Gmail API forbidden: ${listRes.status}`);
+      }
+      if (listRes.status >= 500) {
+        throw new GmailTransientError(`Gmail API server error: ${listRes.status}`);
       }
       throw new Error(`Gmail API list failed: ${listRes.status}`);
     }
@@ -266,7 +290,8 @@ export async function ingestFromGmail(
         subject,
         snippet: msgData.snippet || '',
         bodyText,
-        date: dateStr || new Date(parseInt(msgData.internalDate, 10)).toISOString(),
+        date: dateStr,
+        internalDate: msgData.internalDate,
       };
 
       const parsed = parseBankNotification(rawEmail);

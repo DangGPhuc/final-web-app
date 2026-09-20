@@ -1,4 +1,9 @@
 import crypto from 'crypto';
+import {
+  GmailTokenRevokedError,
+  GmailConfigError,
+  GmailTransientError,
+} from '@/lib/email/gmail-errors';
 
 /**
  * Server-side Google OAuth 2.0 Client with PKCE and CSRF State Protection
@@ -193,6 +198,31 @@ export async function refreshAccessToken(refreshToken: string): Promise<string> 
   });
 
   if (!response.ok) {
+    let errorData: Record<string, unknown> | null = null;
+    try {
+      errorData = (await response.json()) as Record<string, unknown>;
+    } catch {
+      // Non-JSON response
+    }
+    const errCode = typeof errorData?.error === 'string' ? errorData.error : '';
+    const errDesc = typeof errorData?.error_description === 'string' ? errorData.error_description.toLowerCase() : '';
+
+    if (
+      response.status === 400 &&
+      (errCode === 'invalid_grant' || errDesc.includes('revoked') || errDesc.includes('expired'))
+    ) {
+      throw new GmailTokenRevokedError('Token đã hết hạn hoặc bị thu hồi (Yêu cầu kết nối lại).');
+    }
+    if (
+      response.status === 403 ||
+      errCode === 'accessNotConfigured' ||
+      errCode === 'insufficientPermissions'
+    ) {
+      throw new GmailConfigError('Lỗi cấu hình quyền Gmail API (Kiểm tra Google Cloud Console).');
+    }
+    if (response.status >= 500) {
+      throw new GmailTransientError(`Lỗi máy chủ Google (${response.status}).`);
+    }
     throw new Error(`Failed to refresh Google access token: ${response.status}`);
   }
 

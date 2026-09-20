@@ -6,6 +6,12 @@ import {
   type RawEmailData,
 } from '@/lib/email/bank-parsers';
 import { buildBankSearchQuery, BANK_NOTIFICATION_REGISTRY } from '@/lib/email/gmail-client';
+import {
+  vietnamMidnightToEpochSeconds,
+  getNextDayVietnamMidnightToEpochSeconds,
+  formatLocalDate,
+  getVietnamDateRangeBoundaries,
+} from '@/lib/date';
 
 describe('Bank Transaction Timestamp & Notification Parsing', () => {
   describe('Vietnamese Banking Timestamp Parsing (Asia/Ho_Chi_Minh UTC+7)', () => {
@@ -43,6 +49,37 @@ describe('Bank Transaction Timestamp & Notification Parsing', () => {
     });
   });
 
+  describe('Vietnam Calendar Date Boundaries to Unix Epoch Seconds', () => {
+    it('proves 2026-09-01 Vietnam local midnight produces the correct UTC/epoch instant', () => {
+      const epochSeconds = vietnamMidnightToEpochSeconds('2026-09-01');
+      // 2026-09-01 00:00:00 +07:00 is 2026-08-31 17:00:00 UTC
+      expect(epochSeconds).toBe(1788195600);
+      const utcDate = new Date(epochSeconds * 1000);
+      expect(utcDate.toISOString()).toBe('2026-08-31T17:00:00.000Z');
+    });
+
+    it('calculates the next day midnight exclusive boundary for 2026-09-20', () => {
+      const epochSeconds = getNextDayVietnamMidnightToEpochSeconds('2026-09-20');
+      // Next day is 2026-09-21 00:00:00 +07:00 -> 2026-09-20 17:00:00 UTC
+      expect(epochSeconds).toBe(1789923600);
+      const utcDate = new Date(epochSeconds * 1000);
+      expect(utcDate.toISOString()).toBe('2026-09-20T17:00:00.000Z');
+    });
+
+    it('returns boundary milliseconds for occurredAt filtering', () => {
+      const { rangeStartMs, rangeEndMs } = getVietnamDateRangeBoundaries('2026-09-01', '2026-09-20');
+      expect(rangeStartMs).toBe(1788195600 * 1000);
+      expect(rangeEndMs).toBe(1789923600 * 1000);
+    });
+  });
+
+  describe('Local HTML Date Generation (formatLocalDate)', () => {
+    it('formats a date as YYYY-MM-DD using local calendar date', () => {
+      const date = new Date(2026, 8, 1); // September 1st, 2026
+      expect(formatLocalDate(date)).toBe('2026-09-01');
+    });
+  });
+
   describe('Forwarded Mail Timestamp Separation (occurredAt vs emailReceivedAt)', () => {
     it('preserves the original bank occurredAt even when email is delivered/forwarded one day later', () => {
       // Email was forwarded and received on 06/09/2026
@@ -73,20 +110,38 @@ describe('Bank Transaction Timestamp & Notification Parsing', () => {
       expect(parsed!.bankRefId).toBe('FT262490001');
     });
 
-    it('falls back to emailReceivedAt when notification contains no extractable bank timestamp', () => {
+    it('prefers Gmail internalDate over RFC Date header for emailReceivedAt', () => {
       const email: RawEmailData = {
-        id: 'msg_fallback_001',
+        id: 'msg_internal_date_001',
         from: 'vietcombank@vcb.com.vn',
-        subject: 'VCB: TK ••••1234| GD: -50,000 VND | Chuyen tien',
+        subject: 'VCB: TK ••••1234| GD: -50,000 VND | 05/09/2026 09:30 | Chuyen tien',
         snippet: 'VCB: TK ••••1234| GD: -50,000 VND',
         bodyText: 'VCB: TK ••••1234| GD: -50,000 VND | Chuyen tien',
-        date: '2026-09-07T08:00:00.000Z',
+        date: '2026-09-05T09:35:00.000Z', // RFC Date header
+        internalDate: '1788602400000', // 2026-09-05T10:00:00.000Z in epoch ms
       };
 
       const parsed = parseBankNotification(email);
       expect(parsed).not.toBeNull();
-      expect(parsed!.occurredAt.toISOString()).toBe('2026-09-07T08:00:00.000Z');
-      expect(parsed!.emailReceivedAt.toISOString()).toBe('2026-09-07T08:00:00.000Z');
+      // occurredAt extracted from text
+      expect(parsed!.occurredAt.toISOString()).toBe('2026-09-05T02:30:00.000Z');
+      // emailReceivedAt must use internalDate
+      expect(parsed!.emailReceivedAt.getTime()).toBe(1788602400000);
+    });
+
+    it('falls back to RFC Date header when internalDate is absent', () => {
+      const email: RawEmailData = {
+        id: 'msg_fallback_header_001',
+        from: 'vietcombank@vcb.com.vn',
+        subject: 'VCB: TK ••••1234| GD: -50,000 VND | 05/09/2026 09:30 | Chuyen tien',
+        snippet: 'VCB: TK ••••1234| GD: -50,000 VND',
+        bodyText: 'VCB: TK ••••1234| GD: -50,000 VND | Chuyen tien',
+        date: '2026-09-05T09:35:00.000Z',
+      };
+
+      const parsed = parseBankNotification(email);
+      expect(parsed).not.toBeNull();
+      expect(parsed!.emailReceivedAt.toISOString()).toBe('2026-09-05T09:35:00.000Z');
     });
   });
 
@@ -98,22 +153,26 @@ describe('Bank Transaction Timestamp & Notification Parsing', () => {
     });
   });
 
-  describe('Targeted Bank Search Query Generator', () => {
-    it('builds query with per-bank sender and signature clauses', () => {
+  describe('Documented Targeted Bank Search Query Generator', () => {
+    it('builds query with documented per-bank sender and signature clauses', () => {
       const query = buildBankSearchQuery();
-      expect(query).toContain('@vietcombank.com.vn');
-      expect(query).toContain('@techcombank.com.vn');
+      expect(query).toContain('from:vietcombank.com.vn');
+      expect(query).toContain('from:techcombank.com.vn');
+      expect(query).toContain('from:mbbank.com.vn');
       expect(query).toContain('Fwd:');
       expect(query).toContain('chuyển tiếp');
     });
 
-    it('includes after and before date filters when provided', () => {
+    it('includes after and before epoch second filters converted from Vietnam midnight', () => {
       const query = buildBankSearchQuery({
-        fromDate: new Date('2026-09-01T00:00:00Z'),
-        toDate: new Date('2026-09-10T00:00:00Z'),
+        fromDate: '2026-09-01',
+        toDate: '2026-09-20',
+        candidateCushionSeconds: 0,
       });
-      expect(query).toContain('after:2026/09/01');
-      expect(query).toContain('before:2026/09/11');
+      // 2026-09-01 00:00:00 +07:00 is 1788195600
+      expect(query).toContain('after:1788195600');
+      // 2026-09-21 00:00:00 +07:00 is 1789923600
+      expect(query).toContain('before:1789923600');
     });
   });
 });

@@ -23,8 +23,20 @@ export function setTestOwnerSecretKey(key: string | null): void {
   testOwnerSecretKey = key;
 }
 
+const KNOWN_WEAK_SECRETS = new Set([
+  'password',
+  '12345678',
+  '1234567890',
+  'owner',
+  'admin',
+  'cockpit',
+  'secret',
+  'changeme',
+]);
+
 /**
- * Retrieve OWNER_SECRET_KEY. Must fail closed if not configured.
+ * Retrieve OWNER_SECRET_KEY. Must fail closed if not configured or too weak.
+ * Requires at least 32 characters/bytes of key material.
  * Never logs or exposes secret material.
  */
 export function getOwnerSecretKey(): string {
@@ -32,24 +44,33 @@ export function getOwnerSecretKey(): string {
   if (!secret || typeof secret !== 'string' || secret.trim() === '') {
     throw new Error('OWNER_SECRET_KEY is required and must be configured in environment.');
   }
-  return secret.trim();
+  const trimmed = secret.trim();
+  if (trimmed.length < 32 || KNOWN_WEAK_SECRETS.has(trimmed.toLowerCase())) {
+    throw new Error('OWNER_SECRET_KEY does not meet minimum strength requirements (at least 32 characters/bytes required).');
+  }
+  return trimmed;
 }
 
 /**
- * Constant-time string comparison to prevent timing attacks
+ * Hash string to SHA-256 32-byte digest array using Web Crypto API
  */
-export function constantTimeEqual(a: string, b: string): boolean {
+async function sha256DigestBytes(str: string): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest('SHA-256', enc.encode(str));
+  return new Uint8Array(buf);
+}
+
+/**
+ * Constant-time string comparison using fixed-length 32-byte SHA-256 digests.
+ * Completely eliminates length-difference timing side channels.
+ */
+export async function constantTimeEqual(a: string, b: string): Promise<boolean> {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
-  if (a.length !== b.length) {
-    let dummy = 0;
-    for (let i = 0; i < a.length; i++) {
-      dummy |= a.charCodeAt(i) ^ 0;
-    }
-    return false;
-  }
+  const hashA = await sha256DigestBytes(a);
+  const hashB = await sha256DigestBytes(b);
   let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  for (let i = 0; i < 32; i++) {
+    mismatch |= hashA[i] ^ hashB[i];
   }
   return mismatch === 0;
 }
@@ -94,10 +115,10 @@ export function resetRateLimit(ip: string): void {
 /**
  * Verify owner credential with rate limiting and constant-time comparison
  */
-export function verifyOwnerCredential(
+export async function verifyOwnerCredential(
   secretKey: string | undefined | null,
   ip: string
-): { success: boolean; rateLimited?: boolean; error?: string } {
+): Promise<{ success: boolean; rateLimited?: boolean; error?: string }> {
   if (isIpRateLimited(ip)) {
     return {
       success: false,
@@ -124,7 +145,7 @@ export function verifyOwnerCredential(
     };
   }
 
-  const isValid = constantTimeEqual(secretKey.trim(), expectedSecret);
+  const isValid = await constantTimeEqual(secretKey.trim(), expectedSecret);
   if (!isValid) {
     recordFailedAttempt(ip);
     return {
@@ -184,7 +205,7 @@ export async function verifyOwnerSessionToken(token?: string | null): Promise<bo
   try {
     const secret = getOwnerSecretKey();
     const expectedSignature = await signPayload(timestampStr, secret);
-    return constantTimeEqual(signature, expectedSignature);
+    return await constantTimeEqual(signature, expectedSignature);
   } catch {
     return false;
   }
@@ -215,7 +236,7 @@ export function clearOwnerSessionCookie(response: NextResponse): void {
 
 /**
  * Verify request Origin/Referer for CSRF mitigation on state-changing requests.
- * In production: strictly requires valid same-origin Origin or Referer against APP_ORIGIN / Host.
+ * In production: strictly requires valid same-origin Origin or Referer against exact APP_ORIGIN (scheme + host + port).
  */
 export function verifyOriginAndReferer(req: NextRequest): boolean {
   const method = req.method.toUpperCase();
@@ -225,45 +246,80 @@ export function verifyOriginAndReferer(req: NextRequest): boolean {
   }
 
   const appOrigin = process.env.APP_ORIGIN?.trim();
-  const host = req.headers.get('host');
   const origin = req.headers.get('origin');
   const referer = req.headers.get('referer');
 
-  // In production, require either valid Origin or Referer
+  // In production, APP_ORIGIN is mandatory and mutations must match exact origin
   if (process.env.NODE_ENV === 'production') {
+    if (!appOrigin) {
+      // Missing APP_ORIGIN fails closed in production
+      return false;
+    }
+    let canonicalOrigin: string;
+    try {
+      canonicalOrigin = new URL(appOrigin).origin;
+    } catch {
+      return false;
+    }
+
+    // Must have Origin or Referer
     if (!origin && !referer) {
       return false;
     }
+
+    if (origin) {
+      try {
+        const parsedOrigin = new URL(origin).origin;
+        return parsedOrigin === canonicalOrigin;
+      } catch {
+        return false;
+      }
+    }
+
+    if (referer) {
+      try {
+        const parsedRefererOrigin = new URL(referer).origin;
+        return parsedRefererOrigin === canonicalOrigin;
+      } catch {
+        return false;
+      }
+    }
+
+    return false;
   }
 
-  // Check Origin if provided
-  if (origin) {
+  // Non-production (development, test)
+  if (appOrigin) {
     try {
-      const originHost = new URL(origin).host;
-      if (appOrigin) {
-        const canonicalHost = new URL(appOrigin).host;
-        return originHost === canonicalHost;
+      const canonicalOrigin = new URL(appOrigin).origin;
+      if (origin) {
+        return new URL(origin).origin === canonicalOrigin;
       }
-      return !!host && originHost === host;
+      if (referer) {
+        return new URL(referer).origin === canonicalOrigin;
+      }
     } catch {
       return false;
     }
-  }
-
-  // Check Referer if Origin is absent
-  if (referer) {
-    try {
-      const refererHost = new URL(referer).host;
-      if (appOrigin) {
-        const canonicalHost = new URL(appOrigin).host;
-        return refererHost === canonicalHost;
+  } else {
+    // If APP_ORIGIN is not specified in non-production, check Host header if Origin/Referer present
+    const host = req.headers.get('host');
+    if (origin) {
+      try {
+        return new URL(origin).host === host;
+      } catch {
+        return false;
       }
-      return !!host && refererHost === host;
-    } catch {
-      return false;
+    }
+    if (referer) {
+      try {
+        return new URL(referer).host === host;
+      } catch {
+        return false;
+      }
     }
   }
 
-  // In non-production (dev/test), permit if neither is set (e.g. CLI / automated test suites)
-  return process.env.NODE_ENV !== 'production';
+  // Non-production allows absent headers (e.g. automated test suites, CLI)
+  return true;
 }

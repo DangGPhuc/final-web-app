@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { formatDate } from '@/lib/finance/calculations';
+import { getDefaultLocalDateRange } from '@/lib/date';
 import type { SyncResultStats } from '@/types';
 import {
   Mail,
@@ -29,17 +30,46 @@ export function SettingsView() {
     lockCockpit,
   } = useApp();
 
-  // Dynamic default dates: 1st of current month to today
-  const now = new Date();
-  const defaultFromDate = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-  const defaultToDate = now.toISOString().slice(0, 10);
+  // Dynamic default dates: 1st of current month to today (local calendar dates)
+  const initialDates = getDefaultLocalDateRange();
 
   // Historical import state
   const [selectedAccountForSync, setSelectedAccountForSync] = useState<string>('ALL');
-  const [fromDate, setFromDate] = useState<string>(defaultFromDate);
-  const [toDate, setToDate] = useState<string>(defaultToDate);
+  const [fromDate, setFromDate] = useState<string>(initialDates.fromDate);
+  const [toDate, setToDate] = useState<string>(initialDates.toDate);
   const [dateError, setDateError] = useState<string | null>(null);
   const [lastSyncStats, setLastSyncStats] = useState<SyncResultStats | null>(null);
+
+  // Bind continuation state to original parameters (accountId, fromDate, toDate)
+  const [continuationBinding, setContinuationBinding] = useState<{
+    accountId: string;
+    fromDate: string;
+    toDate: string;
+  } | null>(null);
+
+  const isContinuationActive =
+    Boolean(lastSyncStats?.truncated) &&
+    Boolean(
+      continuationBinding &&
+      continuationBinding.accountId === selectedAccountForSync &&
+      continuationBinding.fromDate === fromDate &&
+      continuationBinding.toDate === toDate
+    );
+
+  const handleAccountChange = (val: string) => {
+    setSelectedAccountForSync(val);
+    setContinuationBinding(null);
+  };
+
+  const handleFromDateChange = (val: string) => {
+    setFromDate(val);
+    setContinuationBinding(null);
+  };
+
+  const handleToDateChange = (val: string) => {
+    setToDate(val);
+    setContinuationBinding(null);
+  };
 
   // Modals & confirmation states
   const [disconnectingAccount, setDisconnectingAccount] = useState<string | null>(null);
@@ -67,20 +97,36 @@ export function SettingsView() {
       fromDate,
       toDate,
     });
-    if (stats) setLastSyncStats(stats);
+    if (stats) {
+      setLastSyncStats(stats);
+      if (stats.truncated) {
+        setContinuationBinding({
+          accountId: selectedAccountForSync,
+          fromDate,
+          toDate,
+        });
+      } else {
+        setContinuationBinding(null);
+      }
+    }
   };
 
   // Handle Continuation Import for truncated scans
   const handleContinueImport = async () => {
-    if (!lastSyncStats?.truncated) return;
+    if (!isContinuationActive || !lastSyncStats || !continuationBinding) return;
     const stats = await syncEmail({
-      accountId: selectedAccountForSync,
-      fromDate,
-      toDate,
+      accountId: continuationBinding.accountId,
+      fromDate: continuationBinding.fromDate,
+      toDate: continuationBinding.toDate,
       pageToken: lastSyncStats.nextPageToken,
       accountContinuationTokens: lastSyncStats.accountContinuationTokens,
     });
-    if (stats) setLastSyncStats(stats);
+    if (stats) {
+      setLastSyncStats(stats);
+      if (!stats.truncated) {
+        setContinuationBinding(null);
+      }
+    }
   };
 
   // Handle Explicit Demo Seed
@@ -278,7 +324,7 @@ export function SettingsView() {
                   <label className="text-[11px] text-[#9f9fa0] block mb-1">Tài khoản Gmail</label>
                   <select
                     value={selectedAccountForSync}
-                    onChange={e => setSelectedAccountForSync(e.target.value)}
+                    onChange={e => handleAccountChange(e.target.value)}
                     className="cockpit-input w-full text-xs font-mono"
                   >
                     <option value="ALL">Tất cả tài khoản liên kết</option>
@@ -298,7 +344,7 @@ export function SettingsView() {
                     type="date"
                     required
                     value={fromDate}
-                    onChange={e => setFromDate(e.target.value)}
+                    onChange={e => handleFromDateChange(e.target.value)}
                     className="cockpit-input w-full text-xs font-mono"
                   />
                 </div>
@@ -308,7 +354,7 @@ export function SettingsView() {
                     type="date"
                     required
                     value={toDate}
-                    onChange={e => setToDate(e.target.value)}
+                    onChange={e => handleToDateChange(e.target.value)}
                     className="cockpit-input w-full text-xs font-mono"
                   />
                 </div>
@@ -361,7 +407,7 @@ export function SettingsView() {
             </div>
 
             {/* Continuation Banner */}
-            {lastSyncStats.truncated && (
+            {isContinuationActive && (
               <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/25 text-xs text-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-2">
                 <div className="flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />

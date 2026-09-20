@@ -6,16 +6,19 @@ import {
   type RawEmailData,
 } from '../src/lib/email/bank-parsers';
 import {
-  formatGmailDateQuery,
   buildBankSearchQuery,
   ingestFromGmail,
+  GmailTokenRevokedError,
+  GmailConfigError,
+  GmailTransientError,
 } from '../src/lib/email/gmail-client';
+import { formatLocalDate } from '../src/lib/date';
 
 describe('Gmail Ingestion & Bank Parsing', () => {
-  describe('Gmail Query Date Formatter', () => {
-    it('formats dates in YYYY/MM/DD for Gmail search queries', () => {
-      const date = new Date('2026-09-05T12:00:00Z');
-      expect(formatGmailDateQuery(date)).toBe('2026/09/05');
+  describe('Local Date Formatter', () => {
+    it('formats dates in YYYY-MM-DD for local input', () => {
+      const date = new Date(2026, 8, 5); // Sep 5, 2026
+      expect(formatLocalDate(date)).toBe('2026-09-05');
     });
   });
 
@@ -136,26 +139,39 @@ describe('Gmail Ingestion & Bank Parsing', () => {
     });
   });
 
-  describe('Bank Search Query Generation', () => {
+  describe('Bank Search Query Generation with Documented Syntax', () => {
     it('generates tightly grouped query with controlled sender domains and subject signatures', () => {
       const query = buildBankSearchQuery({
-        fromDate: new Date('2026-09-01T00:00:00Z'),
-        toDate: new Date('2026-09-20T00:00:00Z'),
+        fromDate: '2026-09-01',
+        toDate: '2026-09-20',
       });
 
-      expect(query).toContain('@vietcombank.com.vn');
-      expect(query).toContain('@techcombank.com.vn');
+      expect(query).toContain('from:vietcombank.com.vn');
+      expect(query).toContain('from:techcombank.com.vn');
       expect(query).toContain('biến động');
       expect(query).toContain('Fwd:');
       expect(query).toContain('chuyển tiếp');
-      expect(query).toContain('after:2026/09/01');
-      expect(query).toContain('before:2026/09/21');
+      expect(query).toContain('after:1788195600');
+      expect(query).toContain('before:1789923600');
+    });
+  });
+
+  describe('Error Classification for Reconnects and API Failures', () => {
+    it('differentiates revoked refresh token, API configuration, and transient server errors', () => {
+      const revoked = new GmailTokenRevokedError('Token invalid');
+      const configErr = new GmailConfigError('Insufficient scope');
+      const transient = new GmailTransientError('503 Service Unavailable');
+
+      expect(revoked instanceof GmailTokenRevokedError).toBe(true);
+      expect(configErr instanceof GmailConfigError).toBe(true);
+      expect(transient instanceof GmailTransientError).toBe(true);
+      expect(configErr).not.toBeInstanceOf(GmailTokenRevokedError);
+      expect(transient).not.toBeInstanceOf(GmailTokenRevokedError);
     });
   });
 
   describe('Pagination Beyond 200 Messages & Truncation Handling', () => {
     it('safely paginates across multiple pages without silent 200 truncation', async () => {
-      // Mock global fetch for Gmail API
       const origFetch = global.fetch;
       try {
         let callCount = 0;
@@ -195,7 +211,6 @@ describe('Gmail Ingestion & Bank Parsing', () => {
                       id: `msg_page3_${i}`,
                       threadId: `t3_${i}`,
                     })),
-                    // No nextPageToken on last page
                   }),
               });
             }
@@ -221,7 +236,6 @@ describe('Gmail Ingestion & Bank Parsing', () => {
           });
         });
 
-        // Set mock OAuth allowed for test
         process.env.ALLOW_MOCK_OAUTH = 'true';
         const result = await ingestFromGmail('mock_refresh_token_test', {
           maxMessages: 500,
@@ -265,7 +279,7 @@ describe('Gmail Ingestion & Bank Parsing', () => {
         });
 
         const result = await ingestFromGmail('mock_refresh_token_test', {
-          maxMessages: 50, // lower cap to test truncation
+          maxMessages: 50,
         });
 
         expect(result.totalFetched).toBe(50);

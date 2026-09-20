@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
       req.headers.get('x-real-ip') ||
       '127.0.0.1';
 
-    const result = verifyOwnerCredential(secretKey, ip);
+    const result = await verifyOwnerCredential(secretKey, ip);
 
     if (!result.success) {
       const status = result.rateLimited ? 429 : 401;

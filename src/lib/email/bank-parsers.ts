@@ -21,6 +21,7 @@ export interface RawEmailData {
   snippet: string;
   bodyText: string;
   date: string;
+  internalDate?: string | number;
 }
 
 export interface ParsedBankEvent {
@@ -160,9 +161,21 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
   const lower = combined.toLowerCase();
   const fromLower = email.from.toLowerCase();
 
-  // Email received time
-  let emailReceivedAt = new Date(email.date);
-  if (isNaN(emailReceivedAt.getTime())) {
+  // Email received time: prefer Gmail internalDate, fallback to RFC Date header
+  let emailReceivedAt: Date | null = null;
+  if (email.internalDate !== undefined && email.internalDate !== null && email.internalDate !== '') {
+    const internalMs = Number(email.internalDate);
+    if (!isNaN(internalMs) && internalMs > 0) {
+      emailReceivedAt = new Date(internalMs);
+    }
+  }
+  if (!emailReceivedAt && email.date) {
+    const parsedHeaderDate = new Date(email.date);
+    if (!isNaN(parsedHeaderDate.getTime())) {
+      emailReceivedAt = parsedHeaderDate;
+    }
+  }
+  if (!emailReceivedAt) {
     emailReceivedAt = new Date();
   }
 

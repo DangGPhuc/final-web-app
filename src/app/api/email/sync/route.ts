@@ -5,10 +5,13 @@ import { OWNER_COOKIE_NAME, verifyOwnerSessionToken } from '@/lib/security/owner
 import {
   ingestFromGmail,
   getDemoBankEmails,
-  GmailTokenExpiredError,
+  GmailTokenRevokedError,
+  GmailConfigError,
+  GmailTransientError,
   type IngestionResult,
 } from '@/lib/email/gmail-client';
 import { parseBankNotification } from '@/lib/email/bank-parsers';
+import { getVietnamDateRangeBoundaries } from '@/lib/date';
 import type { SyncResultStats, AccountSyncResult } from '@/types';
 
 const NO_CACHE_HEADERS = {
@@ -81,6 +84,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const { rangeStartMs, rangeEndMs } = getVietnamDateRangeBoundaries(fromDate, toDate);
+
     // 3. Fetch target Gmail connections
     const connections = await prisma.gmailConnection.findMany({
       where: {
@@ -88,6 +93,23 @@ export async function POST(req: NextRequest) {
         ...(accountId && accountId !== 'ALL' ? { id: accountId } : {}),
       },
     });
+
+    const isAllAccounts = !accountId || accountId === 'ALL';
+    const hasAccountTokens =
+      Boolean(accountContinuationTokens && Object.keys(accountContinuationTokens).length > 0);
+    const isContinuationMode = isAllAccounts
+      ? hasAccountTokens
+      : Boolean(pageToken || (hasAccountTokens && accountContinuationTokens?.[accountId!]));
+
+    // Determine target connections to process
+    let targetConnections = connections;
+    if (isAllAccounts && isContinuationMode) {
+      // In ALL-accounts continuation mode:
+      // Process ONLY accounts that currently have an active continuation token!
+      // Completed accounts are NOT restarted!
+      const activeAccountIds = Object.keys(accountContinuationTokens || {});
+      targetConnections = connections.filter(conn => activeAccountIds.includes(conn.id));
+    }
 
     const aggregateStats: SyncResultStats = {
       totalFetched: 0,
@@ -111,9 +133,11 @@ export async function POST(req: NextRequest) {
 
       const demoEmails = getDemoBankEmails();
       const filteredEmails = demoEmails.filter(e => {
-        const d = new Date(e.date).getTime();
-        if (fromDateObj && d < fromDateObj.getTime()) return false;
-        if (toDateObj && d > toDateObj.getTime() + 24 * 60 * 60 * 1000) return false;
+        const parsed = parseBankNotification(e);
+        if (!parsed) return false;
+        const d = parsed.occurredAt.getTime();
+        if (rangeStartMs !== undefined && d < rangeStartMs) return false;
+        if (rangeEndMs !== undefined && d >= rangeEndMs) return false;
         return true;
       });
 
@@ -201,7 +225,7 @@ export async function POST(req: NextRequest) {
     const accountsProcessed: string[] = [];
     let successfulAccounts = 0;
 
-    for (const conn of connections) {
+    for (const conn of targetConnections) {
       const startedAt = new Date();
       let refreshToken = '';
       try {
@@ -220,18 +244,26 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      const effectiveFromDate = fromDateObj || (conn.lastSyncAt ? new Date(conn.lastSyncAt) : undefined);
-      const specificPageToken = accountContinuationTokens?.[conn.id] || pageToken;
+      const effectiveFromDate = fromDate || (conn.lastSyncAt ? new Date(conn.lastSyncAt) : undefined);
+      let specificPageToken: string | undefined = undefined;
+      if (isAllAccounts) {
+        // In ALL-accounts mode, use ONLY accountContinuationTokens[conn.id]!
+        // Never fallback to global pageToken or another account's token!
+        specificPageToken = accountContinuationTokens?.[conn.id];
+      } else {
+        // In single-account mode, use specific token or pageToken
+        specificPageToken = accountContinuationTokens?.[conn.id] || pageToken;
+      }
 
       let ingestionResult: IngestionResult;
       try {
         ingestionResult = await ingestFromGmail(refreshToken, {
           fromDate: effectiveFromDate,
-          toDate: toDateObj,
+          toDate: toDate,
           pageToken: specificPageToken,
         });
       } catch (err) {
-        if (err instanceof GmailTokenExpiredError) {
+        if (err instanceof GmailTokenRevokedError) {
           // Mark connection as revoked / reconnect required in DB
           await prisma.gmailConnection.update({
             where: { id: conn.id },
@@ -247,6 +279,28 @@ export async function POST(req: NextRequest) {
             status: 'reconnect_required',
             errorMessage: 'Token đã hết hạn hoặc bị thu hồi (Yêu cầu kết nối lại).',
           });
+        } else if (err instanceof GmailConfigError) {
+          aggregateStats.accountResults?.push({
+            accountId: conn.id,
+            email: conn.email,
+            fetchedCount: 0,
+            newCount: 0,
+            duplicateCount: 0,
+            failedCount: 0,
+            status: 'error',
+            errorMessage: 'Lỗi cấu hình quyền Gmail API (Kiểm tra Google Cloud Console).',
+          });
+        } else if (err instanceof GmailTransientError) {
+          aggregateStats.accountResults?.push({
+            accountId: conn.id,
+            email: conn.email,
+            fetchedCount: 0,
+            newCount: 0,
+            duplicateCount: 0,
+            failedCount: 0,
+            status: 'error',
+            errorMessage: 'Máy chủ Google tạm thời không phản hồi. Vui lòng thử lại sau.',
+          });
         } else {
           aggregateStats.accountResults?.push({
             accountId: conn.id,
@@ -256,7 +310,7 @@ export async function POST(req: NextRequest) {
             duplicateCount: 0,
             failedCount: 0,
             status: 'error',
-            errorMessage: err instanceof Error ? err.message : 'Lỗi kết nối Gmail',
+            errorMessage: 'Lỗi kết nối Gmail',
           });
         }
         continue;
@@ -267,6 +321,16 @@ export async function POST(req: NextRequest) {
       let dupCount = 0;
 
       for (const event of ingestionResult.events) {
+        // Enforce transaction-date range on actual bank financial event time (occurredAt)
+        const eventTimeMs = event.occurredAt.getTime();
+        if (rangeStartMs !== undefined && eventTimeMs < rangeStartMs) {
+          // Financial transaction happened before requested start date -> Skip
+          continue;
+        }
+        if (rangeEndMs !== undefined && eventTimeMs >= rangeEndMs) {
+          // Financial transaction happened after requested end date -> Skip
+          continue;
+        }
         // Multi-account authoritative deduplication priority rules:
         // Rule A: Same Gmail account + same Gmail message ID -> Authoritative duplicate
         const sameAccountMsg = await prisma.bankTransaction.findFirst({
@@ -402,7 +466,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    if (successfulAccounts === 0 && connections.length > 0) {
+    if (successfulAccounts === 0 && targetConnections.length > 0) {
       return NextResponse.json(
         {
           success: false,

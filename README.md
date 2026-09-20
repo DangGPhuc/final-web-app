@@ -1,167 +1,159 @@
 # Personal Finance Cockpit
 
-Trung tâm chỉ huy tài chính cá nhân dành riêng cho **DUY NHẤT MỘT NGƯỜI DÙNG (Single-Owner Cockpit)**.
-Dự án được xây dựng phục vụ báo cáo / đồ án tốt nghiệp với cơ chế tự động đọc email ngân hàng qua **Google OAuth đa tài khoản**, lưu trữ bền vững với **PostgreSQL & Prisma**, mã hóa xác thực **AES-256-GCM**, và quy trình phân loại tài chính thủ công minh bạch.
+Trung tâm chỉ huy tài chính cá nhân dành riêng cho **DUY NHẤT MỘT CHỦ SỞ HỮU (Single-Owner Cockpit)**.
+Dự án phục vụ đồ án tốt nghiệp với cơ chế tự động đọc email ngân hàng qua **Google OAuth 2.0 đa tài khoản**, lưu trữ bền vững với **PostgreSQL 17 & Prisma**, mã hóa xác thực **AES-256-GCM**, mô hình phân loại tài chính minh bạch, và giao diện tối giản Obsidian cao cấp.
 
 ---
 
 ## 1. Triết lý Thiết kế (Single-Owner Architecture)
 
-Ứng dụng này **không phải là phần mềm SaaS** và không dành cho người dùng bên ngoài hay khách hàng đại trà:
-- **Không đăng ký / Không tạo tài khoản khách hàng**: Không có hệ thống authentication hay tài khoản người dùng nội bộ.
-- **Không multi-tenant / Không role / Không CRM / Không subscription**: Hoàn toàn loại bỏ mọi khái niệm quản trị khách hàng.
-- **Lưu trữ chuyên biệt**: Cơ sở dữ liệu PostgreSQL cục bộ chỉ phục vụ lưu trữ số dư, biến động ngân hàng và các quỹ ngân sách của chủ sở hữu.
-- **Bảo mật Google OAuth**: Trình duyệt **tuyệt đối không bao giờ nhận được refresh token**. Toàn bộ refresh token được mã hóa bằng thuật toán `AES-256-GCM` trước khi lưu vào database.
+Ứng dụng này **không phải là phần mềm SaaS** và không phục vụ khách hàng đại trà:
+- **Không đăng ký / Không tạo tài khoản khách hàng**: Không có bảng users khách hàng, không password reset, không CRM, không đa người thuê (multi-tenant).
+- **Màn hình Mở khóa Cockpit (Owner Unlock Screen)**: Ứng dụng khởi động ở trạng thái khóa với màn hình đen Obsidian tối giản. Chủ sở hữu nhập `Owner Access Key` để thiết lập phiên làm việc được ký bằng HMAC-SHA256 lưu trong cookie HTTP-only (`cockpit_owner_session`).
+- **Khóa Cockpit**: Chủ sở hữu có thể chủ động khóa lại Cockpit bất kỳ lúc nào từ Settings, xóa sạch session cookie khỏi trình duyệt.
+- **Bảo mật Google OAuth**: Trình duyệt **tuyệt đối không bao giờ nhận được refresh token**. Toàn bộ refresh token được mã hóa authenticated `AES-256-GCM` trước khi lưu vào PostgreSQL.
 - **Mô hình riêng tư (Privacy Model)**:
-  - *Phương án A*: Người dùng kết nối trực tiếp tài khoản Gmail nhận thông báo biến động số dư.
-  - *Phương án B*: Người dùng tạo một tài khoản Gmail phụ và thiết lập Gmail chính chuyển tiếp (forward) các email ngân hàng sang tài khoản phụ, sau đó kết nối tài khoản phụ vào ứng dụng qua OAuth.
+  - *Phương án A*: Kết nối trực tiếp tài khoản Gmail nhận thông báo ngân hàng.
+  - *Phương án B*: Thiết lập Gmail chính tự động chuyển tiếp (forward) email biến động sang một Gmail phụ, rồi kết nối Gmail phụ vào Personal Finance Cockpit.
 
 ---
 
-## 2. Kiến trúc Hệ thống (Architecture Overview)
+## 2. Kiến trúc Luồng Dữ liệu (Data Flow Overview)
 
 ```
 [ BANK NOTIFICATION EMAILS (VCB, TCB, MB, ACB, VPB, BIDV...) ]
-                              ↓
-        [ GOOGLE OAUTH 2.0 (gmail.readonly, offline) ]
-                              ↓
-    [ REAL PAGINATED INGESTION (nextPageToken, MIME decode) ]
-                              ↓
-      [ FACTUAL FINANCIAL PARSER (Direction, Amount, Time) ]
-                              ↓
-  [ AUTHORITATIVE SERVER DEDUPLICATION: UNIQUE(gmailMessageId) ]
-                              ↓
-     [ BANK TRANSACTIONS (PostgreSQL + Prisma Persistence) ]
-  (Tác động ngay lập tức vào Authoritative Balance = IN - OUT)
-                              ↓
-       [ "BIẾN ĐỘNG CẦN PHÂN LOẠI" (Manual Classification) ]
-       ├── User-defined Categories (Lưu vĩnh viễn, tùy chọn "Khác...")
-       └── Budget Funds (Hạn mức quỹ chi tiêu độc lập với số dư)
-                              ↓
-   [ DATA MANAGEMENT: Xóa dữ liệu tài chính / Re-import theo ngày ]
+                               ↓
+         [ GOOGLE OAUTH 2.0 (gmail.readonly, offline) ]
+                               ↓
+  [ PAGINATED CANDIDATE SCAN (BANK_NOTIFICATION_REGISTRY + Epoch Seconds) ]
+                               ↓
+    [ FACTUAL FINANCIAL PARSER (Direction, Amount, Time Asia/Ho_Chi_Minh) ]
+                               ↓
+      [ SEPARATION: occurredAt (Event Time) vs emailReceivedAt (Gmail Time) ]
+                               ↓
+        [ ENFORCE TRANSACTION DATE RANGE (occurredAt in [from..to]) ]
+                               ↓
+   [ AUTHORITATIVE MULTI-ACCOUNT DEDUPLICATION & FORWARDING HEURISTIC ]
+   ├── Rule A: @@unique([gmailConnectionId, gmailMessageId])
+   ├── Rule B: @@index([bankCode, bankRefId])
+   └── Rule C: Conservative cross-account forwarding heuristic
+                               ↓
+      [ BANK TRANSACTIONS (PostgreSQL + Prisma Persistence: BigInt VND) ]
+   (Tác động ngay lập tức vào Authoritative Balance = IN - OUT)
+                               ↓
+        [ "BIẾN ĐỘNG CẦN PHÂN LOẠI" (Manual Classification) ]
+        ├── User-defined Categories (Lưu vĩnh viễn trong DB)
+        └── Budget Funds (Hạn mức quỹ chi tiêu độc lập với số dư)
+                               ↓
+     [ DATA RESET / RE-IMPORT: Xóa dữ liệu tài chính vs Factory Reset ]
 ```
 
 ---
 
-## 3. Cấu hình Dành Cho Nhà Phát Triển (Developer OAuth Setup)
+## 3. Các Tính Năng Kỹ Thuật Nổi Bật (Key Features)
 
-> [!IMPORTANT]
-> Phạm vi truy cập `https://www.googleapis.com/auth/gmail.readonly` là một **Restricted Scope** của Google. Đối với đồ án tốt nghiệp, Google Cloud Project được thiết lập ở chế độ **Testing Mode**.
+### 3.1. Phân biệt Thời gian Giao dịch thực tế (`occurredAt`) và Thời gian Nhận Mail (`emailReceivedAt`)
+- `occurredAt`: Bóc tách trực tiếp ngày giờ giao dịch ghi trong thông báo ngân hàng (chuẩn múi giờ `Asia/Ho_Chi_Minh` / UTC+7). Dùng để ghi sổ cái, phân tích dòng tiền và nhóm theo tháng. Một email nhận trễ hay được forward 1 ngày sau vẫn giữ đúng ngày giao dịch gốc.
+- `emailReceivedAt`: Ghi nhận thời điểm nhận thư của Gmail (`internalDate` ưu tiên hơn RFC Header `Date`). Dùng cho mục đích kiểm toán/debug.
 
-### 3.1. Thiết lập trên Google Cloud Console
-1. Truy cập [Google Cloud Console](https://console.cloud.google.com/) và tạo một dự án mới.
-2. Vào **APIs & Services** → **Library**, tìm kiếm và kích hoạt **Gmail API**.
-3. Vào **OAuth consent screen**:
-   - Chọn User Type: **External**.
-   - Điền App name (VD: *Personal Finance Cockpit*), User support email và Developer contact.
-   - Thêm các Scopes:
-     - `openid`
-     - `.../auth/userinfo.email`
-     - `.../auth/userinfo.profile`
-     - `https://www.googleapis.com/auth/gmail.readonly`
-   - Tại mục **Test users**: Thêm các địa chỉ Gmail sẽ dùng để thử nghiệm và demo (bắt buộc trong Testing Mode).
-4. Vào **Credentials** → **Create Credentials** → **OAuth client ID**:
-   - Application type: **Web application**.
-   - Name: *Personal Finance Web Client*.
-   - Authorized redirect URIs:
-     ```
-     http://localhost:3000/api/google/callback
-     ```
-5. Nhận `Client ID` và `Client Secret`.
+### 3.2. Cơ chế Chống Trùng Lặp Thận trọng (Conservative Deduplication)
+- **Authoritative Identity**:
+  1. Khóa duy nhất tổng hợp `@@unique([gmailConnectionId, gmailMessageId])` ngăn nhập trùng lặp cùng 1 email trên 1 kết nối Gmail.
+  2. Định danh `(bankCode, bankRefId)` với chỉ mục chuyên biệt nhận diện chính xác các mã giao dịch ngân hàng (Mã GD, Số GD, FT...).
+- **Conservative Cross-Account Heuristic**:
+  - Chỉ áp dụng heuristic vân tay tài chính (`fingerprint`) giữa các tài khoản Gmail **khác nhau** khi chuyển tiếp email.
+  - Các giao dịch độc lập cùng số tiền xảy ra trong cùng một phút (ví dụ: thanh toán 2 cốc Highland cách nhau vài chục giây) được **giữ nguyên toàn vẹn**.
 
-### 3.2. Cấu hình Biến Môi Trường (`.env.local` / `.env`)
-Tạo file `.env.local` tại thư mục gốc của dự án:
+### 3.3. Phân trang An toàn & Giao diện Tiếp tục Nhập (Continuation UX)
+- Quét email có safety cap để bảo vệ bộ nhớ và tốc độ phản hồi.
+- Khi lịch sử có nhiều email, hiển thị banner:
+  *"Đã nhập một phần lịch sử. Vẫn còn email cần quét."* cùng nút **[ Tiếp tục nhập ]**.
+- Token phân trang (`accountContinuationTokens`) được lưu độc lập theo từng tài khoản, không chia sẻ hay tái sử dụng nhầm lẫn giữa các Gmail connections.
+- Trạng thái tiếp tục nhập được gắn chặt với bộ lọc ban đầu (tài khoản, từ ngày, đến ngày); thay đổi bộ lọc sẽ tự động hủy token phân trang cũ.
+
+### 3.4. Phân loại Lỗi & Trạng thái Reconnect
+- Phát hiện chính xác `invalid_grant` / token bị thu hồi: đánh dấu `reconnect_required` (`revokedAt = new Date()`) và hiển thị badge cảnh báo yêu cầu kết nối lại trên giao diện.
+- Không thu hồi tài khoản nhầm khi gặp lỗi quyền hạn (API permission) hay lỗi mạng tạm thời (transient errors).
+
+### 3.5. Quản lý Dữ liệu An toàn (Data Management)
+- **Xóa dữ liệu tài chính (Clear Financial Data)**: Xóa toàn bộ biến động giao dịch, quỹ và lịch sử đồng bộ, nhưng **giữ nguyên các kết nối Gmail đã liên kết**.
+- **Khôi phục cài đặt gốc (Factory Reset)**: Thu hồi và hủy token OAuth trên Google, xóa hoàn toàn kết nối Gmail, danh mục, quỹ và đưa hệ thống về trạng thái ban đầu.
+
+---
+
+## 4. Cấu hình Dành Cho Nhà Phát Triển (Developer Setup)
+
+### 4.1. Thiết lập Google Cloud Console
+1. Truy cập [Google Cloud Console](https://console.cloud.google.com/) và tạo dự án.
+2. Bật **Gmail API** trong thư viện APIs.
+3. Thiết lập **OAuth consent screen** (Testing Mode) với các scopes:
+   - `openid`
+   - `.../auth/userinfo.email`
+   - `.../auth/userinfo.profile`
+   - `https://www.googleapis.com/auth/gmail.readonly`
+4. Thêm địa chỉ Gmail dùng thử nghiệm vào mục **Test users**.
+5. Tạo OAuth Client ID (Web application) với Authorized redirect URI:
+   ```
+   http://localhost:3000/api/google/callback
+   ```
+
+### 4.2. Cấu hình Biến Môi Trường (`.env.local`)
+Sao chép `.env.example` thành `.env.local` và điền các giá trị:
 
 ```bash
-# PostgreSQL Connection URL
-DATABASE_URL="postgresql://kali:kali@localhost:5432/personal_finance"
+# 1. Database (PostgreSQL + Prisma)
+DATABASE_URL="postgresql://user:password@localhost:5432/personal_finance"
 
-# Google OAuth Credentials (Server-only)
+# 2. Mã hóa Token AES-256-GCM (64 hex characters = 32 bytes)
+# Sinh ngẫu nhiên: openssl rand -hex 32
+TOKEN_ENCRYPTION_KEY="<generate with openssl rand -hex 32>"
+
+# 3. Bảo vệ Chủ sở hữu Cockpit (Tối thiểu 32 ký tự / 64 hex characters)
+# Sinh ngẫu nhiên: openssl rand -hex 32
+OWNER_SECRET_KEY="<generate with openssl rand -hex 32>"
+
+# Canonical application origin (bắt buộc cho kiểm tra CSRF Origin)
+APP_ORIGIN="http://localhost:3000"
+
+# 4. Google OAuth Credentials
 GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
 GOOGLE_CLIENT_SECRET="your-client-secret"
 GOOGLE_REDIRECT_URI="http://localhost:3000/api/google/callback"
 
-# Master key for AES-256-GCM encryption (64 hex characters = 32 bytes)
-# Sinh ngẫu nhiên: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-TOKEN_ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# 5. Cờ môi trường kiểm thử (mặc định false)
+ALLOW_DEMO_DATA=false
+ALLOW_MOCK_OAUTH=false
 ```
 
 ---
 
-## 4. Cài Đặt & Khởi Chạy (Installation & Run)
+## 5. Cài đặt & Vận hành (Installation & Run)
 
-### 4.1. Khởi động PostgreSQL & Tạo Database
+### 5.1. Khởi tạo Database PostgreSQL
 ```bash
-# Đảm bảo PostgreSQL đang chạy
+# Đảm bảo PostgreSQL 17 đang chạy
 pg_isready
 
-# Tạo database (nếu chưa có)
-psql -U postgres -c "CREATE DATABASE personal_finance;"
-```
-
-### 4.2. Cài đặt Dependencies & Đồng bộ Schema
-```bash
-npm install
+# Đẩy schema Prisma vào database
 npx prisma db push
 ```
 
-### 4.3. Chạy Dev Server
+### 5.2. Chạy Kiểm thử (Test Suite)
 ```bash
-npm run dev
-```
-Truy cập ứng dụng tại: `http://localhost:3000`
-
----
-
-## 5. Quy Trình Nghiệm Thu & Demo (Acceptance Flow)
-
-Dưới đây là kịch bản demo mẫu phục vụ buổi bảo vệ đồ án:
-
-1. **Khởi đầu**: Mở ứng dụng → vào tab **Cài đặt**. Danh sách Gmail ban đầu hoàn toàn trống.
-2. **Liên kết Gmail**:
-   - Bấm **"+ Thêm tài khoản Gmail"**.
-   - Màn hình Google OAuth hiển thị → Chọn tài khoản Gmail thử nghiệm và cấp quyền đọc Gmail readonly.
-   - Ứng dụng tự động điều hướng trở lại tab Cài đặt: Thẻ Gmail xuất hiện với Google Avatar, Tên và Email.
-3. **Nhập Lịch Sử (Historical Import)**:
-   - Tại mục **Nhập dữ liệu email**, chọn khoảng thời gian (VD: `01/09/2026` → `20/09/2026`).
-   - Bấm **"Nhập lịch sử"**.
-   - Hệ thống quét phân trang, giải mã MIME và trích xuất biến động.
-   - Thẻ kết quả hiển thị: Số email đã đọc, biến động mới, trùng lặp và không đọc được.
-4. **Kiểm tra Tổng quan (Dashboard)**:
-   - Tổng số dư tài chính (Authoritative Balance) cập nhật tức thì theo `IN - OUT`.
-   - Mục **"Biến động cần phân loại"** ưu tiên hiển thị các giao dịch chưa phân loại, đi kèm gợi ý đối tác/thương nhân (VD: *Highlands Coffee*, *Grab*, *Shopee*).
-5. **Phân Loại Thủ Công & Danh Mục Tự Định Nghĩa**:
-   - Bấm nút **[Phân loại]** tại giao dịch Highlands Coffee (-120.000 ₫).
-   - Chọn **"+ Khác... (Tạo danh mục mới)"** → Nhập `Cafe` → Chọn Quỹ (nếu có) → Bấm **Lưu phân loại**.
-   - Giao dịch chuyển sang trạng thái đã phân loại; danh mục `Cafe` được lưu vĩnh viễn và tự động xuất hiện trong bộ lọc Dòng tiền.
-   - Việc phân loại **hoàn toàn không làm thay đổi số dư**.
-6. **Tạo Quỹ Ngân Sách (Funds)**:
-   - Vào tab **Quỹ** → Bấm **"Tạo quỹ"**.
-   - Nhập tên `Quỹ ăn uống`, hạn mức `3.000.000 ₫` → Lưu.
-   - Thẻ quỹ xuất hiện ngay lập tức với thanh tiến độ; refresh lại trình duyệt quỹ vẫn tồn tại bền vững.
-7. **Xóa Dữ Liệu Tài Chính & Nạp Lại (Reset / Re-import)**:
-   - Vào **Cài đặt** → Bấm **"Xóa dữ liệu tài chính"** → Xác nhận.
-   - Toàn bộ giao dịch, quỹ, danh mục bị xóa khỏi database.
-   - **Tài khoản Gmail vẫn giữ nguyên liên kết**.
-   - Bấm lại **"Nhập lịch sử"** cùng khoảng ngày → Toàn bộ biến động ngân hàng được tái tạo chuẩn xác mà không cần đăng nhập lại Google.
-
----
-
-## 6. Kiểm Thử Hệ Thống (Testing & Verification)
-
-Chạy toàn bộ 41 unit & integration tests:
-```bash
+# Chạy toàn bộ 85+ bài kiểm thử Vitest trên PostgreSQL 17
 npm test
-```
-Kiểm tra type và build sản phẩm:
-```bash
+
+# Kiểm tra tính hợp lệ của TypeScript
 npm run typecheck
-npm run build
 ```
 
----
+### 5.3. Build & Khởi chạy Production
+```bash
+# Build ứng dụng Next.js tối ưu hóa
+npm run build
 
-## 7. Ranh Giới An Toàn & Bảo Mật (Security Boundary)
+# Khởi chạy server
+npm start
+```
 
-- **Không đưa lên mạng công cộng**: Ứng dụng là cockpit cá nhân không có lớp phân quyền nhiều người dùng. Một phiên bản triển khai thực tế có kết nối Gmail **tuyệt đối không được mở public** nếu không có reverse proxy xác thực chủ sở hữu (Basic Auth, Tailscale, Cloudflare Access).
-- **Chế độ Demo An Toàn**: Khi demo tại lớp học mà không muốn để lộ email ngân hàng thật, người dùng có thể sử dụng tính năng demo fixture an toàn có sẵn trong hệ thống.
+Truy cập `http://localhost:3000`, nhập `OWNER_SECRET_KEY` đã cấu hình để mở khóa Cockpit.

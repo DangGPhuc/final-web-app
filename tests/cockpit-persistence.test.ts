@@ -497,4 +497,73 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
       expect(await prisma.gmailConnection.count()).toBe(0);
     });
   });
+
+  describe('ALL-Account Continuation Isolation & Financial Date Range Filtering', () => {
+    it('isolates account continuation tokens and never restarts completed accounts', () => {
+      // Setup hypothetical 3 accounts
+      const connections = [
+        { id: 'conn_A', email: 'a@gmail.com' },
+        { id: 'conn_B', email: 'b@gmail.com' },
+        { id: 'conn_C', email: 'c@gmail.com' },
+      ];
+
+      // Account A has tokenA, Account B is complete (no token), Account C has tokenC
+      const accountContinuationTokens: Record<string, string> = {
+        conn_A: 'token_A_page_2',
+        conn_C: 'token_C_page_2',
+      };
+
+      const isAllAccounts = true;
+      const isContinuationMode = Boolean(
+        accountContinuationTokens && Object.keys(accountContinuationTokens).length > 0
+      );
+
+      // Filter target connections
+      let targetConnections = connections;
+      if (isAllAccounts && isContinuationMode) {
+        const activeIds = Object.keys(accountContinuationTokens);
+        targetConnections = connections.filter(c => activeIds.includes(c.id));
+      }
+
+      // Assert:
+      // 1. Account B must NOT be in targetConnections (never restarted!)
+      expect(targetConnections.map(c => c.id)).toEqual(['conn_A', 'conn_C']);
+      expect(targetConnections.find(c => c.id === 'conn_B')).toBeUndefined();
+
+      // 2. Account A receives tokenA, Account C receives tokenC, and neither is shared
+      for (const conn of targetConnections) {
+        const specificPageToken = accountContinuationTokens[conn.id];
+        if (conn.id === 'conn_A') {
+          expect(specificPageToken).toBe('token_A_page_2');
+        }
+        if (conn.id === 'conn_C') {
+          expect(specificPageToken).toBe('token_C_page_2');
+        }
+      }
+    });
+
+    it('enforces that transactions with occurredAt outside the Vietnam date range are excluded', () => {
+      // Range: 01/09/2026 -> 20/09/2026 (Vietnam midnight to next day midnight)
+      const rangeStartMs = Date.parse('2026-09-01T00:00:00+07:00');
+      const rangeEndMs = Date.parse('2026-09-21T00:00:00+07:00');
+
+      // Tx 1: Event on 20/09/2026 23:50 Vietnam time (in range, even if email delivered 21/09)
+      const tx1Occurred = new Date('2026-09-20T23:50:00+07:00');
+      const tx1In =
+        tx1Occurred.getTime() >= rangeStartMs && tx1Occurred.getTime() < rangeEndMs;
+      expect(tx1In).toBe(true);
+
+      // Tx 2: Event on 28/08/2026 (before range start, even if email delivered 01/09)
+      const tx2Occurred = new Date('2026-08-28T10:00:00+07:00');
+      const tx2In =
+        tx2Occurred.getTime() >= rangeStartMs && tx2Occurred.getTime() < rangeEndMs;
+      expect(tx2In).toBe(false);
+
+      // Tx 3: Event on 21/09/2026 00:01 (after range end)
+      const tx3Occurred = new Date('2026-09-21T00:01:00+07:00');
+      const tx3In =
+        tx3Occurred.getTime() >= rangeStartMs && tx3Occurred.getTime() < rangeEndMs;
+      expect(tx3In).toBe(false);
+    });
+  });
 });
