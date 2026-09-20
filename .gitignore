@@ -26,6 +26,9 @@ yarn-error.log*
 email-dump*
 *.dump
 personal-financial-export*
+/backups/
+backups/
+*.sql
 
 # OS
 .DS_Store

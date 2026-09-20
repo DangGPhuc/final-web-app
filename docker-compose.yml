@@ -3,8 +3,8 @@
 #
 # SECURITY RULES:
 # - Binds exclusively to IPv4 loopback (127.0.0.1) to prevent external network exposure.
-# - Uses environment variable substitution; NEVER hardcode production secrets here.
-# - Configurable via .env.local or shell variables.
+# - Interpolates variables from .env.local via: docker compose --env-file .env.local <cmd>
+# - NEVER hardcodes database passwords. Requires explicit non-empty POSTGRES_PASSWORD.
 
 services:
   postgres:
@@ -15,13 +15,13 @@ services:
       # Strictly bind to 127.0.0.1 to avoid exposing the database port publicly
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-fintrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured in .env.local}
       POSTGRES_DB: ${POSTGRES_DB:-personal_finance}
     volumes:
       - fintrack_cockpit_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-personal_finance}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fintrack} -d ${POSTGRES_DB:-personal_finance}"]
       interval: 5s
       timeout: 5s
       retries: 5

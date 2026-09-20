@@ -87,6 +87,20 @@ const KNOWN_WEAK_OWNER_SECRETS = new Set([
   'cockpit-owner-demo-secret-2026',
 ]);
 
+const KNOWN_WEAK_PASSWORDS = new Set([
+  'postgres',
+  'password',
+  '123456',
+  '12345678',
+  '1234567890',
+  'changeme',
+  'admin',
+  'root',
+  'fintrack',
+  'cockpit',
+  'secret',
+]);
+
 export function runPreflightChecks(envGetter = getEnvVal) {
   const results = [];
 
@@ -95,13 +109,71 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     results.push({ name, status, detail });
   };
 
-  // 1. DATABASE_URL
+  // 1. POSTGRES_USER
+  const pgUser = envGetter('POSTGRES_USER');
+  if (!pgUser) {
+    record('POSTGRES_USER', 'missing', 'Local PostgreSQL user not set in environment');
+  } else {
+    const trimmed = pgUser.trim();
+    if (KNOWN_PLACEHOLDER_SUBSTRINGS.some((ph) => trimmed.includes(ph))) {
+      record('POSTGRES_USER', 'invalid', 'Placeholder value detected');
+    } else {
+      record('POSTGRES_USER', 'configured', 'PostgreSQL username configured');
+    }
+  }
+
+  // 2. POSTGRES_PASSWORD
+  const pgPass = envGetter('POSTGRES_PASSWORD');
+  if (!pgPass) {
+    record('POSTGRES_PASSWORD', 'missing', 'Local PostgreSQL password not set in environment');
+  } else {
+    const trimmed = pgPass.trim();
+    if (
+      KNOWN_PLACEHOLDER_SUBSTRINGS.some((ph) => trimmed.includes(ph)) ||
+      trimmed.includes('<local_random_password>')
+    ) {
+      record('POSTGRES_PASSWORD', 'invalid', 'Placeholder value detected');
+    } else if (KNOWN_WEAK_PASSWORDS.has(trimmed.toLowerCase())) {
+      record('POSTGRES_PASSWORD', 'invalid', 'Matches known weak default password (e.g. postgres)');
+    } else if (trimmed.length < 16) {
+      record('POSTGRES_PASSWORD', 'invalid', 'Length too short (minimum 16 characters required)');
+    } else {
+      record('POSTGRES_PASSWORD', 'configured', 'Strong password meeting security requirements (>= 16 chars)');
+    }
+  }
+
+  // 3. POSTGRES_DB
+  const pgDb = envGetter('POSTGRES_DB');
+  if (!pgDb) {
+    record('POSTGRES_DB', 'missing', 'Local PostgreSQL database name not set');
+  } else {
+    const trimmed = pgDb.trim();
+    if (KNOWN_PLACEHOLDER_SUBSTRINGS.some((ph) => trimmed.includes(ph))) {
+      record('POSTGRES_DB', 'invalid', 'Placeholder value detected');
+    } else {
+      record('POSTGRES_DB', 'configured', 'PostgreSQL database name configured');
+    }
+  }
+
+  // 4. POSTGRES_PORT
+  const pgPort = envGetter('POSTGRES_PORT') || '5432';
+  const parsedPgPort = parseInt(pgPort.trim(), 10);
+  if (isNaN(parsedPgPort) || parsedPgPort < 1 || parsedPgPort > 65535) {
+    record('POSTGRES_PORT', 'invalid', 'Must be a valid TCP port number (1-65535)');
+  } else {
+    record('POSTGRES_PORT', 'configured', 'Valid port number configured');
+  }
+
+  // 5. DATABASE_URL & Consistency with POSTGRES_*
   const dbUrl = envGetter('DATABASE_URL');
   if (!dbUrl) {
     record('DATABASE_URL', 'missing', 'Environment variable not set');
   } else {
     const trimmed = dbUrl.trim();
-    if (KNOWN_PLACEHOLDER_SUBSTRINGS.some((ph) => trimmed.includes(ph))) {
+    if (
+      KNOWN_PLACEHOLDER_SUBSTRINGS.some((ph) => trimmed.includes(ph)) ||
+      trimmed.includes('<same_local_random_password>')
+    ) {
       record('DATABASE_URL', 'invalid', 'Placeholder value detected');
     } else {
       try {
@@ -110,8 +182,32 @@ export function runPreflightChecks(envGetter = getEnvVal) {
           record('DATABASE_URL', 'invalid', 'Protocol must be postgresql:// or postgres://');
         } else if (!parsed.hostname) {
           record('DATABASE_URL', 'invalid', 'Missing database host in URL');
+        } else if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') {
+          record('DATABASE_URL', 'invalid', 'Host must be 127.0.0.1 or localhost for Phase 5 local environment');
         } else {
-          record('DATABASE_URL', 'configured', 'Valid PostgreSQL connection string');
+          // Verify component consistency against POSTGRES_*
+          const urlUser = decodeURIComponent(parsed.username);
+          const urlPass = decodeURIComponent(parsed.password);
+          const urlPort = parsed.port || '5432';
+          const urlDb = parsed.pathname.replace(/^\//, '');
+
+          if (!pgUser) {
+            record('DATABASE_URL', 'invalid', 'Cannot verify consistency: POSTGRES_USER is missing');
+          } else if (urlUser !== pgUser.trim()) {
+            record('DATABASE_URL', 'invalid', 'Username does not match POSTGRES_USER');
+          } else if (!pgPass) {
+            record('DATABASE_URL', 'invalid', 'Cannot verify consistency: POSTGRES_PASSWORD is missing');
+          } else if (urlPass !== pgPass.trim()) {
+            record('DATABASE_URL', 'invalid', 'Password does not match POSTGRES_PASSWORD');
+          } else if (urlPort !== (pgPort ? pgPort.trim() : '5432')) {
+            record('DATABASE_URL', 'invalid', 'Port does not match POSTGRES_PORT');
+          } else if (!pgDb) {
+            record('DATABASE_URL', 'invalid', 'Cannot verify consistency: POSTGRES_DB is missing');
+          } else if (urlDb !== pgDb.trim()) {
+            record('DATABASE_URL', 'invalid', 'Database name does not match POSTGRES_DB');
+          } else {
+            record('DATABASE_URL', 'configured', 'Valid and matches local POSTGRES_* configuration');
+          }
         }
       } catch {
         record('DATABASE_URL', 'invalid', 'Invalid URL format');
@@ -119,7 +215,7 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     }
   }
 
-  // 2. TOKEN_ENCRYPTION_KEY (AES-256-GCM master key: 32 bytes / 64 hex characters)
+  // 6. TOKEN_ENCRYPTION_KEY (AES-256-GCM master key: 32 bytes / 64 hex characters)
   const encKey = envGetter('TOKEN_ENCRYPTION_KEY');
   if (!encKey) {
     record('TOKEN_ENCRYPTION_KEY', 'missing', 'Master key for Gmail refresh tokens not set');
@@ -136,7 +232,7 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     }
   }
 
-  // 3. OWNER_SECRET_KEY (Owner session signing key: >= 32 chars, high strength)
+  // 7. OWNER_SECRET_KEY (Owner session signing key: >= 32 chars, high strength)
   const ownerKey = envGetter('OWNER_SECRET_KEY');
   if (!ownerKey) {
     record('OWNER_SECRET_KEY', 'missing', 'Owner unlock secret key not set');
@@ -153,25 +249,28 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     }
   }
 
-  // 4. APP_ORIGIN (Canonical application origin)
+  // 8. APP_ORIGIN (Canonical application origin)
   const appOrigin = envGetter('APP_ORIGIN');
+  let parsedAppOrigin = null;
   if (!appOrigin) {
     record('APP_ORIGIN', 'missing', 'Canonical application origin not set');
   } else {
     const trimmed = appOrigin.trim();
     try {
-      const parsed = new URL(trimmed);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      parsedAppOrigin = new URL(trimmed);
+      if (parsedAppOrigin.protocol !== 'http:' && parsedAppOrigin.protocol !== 'https:') {
         record('APP_ORIGIN', 'invalid', 'Origin must be HTTP or HTTPS URL');
+        parsedAppOrigin = null;
       } else {
-        record('APP_ORIGIN', 'configured', `Valid origin (${parsed.protocol}//${parsed.host})`);
+        record('APP_ORIGIN', 'configured', `Valid origin (${parsedAppOrigin.origin})`);
       }
     } catch {
       record('APP_ORIGIN', 'invalid', 'Invalid URL format');
+      parsedAppOrigin = null;
     }
   }
 
-  // 5. GOOGLE_CLIENT_ID
+  // 9. GOOGLE_CLIENT_ID
   const clientId = envGetter('GOOGLE_CLIENT_ID');
   if (!clientId) {
     record('GOOGLE_CLIENT_ID', 'missing', 'OAuth Client ID not set');
@@ -186,7 +285,7 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     }
   }
 
-  // 6. GOOGLE_CLIENT_SECRET
+  // 10. GOOGLE_CLIENT_SECRET
   const clientSecret = envGetter('GOOGLE_CLIENT_SECRET');
   if (!clientSecret) {
     record('GOOGLE_CLIENT_SECRET', 'missing', 'OAuth Client Secret not set');
@@ -201,27 +300,27 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     }
   }
 
-  // 7. GOOGLE_REDIRECT_URI
+  // 11. GOOGLE_REDIRECT_URI (Exact origin comparison with APP_ORIGIN)
   const redirectUri = envGetter('GOOGLE_REDIRECT_URI');
   if (!redirectUri) {
     record('GOOGLE_REDIRECT_URI', 'missing', 'OAuth redirect URI not set');
   } else {
     const trimmed = redirectUri.trim();
     try {
-      const parsed = new URL(trimmed);
-      if (!parsed.pathname.endsWith('/api/google/callback')) {
-        record('GOOGLE_REDIRECT_URI', 'invalid', 'Must end with /api/google/callback');
-      } else if (appOrigin && !trimmed.startsWith(appOrigin.trim())) {
-        record('GOOGLE_REDIRECT_URI', 'invalid', 'Must match APP_ORIGIN prefix');
+      const parsedRedirect = new URL(trimmed);
+      if (parsedRedirect.pathname !== '/api/google/callback') {
+        record('GOOGLE_REDIRECT_URI', 'invalid', 'Pathname must be exactly /api/google/callback');
+      } else if (parsedAppOrigin && parsedRedirect.origin !== parsedAppOrigin.origin) {
+        record('GOOGLE_REDIRECT_URI', 'invalid', 'Origin does not exactly match APP_ORIGIN');
       } else {
-        record('GOOGLE_REDIRECT_URI', 'configured', 'Valid OAuth callback URI');
+        record('GOOGLE_REDIRECT_URI', 'configured', 'Valid OAuth callback URI matching APP_ORIGIN exactly');
       }
     } catch {
       record('GOOGLE_REDIRECT_URI', 'invalid', 'Invalid URL format');
     }
   }
 
-  // 8. ALLOW_DEMO_DATA (Must be false or unset for real-environment integration)
+  // 12. ALLOW_DEMO_DATA (Must be false or unset for real-environment integration)
   const allowDemo = envGetter('ALLOW_DEMO_DATA');
   if (!allowDemo || allowDemo.trim().toLowerCase() === 'false') {
     record('ALLOW_DEMO_DATA', 'configured', 'Disabled (false) for real environment');
@@ -231,7 +330,7 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     record('ALLOW_DEMO_DATA', 'invalid', 'Must be explicit boolean false');
   }
 
-  // 9. ALLOW_MOCK_OAUTH (Must be false or unset for real-environment integration)
+  // 13. ALLOW_MOCK_OAUTH (Must be false or unset for real-environment integration)
   const allowMock = envGetter('ALLOW_MOCK_OAUTH');
   if (!allowMock || allowMock.trim().toLowerCase() === 'false') {
     record('ALLOW_MOCK_OAUTH', 'configured', 'Disabled (false) for real environment');
@@ -241,7 +340,7 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     record('ALLOW_MOCK_OAUTH', 'invalid', 'Must be explicit boolean false');
   }
 
-  // 10. Runtime Assumptions
+  // 14. Runtime Assumptions
   const nodeEnv = envGetter('NODE_ENV') || 'development (default)';
   const runtimeAssumptions = {
     nodeVersion: process.version,

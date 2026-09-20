@@ -47,21 +47,21 @@
 | Step ID | Scenario Description | Status (`PASS` / `FAIL` / `SKIPPED`) | Verification Details / Observations |
 |---|---|---|---|
 | **STEP A** | Private PostgreSQL 17 Start | `[PASS/PENDING]` | Docker container healthy on `127.0.0.1:5432` |
-| **STEP B** | Preflight Verification (`npm run preflight:real`) | `[PASS/PENDING]` | 9/9 items `configured`, 0 secrets printed |
-| **STEP C** | Prisma Schema Sync (`npx prisma db push`) | `[PASS/PENDING]` | Schema in sync, no business migrations lost |
-| **STEP D** | Local Application Launch | `[PASS/PENDING]` | Dev server or production build running on port 3000 |
-| **STEP E** | Cockpit UI Initial Render | `[PASS/PENDING]` | Dark-mode theme, lock screen presented |
-| **STEP F** | Owner Secret Unlock | `[PASS/PENDING]` | Correct key unlocks; invalid keys rejected |
-| **STEP G** | Google OAuth Connection (`gmail.readonly`) | `[PASS/PENDING]` | Consent screen, callback redirect, DB encrypted token |
-| **STEP H** | Historical Import (Controlled Range) | `[PASS/PENDING]` | Candidate messages ingested, integer VND preserved |
-| **STEP I** | Authoritative Dashboard Balance | `[PASS/PENDING]` | Net Balance = `SUM(IN) - SUM(OUT)` exactly |
-| **STEP J** | Cashflow & Categorization Triage | `[PASS/PENDING]` | Unclassified triage, category creation, fund assignment |
-| **STEP K** | Repeat Historical Deduplication | `[PASS/PENDING]` | 0 duplicate entries added, ledger stable |
-| **STEP L** | Quick Scan & Watermark Advance | `[PASS/PENDING]` | Incremental email imported, `lastSyncAt` updated |
-| **STEP M** | Multi-Account Isolation | `[PASS/PENDING]` | Independent accounts, forward duplicate deduped |
-| **STEP N** | Clear Financial Data | `[PASS/PENDING]` | Transactions deleted, OAuth connection retained |
-| **STEP O** | Reconnect Flow on Revocation | `[PASS/PENDING]` | Transitions to `reconnect_required`, reconnects ok |
-| **STEP P** | Factory Reset Purge | `[PASS/PENDING]` | Revocation attempted, all data purged, locked screen |
+| **STEP B** | Preflight Verification (`npm run preflight:real`) | `[PENDING]` | 13/13 items `configured`, 0 secrets printed |
+| **STEP C** | Prisma Schema Sync (`npx prisma db push`) | `[PENDING]` | Schema in sync, no business migrations lost |
+| **STEP D** | Local Application Launch | `[PENDING]` | Dev server or production build running on port 3000 |
+| **STEP E** | Cockpit UI Initial Render | `[PENDING]` | Dark-mode theme, lock screen presented |
+| **STEP F** | Owner Secret Unlock | `[PENDING]` | Correct key unlocks; invalid keys rejected |
+| **STEP G** | Google OAuth Connection (`gmail.readonly`) | `[PENDING]` | Consent screen, callback redirect, DB encrypted token |
+| **STEP H** | Historical Import (Controlled Range) | `[PENDING]` | Candidate messages ingested, integer VND preserved |
+| **STEP I** | Authoritative Dashboard Balance | `[PENDING]` | Net Balance = `SUM(IN) - SUM(OUT)` exactly |
+| **STEP J** | Cashflow & Categorization Triage | `[PENDING]` | Unclassified triage, category creation, fund assignment |
+| **STEP K** | Repeat Historical Deduplication | `[PENDING]` | 0 duplicate entries added, ledger stable |
+| **STEP L** | Quick Scan & Watermark Advance | `[PENDING]` | Incremental email imported, `lastSyncAt` updated |
+| **STEP M** | Multi-Account Isolation | `[PENDING]` | Independent accounts, forward duplicate deduped |
+| **STEP N** | Clear Financial Data | `[PENDING]` | Transactions deleted, OAuth connection retained |
+| **STEP O** | Reconnect Flow on Revocation | `[PENDING]` | Transitions to `reconnect_required`, reconnects ok |
+| **STEP P** | Factory Reset Purge | `[PENDING]` | Revocation attempted, all data purged, locked screen |
 
 ---
 
@@ -112,7 +112,9 @@
 
 ---
 
-## 5. Known Limitations & Follow-up Items
+## 5. Known Limitations & Operational Considerations
 
-- **Google Cloud Testing Mode Scope**: Unverified test apps in Google Cloud Console permit up to 100 designated test users and show an initial "Google hasn't verified this app" notice which is expected for private/local development.
-- **Gmail Rate Limits**: Gmail API enforces per-user quotas (250 quota units/sec). Batch fetching respects these limits with exponential backoff.
+- **Google Cloud Testing Mode Scope**: Unverified test apps in Google Cloud Console permit up to 100 designated test users and show an initial "Google hasn't verified this app" warning which is expected for private/local development.
+- **Testing Mode 7-Day Refresh Token Lifetime**: In Google Cloud Testing mode, OAuth refresh tokens for external test users expire after 7 days; periodic re-authentication is expected platform behavior during extended testing.
+- **Restricted Scope Verification**: Production deployments utilizing `https://www.googleapis.com/auth/gmail.readonly` require official Google OAuth App Verification and security assessments regardless of repository visibility.
+- **Gmail API Quotas**: Gmail API interactions are quota-controlled by Google. For current rate limits and quotas, consult the Google Cloud Console Quotas page.
