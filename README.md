@@ -158,7 +158,7 @@ npx prisma db push
 
 ### 5.2. Chạy Kiểm thử (Test Suite)
 ```bash
-# Chạy toàn bộ 116 bài kiểm thử Vitest trên PostgreSQL 17
+# Chạy toàn bộ 119 bài kiểm thử Vitest trên PostgreSQL 17
 npm test
 
 # Kiểm tra tính hợp lệ của TypeScript
