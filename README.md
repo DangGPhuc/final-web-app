@@ -181,11 +181,20 @@ npx prisma db push
 ```
 
 ### 5.2. Chạy Kiểm thử (Test Suite)
-```bash
-# Chạy toàn bộ 119 bài kiểm thử Vitest trên PostgreSQL 17
-npm test
+> [!IMPORTANT]
+> **Cơ chế An toàn Cơ sở dữ liệu Kiểm thử (Test DB Safety Guard)**:
+> FinTrack trang bị cơ chế an toàn tự động chặn (`fail-closed`) để ngăn chặn việc chạy nhầm các bài kiểm thử có tính xóa dữ liệu (`deleteMany`) vào cơ sở dữ liệu thật (`personal_finance`). Lệnh `npm test` mặc định sẽ từ chối thực thi trừ khi được cung cấp cờ xác nhận và URL cơ sở dữ liệu test dùng một lần riêng biệt chứa từ khóa `test` (ví dụ `fintrack_test`). Tuyệt đối không bao giờ dùng chung database ứng dụng cho test.
 
-# Kiểm tra tính hợp lệ của TypeScript
+```bash
+# 1. Chạy các bài unit test thuần túy (không yêu cầu cơ sở dữ liệu)
+npx vitest run tests/test-db-safety.test.ts
+npx vitest run tests/bank-timestamp.test.ts
+
+# 2. Chạy toàn bộ test suite với database test riêng biệt (disposable test database)
+# Tạo database test: docker compose --env-file .env.local exec postgres psql -U fintrack -d postgres -c "CREATE DATABASE fintrack_test;"
+ALLOW_DESTRUCTIVE_DB_TESTS=true DATABASE_TEST_URL="postgresql://fintrack:<mat_khau>@127.0.0.1:5432/fintrack_test" npm test
+
+# 3. Kiểm tra tính hợp lệ của TypeScript
 npm run typecheck
 ```
 

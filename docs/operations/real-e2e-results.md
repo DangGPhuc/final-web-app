@@ -72,7 +72,7 @@
 | **STEP J** | Cashflow & Categorization Triage | `PASS` | Unclassified triage, manual classification to categories & funds |
 | **STEP K** | Repeat Historical Deduplication | `PASS` | 0 duplicate entries added on re-import, ledger stable |
 | **STEP L** | Quick Scan & Watermark Advance | `PASS` | Incremental email imported, `lastSyncAt` watermark advances |
-| **STEP M** | Multi-Account Isolation | `PASS` | Multiple accounts isolated, forwarding duplicate deduped |
+| **STEP M** | Multi-Account Isolation | `PENDING REAL MULTI-ACCOUNT E2E` | Automated regression coverage PASS; second real Gmail account not yet manually exercised |
 | **STEP N** | Clear Financial Data | `PASS` | Transactions deleted, Gmail preserved, historical re-import ok |
 | **STEP O** | Reconnect Flow on Revocation | `PASS` | External revoke triggers `reconnect_required`, reconnect succeeds |
 | **STEP P** | Factory Reset Purge | `PENDING REAL RETEST` | **Defect found during initial run**: data wipe PASS, Gmail removal PASS, owner-session termination FAIL (UI remained unlocked). **Fix applied**: server deletes `cockpit_owner_session` cookie; client resets state & transitions to lock screen immediately without `refreshData()`. Awaiting real user retest. |

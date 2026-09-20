@@ -37,7 +37,7 @@ Before executing any operation in this runbook, adhere strictly to these non-neg
 | Database Provisioning (`docker compose --env-file .env.local ...`) | **AUTOMATED / ASSISTANT** | Local Docker Compose setup on `127.0.0.1:5432`. |
 | Schema Synchronization (`npm run prisma:db:push:real`) | **AUTOMATED / CLI** | Synchronizes Prisma schema safely with persistent PostgreSQL via explicit .env.local runner. |
 | Schema & Client Validation (`npm run prisma:validate:real`, `npm run prisma:generate:real`) | **AUTOMATED / CLI** | Validates schema and regenerates Prisma Client safely. |
-| Verification Test Suite (`npm test`, `npm run typecheck`) | **AUTOMATED / ASSISTANT** | Ensures all regression and security gates pass cleanly. |
+| Verification Test Suite (`npm test`, `npm run typecheck`) | **AUTOMATED / ASSISTANT** | Ensures all regression and security gates pass cleanly. Integration tests require an explicit disposable database (`DATABASE_TEST_URL`) and fail closed against `personal_finance`. |
 
 ---
 

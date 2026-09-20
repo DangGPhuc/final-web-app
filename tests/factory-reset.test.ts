@@ -12,6 +12,7 @@ import {
   executeFactoryReset,
   type FactoryResetStateSetters,
 } from '../src/lib/data/factory-reset-client';
+import { DEMO_PAPER_TRADES } from '../src/lib/mock-data';
 
 const TEST_KEY = Buffer.alloc(32, 5).toString('hex');
 const TEST_OWNER_KEY = Buffer.alloc(32, 8).toString('hex');
@@ -198,6 +199,7 @@ describe('Factory Reset — Server & Frontend Session Termination', () => {
         setCategories: vi.fn(),
         setGmailAccounts: vi.fn(),
         setMonthlySnapshots: vi.fn(),
+        setPaperTrades: vi.fn(),
         setClassifyingTransaction: vi.fn(),
         setIsSyncing: vi.fn(),
         setIsOwnerAuthenticated: vi.fn(),
@@ -230,18 +232,72 @@ describe('Factory Reset — Server & Frontend Session Termination', () => {
       expect(setters.setGmailAccounts).toHaveBeenCalledWith([]);
       expect(setters.setMonthlySnapshots).toHaveBeenCalledWith([]);
 
-      // 3. Transient classification and sync states reset
+      // 3. Mutable paper trades reset to clean initial baseline
+      expect(setters.setPaperTrades).toHaveBeenCalledWith(DEMO_PAPER_TRADES);
+
+      // 4. Transient classification and sync states reset
       expect(setters.setClassifyingTransaction).toHaveBeenCalledWith(null);
       expect(setters.setIsSyncing).toHaveBeenCalledWith(false);
 
-      // 4. Toast notification shown
+      // 5. Toast notification shown
       expect(setters.showToast).toHaveBeenCalledWith('Đã khôi phục cài đặt gốc', 'info');
 
-      // 5. Invariant: fetch was called EXACTLY ONCE for /api/data/factory-reset.
+      // 6. Invariant: fetch was called EXACTLY ONCE for /api/data/factory-reset.
       // NO authenticated data refresh calls issued after cookie deletion!
       expect(fetchCalls.length).toBe(1);
       expect(fetchCalls[0].url).toBe('/api/data/factory-reset');
       expect(fetchCalls[0].options?.method).toBe('POST');
+    });
+
+    it('replaces old user-created paper trades with the clean initial baseline (DEMO_PAPER_TRADES)', async () => {
+      let currentPaperTrades = [
+        {
+          id: 'user-trade-scenario-42',
+          name: 'Custom High Risk Scenario',
+          symbol: 'BTC/USDT',
+          type: 'BUY',
+          entryPrice: 95000,
+          currentPrice: 98000,
+          quantity: 0.5,
+          leverage: 10,
+          pnl: 1500,
+          pnlPercent: 3.15,
+          status: 'OPEN',
+          notes: 'Old user custom scenario from active session',
+          createdAt: '2026-09-18T12:00:00.000Z',
+        },
+      ];
+
+      const setters: FactoryResetStateSetters = {
+        setTransactions: vi.fn(),
+        setFunds: vi.fn(),
+        setCategories: vi.fn(),
+        setGmailAccounts: vi.fn(),
+        setMonthlySnapshots: vi.fn(),
+        setPaperTrades: vi.fn((val) => {
+          currentPaperTrades = val;
+        }),
+        setClassifyingTransaction: vi.fn(),
+        setIsSyncing: vi.fn(),
+        setIsOwnerAuthenticated: vi.fn(),
+        showToast: vi.fn(),
+      };
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ success: true, message: 'Đã khôi phục cài đặt gốc' }),
+      } as Response);
+
+      expect(currentPaperTrades).toHaveLength(1);
+      expect(currentPaperTrades[0].id).toBe('user-trade-scenario-42');
+
+      const result = await executeFactoryReset(setters, mockFetch as unknown as typeof fetch);
+      expect(result.success).toBe(true);
+
+      // Verify user-created scenario is completely replaced by clean baseline
+      expect(setters.setPaperTrades).toHaveBeenCalledWith(DEMO_PAPER_TRADES);
+      expect(currentPaperTrades).toEqual(DEMO_PAPER_TRADES);
+      expect(currentPaperTrades.some(t => t.id === 'user-trade-scenario-42')).toBe(false);
     });
 
     it('handles failure gracefully without locking or clearing state prematurely', async () => {
@@ -251,6 +307,7 @@ describe('Factory Reset — Server & Frontend Session Termination', () => {
         setCategories: vi.fn(),
         setGmailAccounts: vi.fn(),
         setMonthlySnapshots: vi.fn(),
+        setPaperTrades: vi.fn(),
         setClassifyingTransaction: vi.fn(),
         setIsSyncing: vi.fn(),
         setIsOwnerAuthenticated: vi.fn(),
@@ -274,6 +331,7 @@ describe('Factory Reset — Server & Frontend Session Termination', () => {
       expect(setters.setIsOwnerAuthenticated).not.toHaveBeenCalled();
       expect(setters.setTransactions).not.toHaveBeenCalled();
       expect(setters.setGmailAccounts).not.toHaveBeenCalled();
+      expect(setters.setPaperTrades).not.toHaveBeenCalled();
       expect(setters.showToast).toHaveBeenCalledWith('Network connection lost', 'error');
     });
   });

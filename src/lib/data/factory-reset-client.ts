@@ -1,4 +1,5 @@
-import type { BankTransaction, Fund, Category, GmailAccountInfo, MonthlySnapshot } from '@/types';
+import type { BankTransaction, Fund, Category, GmailAccountInfo, MonthlySnapshot, PaperTradeScenario } from '@/types';
+import { DEMO_PAPER_TRADES } from '@/lib/mock-data';
 
 /**
  * State setters required by executeFactoryReset to perform a complete in-memory purge.
@@ -9,6 +10,7 @@ export interface FactoryResetStateSetters {
   setCategories: (val: Category[]) => void;
   setGmailAccounts: (val: GmailAccountInfo[]) => void;
   setMonthlySnapshots: (val: MonthlySnapshot[]) => void;
+  setPaperTrades: (val: PaperTradeScenario[]) => void;
   setClassifyingTransaction: (val: BankTransaction | null) => void;
   setIsSyncing: (val: boolean) => void;
   setIsOwnerAuthenticated: (val: boolean) => void;
@@ -37,6 +39,7 @@ export async function executeFactoryReset(
     setters.setCategories([]);
     setters.setGmailAccounts([]);
     setters.setMonthlySnapshots([]);
+    setters.setPaperTrades(DEMO_PAPER_TRADES);
     setters.setClassifyingTransaction(null);
     setters.setIsSyncing(false);
     setters.setIsOwnerAuthenticated(false);
