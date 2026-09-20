@@ -16,36 +16,15 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+  parseEnvFile,
+  KNOWN_PLACEHOLDER_SUBSTRINGS,
+  KNOWN_WEAK_OWNER_SECRETS,
+  KNOWN_WEAK_PASSWORDS,
+} from './lib/local-env.mjs';
 
-// Parse .env and .env.local files safely into memory without modifying existing process.env
-export function parseEnvFile(filePath) {
-  if (!fs.existsSync(filePath)) return {};
-  const content = fs.readFileSync(filePath, 'utf8');
-  const result = {};
-
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-
-    const eqIdx = line.indexOf('=');
-    if (eqIdx === -1) continue;
-
-    const key = line.slice(0, eqIdx).trim();
-    let val = line.slice(eqIdx + 1).trim();
-
-    // Strip wrapping quotes if present
-    if (
-      (val.startsWith('"') && val.endsWith('"')) ||
-      (val.startsWith("'") && val.endsWith("'"))
-    ) {
-      val = val.slice(1, -1);
-    }
-
-    result[key] = val;
-  }
-
-  return result;
-}
+// Re-export parseEnvFile for backwards compatibility
+export { parseEnvFile };
 
 // Load environment in precedence order:
 // 1. Existing process.env (e.g. shell / CI)
@@ -67,39 +46,6 @@ export function getEnvVal(key) {
   }
   return undefined;
 }
-
-const KNOWN_PLACEHOLDER_SUBSTRINGS = [
-  'replace_with',
-  'your-google-client',
-  'example.com',
-  'user:password@localhost',
-];
-
-const KNOWN_WEAK_OWNER_SECRETS = new Set([
-  'password',
-  '12345678',
-  '1234567890',
-  'owner',
-  'admin',
-  'cockpit',
-  'secret',
-  'changeme',
-  'cockpit-owner-demo-secret-2026',
-]);
-
-const KNOWN_WEAK_PASSWORDS = new Set([
-  'postgres',
-  'password',
-  '123456',
-  '12345678',
-  '1234567890',
-  'changeme',
-  'admin',
-  'root',
-  'fintrack',
-  'cockpit',
-  'secret',
-]);
 
 export function runPreflightChecks(envGetter = getEnvVal) {
   const results = [];
@@ -257,16 +203,23 @@ export function runPreflightChecks(envGetter = getEnvVal) {
   } else {
     const trimmed = appOrigin.trim();
     try {
-      parsedAppOrigin = new URL(trimmed);
-      if (parsedAppOrigin.protocol !== 'http:' && parsedAppOrigin.protocol !== 'https:') {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         record('APP_ORIGIN', 'invalid', 'Origin must be HTTP or HTTPS URL');
-        parsedAppOrigin = null;
+      } else if (parsed.username || parsed.password) {
+        record('APP_ORIGIN', 'invalid', 'Must not contain username or password credentials');
+      } else if (parsed.pathname !== '/' && parsed.pathname !== '') {
+        record('APP_ORIGIN', 'invalid', 'Must not contain path segments (canonical origin form required)');
+      } else if (parsed.search) {
+        record('APP_ORIGIN', 'invalid', 'Must not contain query string');
+      } else if (parsed.hash) {
+        record('APP_ORIGIN', 'invalid', 'Must not contain URL fragment');
       } else {
-        record('APP_ORIGIN', 'configured', `Valid origin (${parsedAppOrigin.origin})`);
+        parsedAppOrigin = parsed;
+        record('APP_ORIGIN', 'configured', `Valid canonical origin (${parsed.origin})`);
       }
     } catch {
       record('APP_ORIGIN', 'invalid', 'Invalid URL format');
-      parsedAppOrigin = null;
     }
   }
 
@@ -308,7 +261,13 @@ export function runPreflightChecks(envGetter = getEnvVal) {
     const trimmed = redirectUri.trim();
     try {
       const parsedRedirect = new URL(trimmed);
-      if (parsedRedirect.pathname !== '/api/google/callback') {
+      if (parsedRedirect.username || parsedRedirect.password) {
+        record('GOOGLE_REDIRECT_URI', 'invalid', 'Must not contain username or password credentials');
+      } else if (parsedRedirect.search) {
+        record('GOOGLE_REDIRECT_URI', 'invalid', 'Must not contain query string');
+      } else if (parsedRedirect.hash) {
+        record('GOOGLE_REDIRECT_URI', 'invalid', 'Must not contain URL fragment');
+      } else if (parsedRedirect.pathname !== '/api/google/callback') {
         record('GOOGLE_REDIRECT_URI', 'invalid', 'Pathname must be exactly /api/google/callback');
       } else if (parsedAppOrigin && parsedRedirect.origin !== parsedAppOrigin.origin) {
         record('GOOGLE_REDIRECT_URI', 'invalid', 'Origin does not exactly match APP_ORIGIN');

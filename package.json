@@ -8,7 +8,11 @@
     "start": "next start",
     "test": "vitest run",
     "typecheck": "next typegen && tsc --noEmit",
-    "preflight:real": "node scripts/preflight-real-env.mjs"
+    "preflight:real": "node scripts/preflight-real-env.mjs",
+    "prisma:validate:real": "node scripts/run-prisma-real-env.mjs validate",
+    "prisma:generate:real": "node scripts/run-prisma-real-env.mjs generate",
+    "prisma:db:push:real": "node scripts/run-prisma-real-env.mjs db push",
+    "prisma:studio:real": "node scripts/run-prisma-real-env.mjs studio"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

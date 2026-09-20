@@ -35,8 +35,8 @@ Before executing any operation in this runbook, adhere strictly to these non-neg
 | Populating `.env.local` with Real Credentials | **USER (Local Editor)** | Kept strictly private and gitignored. |
 | Test Email Seeding (VCB, Techcombank samples) | **USER (Manual Email)** | Send controlled forwarded notification emails to the dedicated test Gmail account. |
 | Database Provisioning (`docker compose --env-file .env.local ...`) | **AUTOMATED / ASSISTANT** | Local Docker Compose setup on `127.0.0.1:5432`. |
-| Preflight Verification (`npm run preflight:real`) | **AUTOMATED / ASSISTANT** | Validates config sanity and DB consistency without printing any secret values. |
-| Schema Synchronization (`npx prisma db push`) | **AUTOMATED / CLI** | Synchronizes Prisma schema safely with persistent PostgreSQL. |
+| Schema Synchronization (`npm run prisma:db:push:real`) | **AUTOMATED / CLI** | Synchronizes Prisma schema safely with persistent PostgreSQL via explicit .env.local runner. |
+| Schema & Client Validation (`npm run prisma:validate:real`, `npm run prisma:generate:real`) | **AUTOMATED / CLI** | Validates schema and regenerates Prisma Client safely. |
 | Verification Test Suite (`npm test`, `npm run typecheck`) | **AUTOMATED / ASSISTANT** | Ensures all regression and security gates pass cleanly. |
 
 ---
@@ -155,6 +155,26 @@ git check-ignore -v .env.local
 # Expected output: .gitignore:21:.env.local	.env.local
 ```
 
+> [!IMPORTANT]
+> **Phase-5 Environment Architecture**:
+> - `.env.local` is the sole Phase-5 secret source for local operations.
+> - **Docker Compose** receives private database variables via `--env-file .env.local`.
+> - **Next.js** automatically loads `.env.local` as local application environment.
+> - **Prisma CLI** operational commands execute through the explicit, fail-closed safe wrapper (`scripts/run-prisma-real-env.mjs`).
+> - This architecture keeps all operational components aligned on the exact same private environment source without copying secrets into tracked `.env`.
+> - **DO NOT** duplicate real secrets into `.env`.
+> - **DO NOT** rename `.env.local` to `.env`.
+
+Verify Docker Compose variable interpolation safely without printing secrets:
+```bash
+docker compose --env-file .env.local config --quiet
+# Validates Compose syntax and required variable presence, returning exit code 0 on success.
+```
+
+> [!WARNING]
+> **Do not render interpolated Compose configuration in recorded terminals**:
+> Avoid running `docker compose config` without `--quiet` in shared or recorded terminals, as it renders the plain `POSTGRES_PASSWORD`. If needed for troubleshooting, never copy the rendered output into chat, tickets, or GitHub.
+
 ---
 
 ## 5. Controlled Test Mailbox & Forwarding Strategy
@@ -236,8 +256,33 @@ Understanding ingestion stages is essential for valid test execution:
 
 ## 7. End-to-End Acceptance Checklist (Step A through Step P)
 
-### [ ] STEP A — Start Private PostgreSQL 17
+### Non-Destructive Environment Readiness Sequence:
 ```bash
+# 1. Verify .env.local is ignored by Git
+git check-ignore -v .env.local
+
+# 2. Run zero-leak environment preflight verification
+npm run preflight:real
+
+# 3. Validate Docker Compose interpolation without leaking secrets
+docker compose --env-file .env.local config --quiet
+
+# 4. Start private PostgreSQL container
+docker compose --env-file .env.local up -d postgres
+docker compose --env-file .env.local ps
+
+# 5. Validate schema, push safely, and regenerate client
+npm run prisma:validate:real
+npm run prisma:db:push:real
+npm run prisma:generate:real
+
+# 6. Launch development server
+npm run dev
+```
+
+### [ ] STEP A — Validate & Start Private PostgreSQL 17
+```bash
+docker compose --env-file .env.local config --quiet
 docker compose --env-file .env.local up -d postgres
 docker compose --env-file .env.local ps
 ```
@@ -255,11 +300,14 @@ npm run preflight:real
 - Verify `DATABASE_URL` matches `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, and `POSTGRES_PORT`.
 - Verify zero secret values or keys are output to the terminal.
 
-### [ ] STEP C — Synchronize Prisma Schema
+### [ ] STEP C — Synchronize Prisma Schema Safely
 ```bash
-npx prisma db push
+npm run prisma:validate:real
+npm run prisma:db:push:real
+npm run prisma:generate:real
 ```
-- Verify Prisma Client generates and tables are created in PostgreSQL.
+- Verify Prisma schema is valid and synchronized with PostgreSQL without destructive data loss.
+- Verify Prisma Client is generated for local runtime.
 
 ### [ ] STEP D — Launch Application Locally
 ```bash

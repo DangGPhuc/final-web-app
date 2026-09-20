@@ -29,7 +29,21 @@
 
 ---
 
-## 2. Ingestion & Deduplication Metrics Summary
+## 2. Environment Readiness Gates
+
+| Readiness Gate | Status | Command / Verification Check | Notes |
+|---|---|---|---|
+| **Preflight real env** | `PENDING` | `npm run preflight:real` | 13/13 items configured, 0 secrets printed |
+| **Compose config validation** | `PENDING` | `docker compose --env-file .env.local config --quiet` | Interpolation valid, exit code 0 |
+| **PostgreSQL start** | `PENDING` | `docker compose --env-file .env.local up -d postgres` | Container healthy on `127.0.0.1:5432` |
+| **Prisma validate real env** | `PENDING` | `npm run prisma:validate:real` | Schema is valid |
+| **Prisma db push real env** | `PENDING` | `npm run prisma:db:push:real` | Schema pushed without data loss |
+| **Prisma generate real env** | `PENDING` | `npm run prisma:generate:real` | Client generated cleanly |
+| **Real Google OAuth** | `PENDING` | Browser OAuth callback flow | Tokens encrypted and stored in DB |
+
+---
+
+## 3. Ingestion & Deduplication Metrics Summary
 
 | Ingestion Metric | Historical Import Run 1 | Historical Import Run 2 (Repeat) | Incremental Quick Scan |
 |---|---|---|---|
@@ -42,13 +56,13 @@
 
 ---
 
-## 3. Scenario Acceptance Matrix (Step A through Step P)
+## 4. Scenario Acceptance Matrix (Step A through Step P)
 
 | Step ID | Scenario Description | Status (`PASS` / `FAIL` / `SKIPPED`) | Verification Details / Observations |
 |---|---|---|---|
-| **STEP A** | Private PostgreSQL 17 Start | `[PASS/PENDING]` | Docker container healthy on `127.0.0.1:5432` |
+| **STEP A** | Private PostgreSQL 17 Start | `[PENDING]` | Docker container healthy on `127.0.0.1:5432` |
 | **STEP B** | Preflight Verification (`npm run preflight:real`) | `[PENDING]` | 13/13 items `configured`, 0 secrets printed |
-| **STEP C** | Prisma Schema Sync (`npx prisma db push`) | `[PENDING]` | Schema in sync, no business migrations lost |
+| **STEP C** | Safe Prisma Schema Push (`npm run prisma:db:push:real`) | `[PENDING]` | Schema in sync, no business migrations lost |
 | **STEP D** | Local Application Launch | `[PENDING]` | Dev server or production build running on port 3000 |
 | **STEP E** | Cockpit UI Initial Render | `[PENDING]` | Dark-mode theme, lock screen presented |
 | **STEP F** | Owner Secret Unlock | `[PENDING]` | Correct key unlocks; invalid keys rejected |

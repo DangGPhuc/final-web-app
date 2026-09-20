@@ -180,6 +180,67 @@ describe('Phase 5 Real Environment Preflight Checks', () => {
     expect(pathItem?.detail).toBe('Pathname must be exactly /api/google/callback');
   });
 
+  describe('APP_ORIGIN Canonical Validation', () => {
+    it('accepts valid canonical http://localhost:3000', () => {
+      const result = runPreflightChecks(
+        createMockEnv({
+          APP_ORIGIN: 'http://localhost:3000',
+          GOOGLE_REDIRECT_URI: 'http://localhost:3000/api/google/callback',
+        })
+      );
+      const appItem = result.results.find((r) => r.name === 'APP_ORIGIN');
+      expect(appItem?.status).toBe('configured');
+    });
+
+    it('rejects APP_ORIGIN with /path', () => {
+      const result = runPreflightChecks(
+        createMockEnv({
+          APP_ORIGIN: 'http://localhost:3000/subpath',
+        })
+      );
+      expect(result.isAllConfigured).toBe(false);
+      const appItem = result.results.find((r) => r.name === 'APP_ORIGIN');
+      expect(appItem?.status).toBe('invalid');
+      expect(appItem?.detail).toContain('path segments');
+    });
+
+    it('rejects APP_ORIGIN with query', () => {
+      const result = runPreflightChecks(
+        createMockEnv({
+          APP_ORIGIN: 'http://localhost:3000?foo=bar',
+        })
+      );
+      expect(result.isAllConfigured).toBe(false);
+      const appItem = result.results.find((r) => r.name === 'APP_ORIGIN');
+      expect(appItem?.status).toBe('invalid');
+      expect(appItem?.detail).toContain('query string');
+    });
+
+    it('rejects APP_ORIGIN with fragment', () => {
+      const result = runPreflightChecks(
+        createMockEnv({
+          APP_ORIGIN: 'http://localhost:3000#section',
+        })
+      );
+      expect(result.isAllConfigured).toBe(false);
+      const appItem = result.results.find((r) => r.name === 'APP_ORIGIN');
+      expect(appItem?.status).toBe('invalid');
+      expect(appItem?.detail).toContain('URL fragment');
+    });
+
+    it('rejects APP_ORIGIN with username/password credentials', () => {
+      const result = runPreflightChecks(
+        createMockEnv({
+          APP_ORIGIN: 'http://admin:secret@localhost:3000',
+        })
+      );
+      expect(result.isAllConfigured).toBe(false);
+      const appItem = result.results.find((r) => r.name === 'APP_ORIGIN');
+      expect(appItem?.status).toBe('invalid');
+      expect(appItem?.detail).toContain('credentials');
+    });
+  });
+
   it('never leaks secret values in diagnostic detail messages', () => {
     const secretValue = 'super-secret-passphrase-0123456789abcdef';
     const dbPassword = 'database-secret-password-xyz-987';
