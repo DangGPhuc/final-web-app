@@ -188,9 +188,7 @@ export function sanitizeHtmlToText(html: string): string {
   // Remove script and style elements iteratively to prevent nested tag bypass
   do {
     prev = text;
-    text = text
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, '')
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '');
+    text = text.replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)[^>]*>/gi, '');
   } while (text !== prev);
 
   // Strip all other HTML tags
