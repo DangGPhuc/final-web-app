@@ -1,617 +1,601 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import {
-  Wallet,
-  Transaction,
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import type {
+  BankTransaction,
+  Fund,
+  FundStatus,
   Category,
-  Budget,
-  RecurringBill,
-  SavingsGoal,
-  IncomeBudgetPlanner,
-  FinancialSummary,
-  FilterPeriod,
+  MonthlySnapshot,
+  PaperTradeScenario,
+  AppTab,
+  GmailAccountInfo,
+  ToastNotification,
+  SyncResultStats,
 } from '@/types';
 import {
-  INITIAL_WALLETS,
-  INITIAL_TRANSACTIONS,
-  INITIAL_BUDGETS,
-  INITIAL_BILLS,
-  INITIAL_GOALS,
-  INITIAL_PLANNER,
-} from '@/lib/mock-data';
-import { DEFAULT_CATEGORIES } from '@/lib/constants';
-import { calculateFinancialSummary } from '@/lib/utils';
+  calculateBalance,
+  calculateMonthlyCashflow,
+  calculateAllFundStatuses,
+  calculateMonthlySnapshot,
+  getCurrentYearMonth,
+  generateId,
+  type MonthlyCashflow,
+} from '@/lib/finance/calculations';
+import { DEMO_PAPER_TRADES } from '@/lib/mock-data';
+import { executeFactoryReset } from '@/lib/data/factory-reset-client';
 
 interface AppContextType {
-  wallets: Wallet[];
-  transactions: Transaction[];
+  // State
+  transactions: BankTransaction[];
+  funds: Fund[];
   categories: Category[];
-  budgets: Budget[];
-  bills: RecurringBill[];
-  goals: SavingsGoal[];
-  planner: IncomeBudgetPlanner;
-  currentMonth: string;
-  activeTab: string;
-  setActiveTab: (tab: string) => void;
-  quickAddOpen: boolean;
-  setQuickAddOpen: (open: boolean) => void;
-  quickAddDefaultType: 'EXPENSE' | 'INCOME' | 'TRANSFER';
-  openQuickAdd: (type?: 'EXPENSE' | 'INCOME' | 'TRANSFER') => void;
-  financialSummary: FinancialSummary;
+  gmailAccounts: GmailAccountInfo[];
+  monthlySnapshots: MonthlySnapshot[];
+  paperTrades: PaperTradeScenario[];
+  activeTab: AppTab;
+  selectedMonth: string;
+  toast: ToastNotification | null;
+  isSyncing: boolean;
+  classifyingTransaction: BankTransaction | null;
 
-  // Transactions
-  addTransaction: (tx: Omit<Transaction, 'id' | 'createdAt'>) => void;
-  editTransaction: (id: string, tx: Partial<Transaction>) => void;
-  deleteTransaction: (id: string) => void;
+  // Derived metrics
+  balance: number;
+  currentMonthCashflow: MonthlyCashflow;
+  selectedMonthCashflow: MonthlyCashflow;
+  fundStatuses: FundStatus[];
+  unclassifiedTransactions: BankTransaction[];
 
-  // Wallets
-  addWallet: (wallet: Omit<Wallet, 'id' | 'createdAt'>) => void;
-  editWallet: (id: string, wallet: Partial<Wallet>) => void;
-  deleteWallet: (id: string) => void;
-  transferFunds: (fromWalletId: string, toWalletId: string, amount: number, fee: number, note?: string) => void;
+  // Navigation & UI
+  setActiveTab: (tab: AppTab) => void;
+  setSelectedMonth: (month: string) => void;
+  setClassifyingTransaction: (tx: BankTransaction | null) => void;
+  showToast: (text: string, type?: 'success' | 'error' | 'info') => void;
 
-  // Budgets
-  addBudget: (budget: Omit<Budget, 'id'>) => void;
-  editBudget: (id: string, budget: Partial<Budget>) => void;
-  deleteBudget: (id: string) => void;
-  updatePlanner: (planner: IncomeBudgetPlanner) => void;
+  // Single-Owner Authentication State
+  isOwnerAuthenticated: boolean | null;
+  unlockCockpit: (key: string) => Promise<{ success: boolean; error?: string }>;
+  lockCockpit: () => Promise<void>;
 
-  // Bills
-  addBill: (bill: Omit<RecurringBill, 'id'>) => void;
-  editBill: (id: string, bill: Partial<RecurringBill>) => void;
-  deleteBill: (id: string) => void;
-  payBill: (billId: string, walletId: string) => void;
+  // Data Loading & Refresh
+  refreshData: () => Promise<void>;
 
-  // Goals
-  addGoal: (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => void;
-  editGoal: (id: string, goal: Partial<SavingsGoal>) => void;
-  deleteGoal: (id: string) => void;
-  depositToGoal: (goalId: string, amount: number, walletId: string, note?: string) => void;
-  withdrawFromGoal: (goalId: string, amount: number, walletId: string, note?: string) => void;
+  // Transaction Operations
+  classifyTransaction: (id: string, categoryName: string, fundId?: string) => Promise<void>;
+  deleteTransaction: (id: string) => Promise<void>;
 
-  // Backup & Reset
-  resetToDefaultData: () => void;
-  clearAllData: () => void;
-  exportDatabaseJSON: () => void;
-  importDatabaseJSON: (jsonStr: string) => boolean;
+  // Fund Operations (Persistent via PostgreSQL + Prisma)
+  createFund: (name: string, monthlyAllocation: number) => Promise<void>;
+  editFund: (id: string, updates: { name?: string; monthlyAllocation?: number }) => Promise<void>;
+  deleteFund: (id: string) => Promise<void>;
+
+  // Category Operations
+  createCategory: (name: string, direction?: string) => Promise<Category>;
+
+  // Email Sync & OAuth
+  syncEmail: (params?: {
+    mode?: 'QUICK' | 'HISTORICAL';
+    accountId?: string;
+    fromDate?: string;
+    toDate?: string;
+    isDemoMode?: boolean;
+    continuationTokens?: Record<string, string>;
+    continuationToken?: string;
+  }) => Promise<SyncResultStats | null>;
+  disconnectGmail: (accountId: string) => Promise<void>;
+
+  // Month Snapshot / Close Operations
+  closeMonth: (month: string) => void;
+
+  // Paper Trading Operations
+  savePaperTrade: (trade: Omit<PaperTradeScenario, 'id' | 'createdAt'>) => void;
+  deletePaperTrade: (id: string) => void;
+
+  // Data Management
+  clearFinancialData: () => Promise<void>;
+  factoryReset: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'quan_ly_chi_tieu_data_v2';
+export function AppProvider({ children }: { children: React.ReactNode }) {
+  const [activeTab, setActiveTab] = useState<AppTab>('dashboard');
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => getCurrentYearMonth());
+  const [toast, setToast] = useState<ToastNotification | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [classifyingTransaction, setClassifyingTransaction] = useState<BankTransaction | null>(null);
 
-export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [mounted, setMounted] = useState(false);
-  const [wallets, setWallets] = useState<Wallet[]>(INITIAL_WALLETS);
-  const [transactions, setTransactions] = useState<Transaction[]>(INITIAL_TRANSACTIONS);
-  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
-  const [budgets, setBudgets] = useState<Budget[]>(INITIAL_BUDGETS);
-  const [bills, setBills] = useState<RecurringBill[]>(INITIAL_BILLS);
-  const [goals, setGoals] = useState<SavingsGoal[]>(INITIAL_GOALS);
-  const [planner, setPlanner] = useState<IncomeBudgetPlanner>(INITIAL_PLANNER);
-  const [currentMonth, setCurrentMonth] = useState<string>('2026-09');
+  // Core domain data
+  const [transactions, setTransactions] = useState<BankTransaction[]>([]);
+  const [funds, setFunds] = useState<Fund[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [gmailAccounts, setGmailAccounts] = useState<GmailAccountInfo[]>([]);
+  const [monthlySnapshots, setMonthlySnapshots] = useState<MonthlySnapshot[]>([]);
+  const [paperTrades, setPaperTrades] = useState<PaperTradeScenario[]>(DEMO_PAPER_TRADES);
 
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
-  const [quickAddOpen, setQuickAddOpen] = useState<boolean>(false);
-  const [quickAddDefaultType, setQuickAddDefaultType] = useState<'EXPENSE' | 'INCOME' | 'TRANSFER'>('EXPENSE');
-
-  // Load from local storage
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.wallets) setWallets(parsed.wallets);
-        if (parsed.transactions) setTransactions(parsed.transactions);
-        if (parsed.categories) setCategories(parsed.categories);
-        if (parsed.budgets) setBudgets(parsed.budgets);
-        if (parsed.bills) setBills(parsed.bills);
-        if (parsed.goals) setGoals(parsed.goals);
-        if (parsed.planner) setPlanner(parsed.planner);
-      }
-    } catch (e) {
-      console.error('Failed to load storage data:', e);
-    }
-    setMounted(true);
+  const showToast = useCallback((text: string, type: 'success' | 'error' | 'info' = 'info') => {
+    const id = generateId();
+    setToast({ id, text, type });
+    setTimeout(() => {
+      setToast(prev => (prev?.id === id ? null : prev));
+    }, 4000);
   }, []);
 
-  // Save to local storage
-  useEffect(() => {
-    if (!mounted) return;
+  // Single-owner authentication state (null = checking, false = locked, true = unlocked)
+  const [isOwnerAuthenticated, setIsOwnerAuthenticated] = useState<boolean | null>(null);
+
+  // Refresh domain data from server
+  const refreshData = useCallback(async () => {
     try {
-      const payload = {
-        wallets,
-        transactions,
-        categories,
-        budgets,
-        bills,
-        goals,
-        planner,
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch (e) {
-      console.error('Failed to save to localStorage:', e);
+      const [txRes, fundsRes, catRes, accRes] = await Promise.all([
+        fetch('/api/transactions'),
+        fetch('/api/funds'),
+        fetch('/api/categories'),
+        fetch('/api/google/accounts'),
+      ]);
+
+      if (txRes.ok) {
+        const txData = await txRes.json();
+        if (txData.success) setTransactions(txData.transactions);
+      }
+      if (fundsRes.ok) {
+        const fundsData = await fundsRes.json();
+        if (fundsData.success) setFunds(fundsData.funds);
+      }
+      if (catRes.ok) {
+        const catData = await catRes.json();
+        if (catData.success) setCategories(catData.categories);
+      }
+      if (accRes.ok) {
+        const accData = await accRes.json();
+        if (accData.success) setGmailAccounts(accData.accounts);
+      }
+    } catch {
+      // Offline or network error
     }
-  }, [mounted, wallets, transactions, categories, budgets, bills, goals, planner]);
+  }, []);
 
-  const openQuickAdd = (type: 'EXPENSE' | 'INCOME' | 'TRANSFER' = 'EXPENSE') => {
-    setQuickAddDefaultType(type);
-    setQuickAddOpen(true);
-  };
-
-  // Financial summary
-  const financialSummary = calculateFinancialSummary(wallets, transactions, currentMonth);
-
-  // Add Transaction
-  const addTransaction = (tx: Omit<Transaction, 'id' | 'createdAt'>) => {
-    const id = `tx-${Date.now()}`;
-    const createdAt = new Date().toISOString();
-    const newTx: Transaction = {
-      ...tx,
-      id,
-      createdAt,
-    };
-
-    // Update wallet balances
-    setWallets((prevWallets) =>
-      prevWallets.map((w) => {
-        if (tx.type === 'EXPENSE' && w.id === tx.walletId) {
-          return { ...w, balance: w.balance - tx.amount };
-        }
-        if (tx.type === 'INCOME' && w.id === tx.walletId) {
-          return { ...w, balance: w.balance + tx.amount };
-        }
-        if (tx.type === 'TRANSFER') {
-          if (w.id === tx.walletId) {
-            return { ...w, balance: w.balance - (tx.amount + (tx.fee || 0)) };
-          }
-          if (w.id === tx.toWalletId) {
-            return { ...w, balance: w.balance + tx.amount };
-          }
-        }
-        return w;
-      })
-    );
-
-    setTransactions((prev) => [newTx, ...prev]);
-  };
-
-  // Edit Transaction
-  const editTransaction = (id: string, updated: Partial<Transaction>) => {
-    const oldTx = transactions.find((t) => t.id === id);
-    if (!oldTx) return;
-
-    // Rollback old transaction on wallets
-    let adjustedWallets = [...wallets];
-    adjustedWallets = adjustedWallets.map((w) => {
-      if (oldTx.type === 'EXPENSE' && w.id === oldTx.walletId) {
-        return { ...w, balance: w.balance + oldTx.amount };
-      }
-      if (oldTx.type === 'INCOME' && w.id === oldTx.walletId) {
-        return { ...w, balance: w.balance - oldTx.amount };
-      }
-      if (oldTx.type === 'TRANSFER') {
-        if (w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance + (oldTx.amount + (oldTx.fee || 0)) };
-        }
-        if (w.id === oldTx.toWalletId) {
-          return { ...w, balance: w.balance - oldTx.amount };
-        }
-      }
-      return w;
-    });
-
-    const newTx: Transaction = { ...oldTx, ...updated };
-
-    // Apply new transaction to wallets
-    adjustedWallets = adjustedWallets.map((w) => {
-      if (newTx.type === 'EXPENSE' && w.id === newTx.walletId) {
-        return { ...w, balance: w.balance - newTx.amount };
-      }
-      if (newTx.type === 'INCOME' && w.id === newTx.walletId) {
-        return { ...w, balance: w.balance + newTx.amount };
-      }
-      if (newTx.type === 'TRANSFER') {
-        if (w.id === newTx.walletId) {
-          return { ...w, balance: w.balance - (newTx.amount + (newTx.fee || 0)) };
-        }
-        if (w.id === newTx.toWalletId) {
-          return { ...w, balance: w.balance + newTx.amount };
-        }
-      }
-      return w;
-    });
-
-    setWallets(adjustedWallets);
-    setTransactions((prev) => prev.map((t) => (t.id === id ? newTx : t)));
-  };
-
-  // Delete Transaction
-  const deleteTransaction = (id: string) => {
-    const oldTx = transactions.find((t) => t.id === id);
-    if (!oldTx) return;
-
-    // Rollback wallet balance
-    setWallets((prevWallets) =>
-      prevWallets.map((w) => {
-        if (oldTx.type === 'EXPENSE' && w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance + oldTx.amount };
-        }
-        if (oldTx.type === 'INCOME' && w.id === oldTx.walletId) {
-          return { ...w, balance: w.balance - oldTx.amount };
-        }
-        if (oldTx.type === 'TRANSFER') {
-          if (w.id === oldTx.walletId) {
-            return { ...w, balance: w.balance + (oldTx.amount + (oldTx.fee || 0)) };
-          }
-          if (w.id === oldTx.toWalletId) {
-            return { ...w, balance: w.balance - oldTx.amount };
-          }
-        }
-        return w;
-      })
-    );
-
-    setTransactions((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  // Wallets
-  const addWallet = (wallet: Omit<Wallet, 'id' | 'createdAt'>) => {
-    const newWallet: Wallet = {
-      ...wallet,
-      id: `wal-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-    };
-    setWallets((prev) => [...prev, newWallet]);
-  };
-
-  const editWallet = (id: string, updated: Partial<Wallet>) => {
-    setWallets((prev) => prev.map((w) => (w.id === id ? { ...w, ...updated } : w)));
-  };
-
-  const deleteWallet = (id: string) => {
-    setWallets((prev) => prev.filter((w) => w.id !== id));
-  };
-
-  const transferFunds = (
-    fromWalletId: string,
-    toWalletId: string,
-    amount: number,
-    fee: number,
-    note?: string
-  ) => {
-    const fromW = wallets.find((w) => w.id === fromWalletId);
-    const toW = wallets.find((w) => w.id === toWalletId);
-
-    addTransaction({
-      type: 'TRANSFER',
-      amount,
-      fee,
-      walletId: fromWalletId,
-      walletName: fromW?.name,
-      toWalletId,
-      toWalletName: toW?.name,
-      date: new Date().toISOString(),
-      note: note || `Chuyển khoản từ ${fromW?.name || 'Ví'} sang ${toW?.name || 'Ví'}`,
-      tags: ['Chuyển khoản nội bộ'],
-    });
-  };
-
-  // Budgets
-  const addBudget = (budget: Omit<Budget, 'id'>) => {
-    const newBudget: Budget = {
-      ...budget,
-      id: `bud-${Date.now()}`,
-    };
-    setBudgets((prev) => [...prev, newBudget]);
-  };
-
-  const editBudget = (id: string, updated: Partial<Budget>) => {
-    setBudgets((prev) => prev.map((b) => (b.id === id ? { ...b, ...updated } : b)));
-  };
-
-  const deleteBudget = (id: string) => {
-    setBudgets((prev) => prev.filter((b) => b.id !== id));
-  };
-
-  const updatePlanner = (newPlanner: IncomeBudgetPlanner) => {
-    setPlanner(newPlanner);
-  };
-
-  // Bills
-  const addBill = (bill: Omit<RecurringBill, 'id'>) => {
-    const newBill: RecurringBill = {
-      ...bill,
-      id: `bill-${Date.now()}`,
-    };
-    setBills((prev) => [...prev, newBill]);
-  };
-
-  const editBill = (id: string, updated: Partial<RecurringBill>) => {
-    setBills((prev) => prev.map((b) => (b.id === id ? { ...b, ...updated } : b)));
-  };
-
-  const deleteBill = (id: string) => {
-    setBills((prev) => prev.filter((b) => b.id !== id));
-  };
-
-  const payBill = (billId: string, walletId: string) => {
-    const bill = bills.find((b) => b.id === billId);
-    if (!bill) return;
-
-    const targetWallet = wallets.find((w) => w.id === walletId) || wallets[0];
-    const billCategory = categories.find((c) => c.id === bill.categoryId);
-
-    // 1. Mark bill as PAID
-    setBills((prev) =>
-      prev.map((b) =>
-        b.id === billId
-          ? {
-              ...b,
-              status: 'PAID',
-              lastPaidDate: new Date().toISOString().split('T')[0],
-              walletId,
-            }
-          : b
-      )
-    );
-
-    // 2. Automatically record transaction
-    addTransaction({
-      type: 'EXPENSE',
-      amount: bill.amount,
-      categoryId: bill.categoryId,
-      categoryName: billCategory?.name || bill.categoryName || 'Hóa đơn',
-      walletId: targetWallet.id,
-      walletName: targetWallet.name,
-      date: new Date().toISOString(),
-      note: `Thanh toán hóa đơn: ${bill.name}`,
-      tags: ['Hóa đơn định kỳ'],
-    });
-  };
-
-  // Goals
-  const addGoal = (goal: Omit<SavingsGoal, 'id' | 'createdAt' | 'history'>) => {
-    const newGoal: SavingsGoal = {
-      ...goal,
-      id: `goal-${Date.now()}`,
-      history: [],
-      createdAt: new Date().toISOString(),
-    };
-    setGoals((prev) => [...prev, newGoal]);
-  };
-
-  const editGoal = (id: string, updated: Partial<SavingsGoal>) => {
-    setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, ...updated } : g)));
-  };
-
-  const deleteGoal = (id: string) => {
-    setGoals((prev) => prev.filter((g) => g.id !== id));
-  };
-
-  const depositToGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
-    const goal = goals.find((g) => g.id === goalId);
-    const wallet = wallets.find((w) => w.id === walletId);
-    if (!goal || !wallet) return;
-
-    // Deduct from wallet
-    setWallets((prev) =>
-      prev.map((w) => (w.id === walletId ? { ...w, balance: w.balance - amount } : w))
-    );
-
-    // Add to goal
-    const newHistoryItem = {
-      id: `gh-${Date.now()}`,
-      date: new Date().toISOString().split('T')[0],
-      amount,
-      type: 'DEPOSIT' as const,
-      walletId,
-      note: note || `Nạp từ ${wallet.name}`,
-    };
-
-    setGoals((prev) =>
-      prev.map((g) =>
-        g.id === goalId
-          ? {
-              ...g,
-              currentAmount: g.currentAmount + amount,
-              history: [newHistoryItem, ...g.history],
-            }
-          : g
-      )
-    );
-
-    // Log transaction
-    addTransaction({
-      type: 'EXPENSE',
-      amount,
-      categoryId: 'cat-invest-exp',
-      categoryName: 'Đầu tư & Tích lũy',
-      walletId,
-      walletName: wallet.name,
-      date: new Date().toISOString(),
-      note: `Tích lũy vào hũ: ${goal.name}`,
-      tags: ['Tích lũy mục tiêu'],
-    });
-  };
-
-  const withdrawFromGoal = (goalId: string, amount: number, walletId: string, note?: string) => {
-    const goal = goals.find((g) => g.id === goalId);
-    const wallet = wallets.find((w) => w.id === walletId);
-    if (!goal || !wallet) return;
-
-    // Add back to wallet
-    setWallets((prev) =>
-      prev.map((w) => (w.id === walletId ? { ...w, balance: w.balance + amount } : w))
-    );
-
-    // Deduct from goal
-    const newHistoryItem = {
-      id: `gh-${Date.now()}`,
-      date: new Date().toISOString().split('T')[0],
-      amount,
-      type: 'WITHDRAW' as const,
-      walletId,
-      note: note || `Rút về ${wallet.name}`,
-    };
-
-    setGoals((prev) =>
-      prev.map((g) =>
-        g.id === goalId
-          ? {
-              ...g,
-              currentAmount: Math.max(0, g.currentAmount - amount),
-              history: [newHistoryItem, ...g.history],
-            }
-          : g
-      )
-    );
-
-    // Log income transaction
-    addTransaction({
-      type: 'INCOME',
-      amount,
-      categoryId: 'cat-other-inc',
-      categoryName: 'Thu nhập khác',
-      walletId,
-      walletName: wallet.name,
-      date: new Date().toISOString(),
-      note: `Rút từ hũ tích lũy: ${goal.name}`,
-      tags: ['Rút hũ tiết kiệm'],
-    });
-  };
-
-  // Backup & Reset
-  const resetToDefaultData = () => {
-    setWallets(INITIAL_WALLETS);
-    setTransactions(INITIAL_TRANSACTIONS);
-    setCategories(DEFAULT_CATEGORIES);
-    setBudgets(INITIAL_BUDGETS);
-    setBills(INITIAL_BILLS);
-    setGoals(INITIAL_GOALS);
-    setPlanner(INITIAL_PLANNER);
-    localStorage.removeItem(STORAGE_KEY);
-  };
-
-  const clearAllData = () => {
-    setWallets([
-      {
-        id: 'wal-cash-empty',
-        name: 'Tiền mặt',
-        type: 'CASH',
-        balance: 0,
-        initialBalance: 0,
-        currency: 'VND',
-        color: '#10b981',
-        icon: 'Banknote',
-        createdAt: new Date().toISOString(),
-      },
-    ]);
-    setTransactions([]);
-    setBudgets([]);
-    setBills([]);
-    setGoals([]);
-    setPlanner({
-      monthlyIncome: 0,
-      needsPercent: 50,
-      wantsPercent: 30,
-      savingsPercent: 20,
-    });
-  };
-
-  const exportDatabaseJSON = () => {
-    const data = {
-      wallets,
-      transactions,
-      categories,
-      budgets,
-      bills,
-      goals,
-      planner,
-      exportedAt: new Date().toISOString(),
-      version: '2.0',
-    };
-    const jsonStr = JSON.stringify(data, null, 2);
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `quan-ly-chi-tieu-backup-${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const importDatabaseJSON = (jsonStr: string): boolean => {
+  // Check initial owner session status
+  const checkOwnerSession = useCallback(async () => {
     try {
-      const data = JSON.parse(jsonStr);
-      if (data.wallets && Array.isArray(data.wallets)) setWallets(data.wallets);
-      if (data.transactions && Array.isArray(data.transactions)) setTransactions(data.transactions);
-      if (data.categories && Array.isArray(data.categories)) setCategories(data.categories);
-      if (data.budgets && Array.isArray(data.budgets)) setBudgets(data.budgets);
-      if (data.bills && Array.isArray(data.bills)) setBills(data.bills);
-      if (data.goals && Array.isArray(data.goals)) setGoals(data.goals);
-      if (data.planner) setPlanner(data.planner);
-      return true;
-    } catch (e) {
-      console.error('Import failed:', e);
+      const res = await fetch('/api/owner/session');
+      const data = await res.json();
+      const authenticated = !!data.authenticated;
+      setIsOwnerAuthenticated(authenticated);
+      if (authenticated) {
+        await refreshData();
+      }
+      return authenticated;
+    } catch {
+      setIsOwnerAuthenticated(false);
       return false;
     }
-  };
+  }, [refreshData]);
 
-  return (
-    <AppContext.Provider
-      value={{
-        wallets,
-        transactions,
-        categories,
-        budgets,
-        bills,
-        goals,
-        planner,
-        currentMonth,
-        activeTab,
-        setActiveTab,
-        quickAddOpen,
-        setQuickAddOpen,
-        quickAddDefaultType,
-        openQuickAdd,
-        financialSummary,
-        addTransaction,
-        editTransaction,
-        deleteTransaction,
-        addWallet,
-        editWallet,
-        deleteWallet,
-        transferFunds,
-        addBudget,
-        editBudget,
-        deleteBudget,
-        updatePlanner,
-        addBill,
-        editBill,
-        deleteBill,
-        payBill,
-        addGoal,
-        editGoal,
-        deleteGoal,
-        depositToGoal,
-        withdrawFromGoal,
-        resetToDefaultData,
-        clearAllData,
-        exportDatabaseJSON,
-        importDatabaseJSON,
-      }}
-    >
-      {children}
-    </AppContext.Provider>
+  // Unlock cockpit with owner secret (never persisted to storage or kept in React state)
+  const unlockCockpit = useCallback(
+    async (secretKey: string) => {
+      try {
+        const res = await fetch('/api/owner/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ secretKey }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          setIsOwnerAuthenticated(true);
+          await refreshData();
+          showToast('Mở khóa Cockpit thành công.', 'success');
+          return { success: true };
+        }
+        return { success: false, error: data.error || 'Khóa chủ sở hữu không chính xác.' };
+      } catch {
+        return { success: false, error: 'Không thể kết nối đến máy chủ.' };
+      }
+    },
+    [refreshData, showToast]
   );
-};
 
-export const useApp = () => {
+  // Lock cockpit (clears server cookie and local in-memory domain state)
+  const lockCockpit = useCallback(async () => {
+    try {
+      await fetch('/api/owner/session', { method: 'DELETE' });
+    } catch {
+      // Ignore network errors
+    }
+    setIsOwnerAuthenticated(false);
+    setTransactions([]);
+    setFunds([]);
+    setCategories([]);
+    setGmailAccounts([]);
+    showToast('Đã khóa Cockpit.', 'info');
+  }, [showToast]);
+
+  // Initial session verification
+  useEffect(() => {
+    checkOwnerSession();
+  }, [checkOwnerSession]);
+
+  // Derived metrics
+  const balance = useMemo(() => {
+    return calculateBalance(0, transactions);
+  }, [transactions]);
+
+  const currentMonthStr = useMemo(() => getCurrentYearMonth(), []);
+
+  const currentMonthCashflow = useMemo(() => {
+    return calculateMonthlyCashflow(transactions, currentMonthStr);
+  }, [transactions, currentMonthStr]);
+
+  const selectedMonthCashflow = useMemo(() => {
+    return calculateMonthlyCashflow(transactions, selectedMonth);
+  }, [transactions, selectedMonth]);
+
+  const fundStatuses = useMemo(() => {
+    return calculateAllFundStatuses(funds, transactions, selectedMonth);
+  }, [funds, transactions, selectedMonth]);
+
+  const unclassifiedTransactions = useMemo(() => {
+    return transactions.filter(t => t.classificationState === 'UNCLASSIFIED');
+  }, [transactions]);
+
+  // Category Operation
+  const createCategory = useCallback(async (name: string, direction?: string): Promise<Category> => {
+    const res = await fetch('/api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, direction }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to create category');
+    }
+    const created: Category = data.category;
+    setCategories(prev => {
+      if (prev.some(c => c.id === created.id || c.name.toLowerCase() === created.name.toLowerCase())) {
+        return prev;
+      }
+      return [...prev, created].sort((a, b) => a.name.localeCompare(b.name));
+    });
+    return created;
+  }, []);
+
+  // Transaction Classification
+  const classifyTransaction = useCallback(
+    async (id: string, categoryName: string, fundId?: string) => {
+      try {
+        // Ensure category exists
+        let cat = categories.find(c => c.name.toLowerCase() === categoryName.trim().toLowerCase());
+        if (!cat) {
+          cat = await createCategory(categoryName.trim());
+        }
+
+        const res = await fetch(`/api/transactions/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            categoryId: cat.id,
+            fundId: fundId || null,
+            classificationState: 'CLASSIFIED',
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Failed to classify transaction');
+        }
+
+        setTransactions(prev =>
+          prev.map(tx => (tx.id === id ? { ...data.transaction, category: cat, fund: funds.find(f => f.id === fundId) || null } : tx))
+        );
+        showToast(`Đã phân loại thành công vào "${cat.name}"`, 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi phân loại giao dịch', 'error');
+        throw err;
+      }
+    },
+    [categories, createCategory, funds, showToast]
+  );
+
+  const deleteTransaction = useCallback(
+    async (id: string) => {
+      try {
+        const res = await fetch(`/api/transactions/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          setTransactions(prev => prev.filter(t => t.id !== id));
+          showToast('Đã xóa giao dịch', 'info');
+        }
+      } catch {
+        showToast('Lỗi xóa giao dịch', 'error');
+      }
+    },
+    [showToast]
+  );
+
+  // Fund Operations
+  const createFund = useCallback(
+    async (name: string, monthlyAllocation: number) => {
+      try {
+        const res = await fetch('/api/funds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, monthlyAllocation }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Lỗi tạo quỹ');
+        }
+        setFunds(prev => [...prev, data.fund]);
+        showToast(`Đã tạo quỹ "${data.fund.name}"`, 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi tạo quỹ', 'error');
+        throw err;
+      }
+    },
+    [showToast]
+  );
+
+  const editFund = useCallback(
+    async (id: string, updates: { name?: string; monthlyAllocation?: number }) => {
+      try {
+        const res = await fetch(`/api/funds/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updates),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Lỗi cập nhật quỹ');
+        }
+        setFunds(prev => prev.map(f => (f.id === id ? data.fund : f)));
+        showToast('Đã cập nhật quỹ', 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi cập nhật quỹ', 'error');
+        throw err;
+      }
+    },
+    [showToast]
+  );
+
+  const deleteFund = useCallback(
+    async (id: string) => {
+      try {
+        const res = await fetch(`/api/funds/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          setFunds(prev => prev.filter(f => f.id !== id));
+          showToast('Đã xóa quỹ', 'info');
+        }
+      } catch {
+        showToast('Lỗi xóa quỹ', 'error');
+      }
+    },
+    [showToast]
+  );
+
+  // Email Sync
+  const syncEmail = useCallback(
+    async (params?: {
+      mode?: 'QUICK' | 'HISTORICAL';
+      accountId?: string;
+      fromDate?: string;
+      toDate?: string;
+      isDemoMode?: boolean;
+      continuationTokens?: Record<string, string>;
+      continuationToken?: string;
+    }) => {
+      setIsSyncing(true);
+      try {
+        const res = await fetch('/api/email/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params || {}),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Lỗi quét email');
+        }
+
+        const stats: SyncResultStats = data.stats;
+        if (stats.truncated) {
+          showToast(
+            stats.mode === 'QUICK'
+              ? 'Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý.'
+              : `Đã nhập một phần lịch sử: +${stats.totalNew} biến động mới. Vẫn còn email cần quét.`,
+            'info'
+          );
+        } else {
+          showToast(
+            `Quét hoàn tất: +${stats.totalNew} biến động mới, ${stats.totalDuplicates} đã tồn tại`,
+            'success'
+          );
+        }
+        await refreshData();
+        return stats;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Lỗi quét email';
+        showToast(msg, 'error');
+        return null;
+      } finally {
+        setIsSyncing(false);
+      }
+    },
+    [refreshData, showToast]
+  );
+
+  // Disconnect Gmail
+  const disconnectGmail = useCallback(
+    async (accountId: string) => {
+      try {
+        const res = await fetch('/api/google/disconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountId }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Lỗi ngắt kết nối Gmail');
+        }
+        setGmailAccounts(prev => prev.filter(a => a.id !== accountId));
+        showToast(data.message || 'Đã ngắt kết nối Gmail', 'info');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi ngắt kết nối', 'error');
+      }
+    },
+    [showToast]
+  );
+
+  // Close Month Snapshot
+  const closeMonth = useCallback(
+    (month: string) => {
+      const snapshot = calculateMonthlySnapshot(month, transactions, funds);
+      setMonthlySnapshots(prev => {
+        const filtered = prev.filter(s => s.month !== month);
+        return [...filtered, snapshot].sort((a, b) => a.month.localeCompare(b.month));
+      });
+      showToast(`Đã chốt sổ và lưu báo cáo tháng ${month}`, 'success');
+    },
+    [transactions, funds, showToast]
+  );
+
+  // Paper Trading
+  const savePaperTrade = useCallback((tradeData: Omit<PaperTradeScenario, 'id' | 'createdAt'>) => {
+    const newTrade: PaperTradeScenario = {
+      ...tradeData,
+      id: generateId(),
+      createdAt: new Date().toISOString(),
+    };
+    setPaperTrades(prev => [newTrade, ...prev]);
+    showToast('Đã lưu kịch bản mô phỏng giao dịch', 'success');
+  }, [showToast]);
+
+  const deletePaperTrade = useCallback((id: string) => {
+    setPaperTrades(prev => prev.filter(t => t.id !== id));
+    showToast('Đã xóa kịch bản mô phỏng', 'info');
+  }, [showToast]);
+
+  // Data Management: Clear Financial Data (keeps Gmail connections)
+  const clearFinancialData = useCallback(async () => {
+    try {
+      const res = await fetch('/api/data/clear-financial', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Lỗi xóa dữ liệu tài chính');
+      }
+      setTransactions([]);
+      setFunds([]);
+      setCategories([]);
+      setMonthlySnapshots([]);
+      showToast(data.message || 'Đã xóa dữ liệu tài chính', 'info');
+      await refreshData();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Lỗi xóa dữ liệu', 'error');
+    }
+  }, [refreshData, showToast]);
+
+  // Data Management: Factory Reset (wipes everything and terminates owner session)
+  const factoryReset = useCallback(async () => {
+    await executeFactoryReset({
+      setTransactions,
+      setFunds,
+      setCategories,
+      setGmailAccounts,
+      setMonthlySnapshots,
+      setPaperTrades,
+      setClassifyingTransaction,
+      setIsSyncing,
+      setIsOwnerAuthenticated,
+      showToast,
+    });
+  }, [showToast]);
+
+  const value = useMemo(
+    () => ({
+      transactions,
+      funds,
+      categories,
+      gmailAccounts,
+      monthlySnapshots,
+      paperTrades,
+      activeTab,
+      selectedMonth,
+      toast,
+      isSyncing,
+      classifyingTransaction,
+      balance,
+      currentMonthCashflow,
+      selectedMonthCashflow,
+      fundStatuses,
+      unclassifiedTransactions,
+      setActiveTab,
+      setSelectedMonth,
+      setClassifyingTransaction,
+      showToast,
+      isOwnerAuthenticated,
+      unlockCockpit,
+      lockCockpit,
+      refreshData,
+      classifyTransaction,
+      deleteTransaction,
+      createFund,
+      editFund,
+      deleteFund,
+      createCategory,
+      syncEmail,
+      disconnectGmail,
+      closeMonth,
+      savePaperTrade,
+      deletePaperTrade,
+      clearFinancialData,
+      factoryReset,
+    }),
+    [
+      transactions,
+      funds,
+      categories,
+      gmailAccounts,
+      monthlySnapshots,
+      paperTrades,
+      activeTab,
+      selectedMonth,
+      toast,
+      isSyncing,
+      classifyingTransaction,
+      balance,
+      currentMonthCashflow,
+      selectedMonthCashflow,
+      fundStatuses,
+      unclassifiedTransactions,
+      isOwnerAuthenticated,
+      unlockCockpit,
+      lockCockpit,
+      setActiveTab,
+      setSelectedMonth,
+      setClassifyingTransaction,
+      showToast,
+      refreshData,
+      classifyTransaction,
+      deleteTransaction,
+      createFund,
+      editFund,
+      deleteFund,
+      createCategory,
+      syncEmail,
+      disconnectGmail,
+      closeMonth,
+      savePaperTrade,
+      deletePaperTrade,
+      clearFinancialData,
+      factoryReset,
+    ]
+  );
+
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}
+
+export function useApp(): AppContextType {
   const context = useContext(AppContext);
   if (!context) {
     throw new Error('useApp must be used within an AppProvider');
   }
   return context;
-};
+}

@@ -1,0 +1,57 @@
+name: Backend security gates
+on:
+  pull_request:
+    branches: [main, dev/fintrack-v2, "feature/**", "fix/**", "refactor/**"]
+  push:
+    branches: [main, dev/fintrack-v2, "feature/**", "fix/**", "refactor/**"]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.4-alpine@sha256:7062a2109c4b51f3c792c7ea01e83ed12ef9a980886e3b3d380a7d2e5f6ce3f5
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-disposable-password
+          POSTGRES_DB: fintrack_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Generate Ephemeral Test Secrets
+        run: |
+          echo "TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+          echo "OWNER_SECRET_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+      - name: Apply Prisma Database Schema
+        run: npx prisma db push --accept-data-loss
+        env:
+          DATABASE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
+      - name: Test suite with real PostgreSQL 17
+        run: npm test
+        env:
+          DATABASE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
+          DATABASE_TEST_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
+          ALLOW_DESTRUCTIVE_DB_TESTS: "true"
+      - name: Next.js Production Build
+        run: npm run build
+        env:
+          DATABASE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
+      - name: Production Dependency Audit (omit dev)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Full Dependency Audit (including dev)
+        run: npm audit --audit-level=high

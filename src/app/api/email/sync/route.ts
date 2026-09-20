@@ -1,0 +1,732 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { prisma } from '@/lib/db';
+import { decryptToken } from '@/lib/security/crypto';
+import { OWNER_COOKIE_NAME, verifyOwnerSessionToken } from '@/lib/security/owner-auth';
+import {
+  ingestFromGmail,
+  getDemoBankEmails,
+  GmailTokenRevokedError,
+  GmailConfigError,
+  GmailTransientError,
+  type IngestionResult,
+} from '@/lib/email/gmail-client';
+import { parseBankNotification } from '@/lib/email/bank-parsers';
+import { getVietnamDateRangeBoundaries, parseAndValidateIsoDate } from '@/lib/date';
+import {
+  signContinuationToken,
+  verifyContinuationToken,
+  ContinuationExpiredError,
+  InvalidContinuationError,
+  type ContinuationData,
+} from '@/lib/security/continuation-token';
+import type { SyncResultStats, AccountSyncResult } from '@/types';
+
+const NO_CACHE_HEADERS = {
+  'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+  Pragma: 'no-cache',
+};
+
+export async function POST(req: NextRequest) {
+  // 1. Owner authorization check
+  const sessionCookie = req.cookies.get(OWNER_COOKIE_NAME)?.value;
+  const testBypass = req.headers.get('x-owner-test-bypass');
+  const isTest = process.env.NODE_ENV === 'test' && testBypass === 'test-authorized-owner';
+
+  if (!isTest && !(await verifyOwnerSessionToken(sessionCookie))) {
+    return NextResponse.json(
+      { success: false, error: 'Unauthorized: Phiên chủ sở hữu không hợp lệ (Owner session required).' },
+      { status: 401, headers: NO_CACHE_HEADERS }
+    );
+  }
+
+  try {
+    const body = await req.json().catch(() => ({}));
+    const {
+      mode, // optional: 'QUICK' | 'HISTORICAL'
+      accountId, // optional: specific GmailConnection ID or 'ALL'
+      fromDate, // optional ISO string (YYYY-MM-DD)
+      toDate, // optional ISO string (YYYY-MM-DD)
+      isDemoMode = false,
+      continuationTokens, // Record<string, string>: accountId -> opaque signed token
+      continuationToken, // optional string for single-account
+    } = body as {
+      mode?: 'QUICK' | 'HISTORICAL';
+      accountId?: string;
+      fromDate?: string;
+      toDate?: string;
+      isDemoMode?: boolean;
+      continuationTokens?: Record<string, string>;
+      continuationToken?: string;
+    };
+
+    // Build incoming continuation tokens map
+    const incomingTokens: Record<string, string> = {
+      ...(continuationTokens || {}),
+    };
+    if (continuationToken && accountId && accountId !== 'ALL') {
+      incomingTokens[accountId] = continuationToken;
+    }
+
+    const isAllAccounts = !accountId || accountId === 'ALL';
+    const isContinuationMode = Object.keys(incomingTokens).length > 0;
+
+    // Determine effective mode:
+    // 1. Explicit mode in request takes precedence
+    // 2. If continuation token exists, inspect token mode
+    // 3. Fall back to HISTORICAL if dates provided, else QUICK
+    let requestedMode = mode;
+    if (!requestedMode && isContinuationMode) {
+      const firstToken = Object.values(incomingTokens)[0];
+      if (firstToken && firstToken.includes('.')) {
+        try {
+          const payload = JSON.parse(Buffer.from(firstToken.split('.')[0], 'base64url').toString('utf-8'));
+          if (payload?.mode === 'QUICK' || payload?.mode === 'HISTORICAL') {
+            requestedMode = payload.mode;
+          }
+        } catch {}
+      }
+    }
+    const effectiveMode: 'QUICK' | 'HISTORICAL' =
+      requestedMode || (fromDate || toDate ? 'HISTORICAL' : 'QUICK');
+
+    const verifiedContinuationMap: Record<string, ContinuationData> = {};
+
+    // Validate and authenticate continuation tokens server-side
+    if (isContinuationMode) {
+      for (const [accId, tokenStr] of Object.entries(incomingTokens)) {
+        try {
+          const verified = verifyContinuationToken(tokenStr);
+          // Check that token's gmailConnectionId matches the requested account
+          if (verified.gmailConnectionId !== accId) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: 'invalid_continuation_token',
+                message: 'Token tiếp tục không khớp với tài khoản Gmail được yêu cầu.',
+              },
+              { status: 400, headers: NO_CACHE_HEADERS }
+            );
+          }
+          if (verified.mode !== effectiveMode) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: 'invalid_continuation_token',
+                message: 'Chế độ quét trong token tiếp tục không khớp với chế độ yêu cầu.',
+              },
+              { status: 400, headers: NO_CACHE_HEADERS }
+            );
+          }
+          verifiedContinuationMap[accId] = verified;
+        } catch (err) {
+          if (err instanceof ContinuationExpiredError) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: 'continuation_expired',
+                message: err.message,
+              },
+              { status: 400, headers: NO_CACHE_HEADERS }
+            );
+          }
+          return NextResponse.json(
+            {
+              success: false,
+              error: 'invalid_continuation_token',
+              message: err instanceof Error ? err.message : 'Token tiếp tục không hợp lệ hoặc đã bị thay đổi.',
+            },
+            { status: 400, headers: NO_CACHE_HEADERS }
+          );
+        }
+      }
+
+      if (!isAllAccounts && accountId && !verifiedContinuationMap[accountId]) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'invalid_continuation_token',
+            message: 'Token tiếp tục không khớp với tài khoản Gmail được yêu cầu.',
+          },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
+      }
+    }
+
+    // 2. Validate date range parameters for Historical Mode (initial non-continuation requests)
+    let reqFromDateObj: Date | undefined;
+    let reqToDateObj: Date | undefined;
+    let reqRangeStartMs: number | undefined;
+    let reqRangeEndMs: number | undefined;
+
+    if (effectiveMode === 'HISTORICAL' && !isContinuationMode) {
+      if (!fromDate || !toDate) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Thiếu khoảng ngày cho Historical Import. Vui lòng cung cấp đầy đủ ngày bắt đầu và kết thúc.',
+          },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
+      }
+
+      try {
+        parseAndValidateIsoDate(fromDate);
+        reqFromDateObj = new Date(fromDate);
+      } catch (err) {
+        return NextResponse.json(
+          { success: false, error: err instanceof Error ? err.message : 'Tham số ngày bắt đầu (fromDate) không hợp lệ.' },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
+      }
+
+      try {
+        parseAndValidateIsoDate(toDate);
+        reqToDateObj = new Date(toDate);
+      } catch (err) {
+        return NextResponse.json(
+          { success: false, error: err instanceof Error ? err.message : 'Tham số ngày kết thúc (toDate) không hợp lệ.' },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
+      }
+
+      if (fromDate > toDate) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Khoảng thời gian không hợp lệ: Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.',
+          },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
+      }
+
+      const boundaries = getVietnamDateRangeBoundaries(fromDate, toDate);
+      reqRangeStartMs = boundaries.rangeStartMs;
+      reqRangeEndMs = boundaries.rangeEndMs;
+    }
+
+    // 3. Fetch target Gmail connections
+    const connections = await prisma.gmailConnection.findMany({
+      where: {
+        revokedAt: null,
+        ...(accountId && accountId !== 'ALL' ? { id: accountId } : {}),
+      },
+    });
+
+    // Determine target connections to process
+    let targetConnections = connections;
+    if (isAllAccounts && isContinuationMode) {
+      // In ALL-accounts continuation mode:
+      // Process ONLY accounts that currently have an active continuation token!
+      // Completed accounts are NOT restarted!
+      const activeAccountIds = Object.keys(verifiedContinuationMap);
+      targetConnections = connections.filter(conn => activeAccountIds.includes(conn.id));
+    }
+
+    const aggregateStats: SyncResultStats = {
+      mode: effectiveMode,
+      totalFetched: 0,
+      totalNew: 0,
+      totalDuplicates: 0,
+      totalFailed: 0,
+      dateRange: undefined,
+      truncated: false,
+      accountResults: [],
+      continuationTokens: {},
+    };
+
+    // 4. Handle Demo Mode (Explicit action only — Never automatic surprise)
+    if (isDemoMode) {
+      if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_DATA !== 'true') {
+        return NextResponse.json(
+          { success: false, error: 'Dữ liệu demo không khả dụng trong môi trường production.' },
+          { status: 403, headers: NO_CACHE_HEADERS }
+        );
+      }
+
+      const demoEmails = getDemoBankEmails();
+      const filteredEmails = demoEmails.filter(e => {
+        const parsed = parseBankNotification(e);
+        if (!parsed) return false;
+        if (effectiveMode === 'HISTORICAL') {
+          const d = parsed.occurredAt.getTime();
+          if (reqRangeStartMs !== undefined && d < reqRangeStartMs) return false;
+          if (reqRangeEndMs !== undefined && d >= reqRangeEndMs) return false;
+        }
+        return true;
+      });
+
+      aggregateStats.totalFetched = filteredEmails.length;
+      aggregateStats.accountEmail = 'demo-bank@gmail.com (Dữ liệu thử nghiệm)';
+
+      let demoNew = 0;
+      let demoDup = 0;
+      let demoFailed = 0;
+
+      for (const email of filteredEmails) {
+        const parsed = parseBankNotification(email);
+        if (!parsed) {
+          demoFailed++;
+          continue;
+        }
+
+        // Deduplication check
+        const exists = await prisma.bankTransaction.findFirst({
+          where: {
+            OR: [
+              { gmailMessageId: parsed.gmailMessageId },
+              ...(parsed.bankRefId ? [{ bankCode: parsed.bankCode, bankRefId: parsed.bankRefId }] : []),
+              { fingerprint: parsed.fingerprint },
+            ],
+          },
+        });
+
+        if (exists) {
+          demoDup++;
+          continue;
+        }
+
+        await prisma.bankTransaction.create({
+          data: {
+            sourceEmail: 'demo-bank@gmail.com',
+            gmailMessageId: parsed.gmailMessageId,
+            bankRefId: parsed.bankRefId,
+            fingerprint: parsed.fingerprint,
+            bankCode: parsed.bankCode,
+            bankName: parsed.bankName,
+            accountHint: parsed.accountHint,
+            direction: parsed.direction,
+            amount: BigInt(parsed.amount),
+            currency: parsed.currency,
+            occurredAt: parsed.occurredAt,
+            emailReceivedAt: parsed.emailReceivedAt,
+            counterparty: parsed.counterparty,
+            merchantLabel: parsed.merchantLabel,
+            summary: parsed.summary,
+            classificationState: 'UNCLASSIFIED',
+          },
+        });
+
+        demoNew++;
+      }
+
+      aggregateStats.totalNew = demoNew;
+      aggregateStats.totalDuplicates = demoDup;
+      aggregateStats.totalFailed = demoFailed;
+
+      return NextResponse.json(
+        {
+          success: true,
+          isDemoSource: true,
+          stats: aggregateStats,
+          message: 'Đã nhập biến động mẫu DEMO thành công.',
+        },
+        { headers: NO_CACHE_HEADERS }
+      );
+    }
+
+    // 5. Normal operation: if no Gmail accounts are linked, prompt user
+    if (connections.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Chưa có tài khoản Gmail nào được liên kết hoặc tất cả tài khoản cần xác thực lại. Vui lòng thêm/kết nối lại tài khoản Gmail.',
+        },
+        { status: 400, headers: NO_CACHE_HEADERS }
+      );
+    }
+
+    // 6. Perform real ingestion for each connected account
+    const accountsProcessed: string[] = [];
+    let successfulAccounts = 0;
+
+    for (const conn of targetConnections) {
+      const startedAt = new Date();
+      let refreshToken = '';
+      try {
+        refreshToken = decryptToken(conn.encryptedRefreshToken);
+      } catch {
+        aggregateStats.accountResults?.push({
+          accountId: conn.id,
+          email: conn.email,
+          fetchedCount: 0,
+          newCount: 0,
+          duplicateCount: 0,
+          failedCount: 0,
+          status: 'error',
+          errorMessage: 'Lỗi giải mã token xác thực.',
+        });
+        continue;
+      }
+
+      const continuationData = verifiedContinuationMap[conn.id];
+      const specificPageToken: string | undefined = continuationData?.pageToken;
+
+      // Quick Scan bounded snapshot calculations
+      let connLowerBoundEpoch: number | undefined;
+      let connQuickScanUpperBoundEpoch: number | undefined;
+
+      let effectiveFromDate: string | undefined;
+      let effectiveToDate: string | undefined;
+      let effectiveFromDateObj: Date | undefined;
+      let effectiveToDateObj: Date | undefined;
+      let effectiveRangeStartMs: number | undefined;
+      let effectiveRangeEndMs: number | undefined;
+
+      if (effectiveMode === 'QUICK') {
+        if (continuationData && continuationData.mode === 'QUICK') {
+          // Carry server-signed authenticated bounds across continuation pages
+          connLowerBoundEpoch = continuationData.lowerBoundEpoch;
+          connQuickScanUpperBoundEpoch = continuationData.upperBoundEpoch;
+        } else {
+          // Initial Quick Scan: capture current server instant as fixed upper watermark
+          const serverInstant = new Date();
+          connQuickScanUpperBoundEpoch = Math.floor(serverInstant.getTime() / 1000);
+          // Lower bound: last completed Quick Scan watermark, or connectedAt fallback
+          const lowerBoundDate = conn.lastSyncAt || conn.connectedAt;
+          connLowerBoundEpoch = Math.floor(lowerBoundDate.getTime() / 1000);
+        }
+      } else {
+        // HISTORICAL MODE:
+        // Signed continuation token owns the ENTIRE historical range!
+        if (continuationData && continuationData.mode === 'HISTORICAL') {
+          effectiveFromDate = continuationData.fromDate;
+          effectiveToDate = continuationData.toDate;
+        } else {
+          effectiveFromDate = fromDate;
+          effectiveToDate = toDate;
+        }
+
+        if (!effectiveFromDate || !effectiveToDate) {
+          return NextResponse.json(
+            { success: false, error: 'Thiếu khoảng ngày cho Historical Import.' },
+            { status: 400, headers: NO_CACHE_HEADERS }
+          );
+        }
+
+        parseAndValidateIsoDate(effectiveFromDate);
+        parseAndValidateIsoDate(effectiveToDate);
+        effectiveFromDateObj = new Date(effectiveFromDate);
+        effectiveToDateObj = new Date(effectiveToDate);
+
+        const boundaries = getVietnamDateRangeBoundaries(effectiveFromDate, effectiveToDate);
+        effectiveRangeStartMs = boundaries.rangeStartMs;
+        effectiveRangeEndMs = boundaries.rangeEndMs;
+      }
+
+      let ingestionResult: IngestionResult;
+      try {
+        if (effectiveMode === 'QUICK') {
+          ingestionResult = await ingestFromGmail(refreshToken, {
+            mode: 'QUICK',
+            lowerBoundEpoch: connLowerBoundEpoch,
+            upperBoundEpoch: connQuickScanUpperBoundEpoch,
+            pageToken: specificPageToken,
+          });
+        } else {
+          ingestionResult = await ingestFromGmail(refreshToken, {
+            mode: 'HISTORICAL',
+            fromDate: effectiveFromDate,
+            toDate: effectiveToDate,
+            pageToken: specificPageToken,
+          });
+        }
+      } catch (err) {
+        if (err instanceof GmailTokenRevokedError) {
+          // Mark connection as revoked / reconnect required in DB
+          await prisma.gmailConnection.update({
+            where: { id: conn.id },
+            data: { revokedAt: new Date() },
+          });
+          aggregateStats.accountResults?.push({
+            accountId: conn.id,
+            email: conn.email,
+            fetchedCount: 0,
+            newCount: 0,
+            duplicateCount: 0,
+            failedCount: 0,
+            status: 'reconnect_required',
+            errorMessage: 'Token đã hết hạn hoặc bị thu hồi (Yêu cầu kết nối lại).',
+          });
+        } else if (err instanceof GmailConfigError) {
+          aggregateStats.accountResults?.push({
+            accountId: conn.id,
+            email: conn.email,
+            fetchedCount: 0,
+            newCount: 0,
+            duplicateCount: 0,
+            failedCount: 0,
+            status: 'error',
+            errorMessage: 'Lỗi cấu hình quyền Gmail API (Kiểm tra Google Cloud Console).',
+          });
+        } else if (err instanceof GmailTransientError) {
+          aggregateStats.accountResults?.push({
+            accountId: conn.id,
+            email: conn.email,
+            fetchedCount: 0,
+            newCount: 0,
+            duplicateCount: 0,
+            failedCount: 0,
+            status: 'error',
+            errorMessage: 'Máy chủ Google tạm thời không phản hồi. Vui lòng thử lại sau.',
+          });
+        } else {
+          aggregateStats.accountResults?.push({
+            accountId: conn.id,
+            email: conn.email,
+            fetchedCount: 0,
+            newCount: 0,
+            duplicateCount: 0,
+            failedCount: 0,
+            status: 'error',
+            errorMessage: 'Lỗi kết nối Gmail',
+          });
+        }
+        continue;
+      }
+
+      successfulAccounts++;
+      let newCount = 0;
+      let dupCount = 0;
+
+      for (const event of ingestionResult.events) {
+        // In HISTORICAL mode: strictly enforce transaction-date range on actual occurredAt
+        // using the connection's effective range (signed token if continuation)
+        if (effectiveMode === 'HISTORICAL') {
+          const eventTimeMs = event.occurredAt.getTime();
+          if (effectiveRangeStartMs !== undefined && eventTimeMs < effectiveRangeStartMs) {
+            continue;
+          }
+          if (effectiveRangeEndMs !== undefined && eventTimeMs >= effectiveRangeEndMs) {
+            continue;
+          }
+        }
+        // In QUICK mode: enforce exact half-open interval [lowerBoundEpoch * 1000, upperBoundEpoch * 1000)
+        // on emailReceivedAt (which is sourced from Gmail internalDate):
+        if (effectiveMode === 'QUICK') {
+          const receivedMs = event.emailReceivedAt.getTime();
+          if (connLowerBoundEpoch !== undefined && receivedMs < connLowerBoundEpoch * 1000) {
+            continue;
+          }
+          if (connQuickScanUpperBoundEpoch !== undefined && receivedMs >= connQuickScanUpperBoundEpoch * 1000) {
+            continue;
+          }
+        }
+
+        // Multi-account authoritative deduplication priority rules:
+        // Rule A: Same Gmail account + same Gmail message ID -> Authoritative duplicate
+        const sameAccountMsg = await prisma.bankTransaction.findFirst({
+          where: {
+            gmailConnectionId: conn.id,
+            gmailMessageId: event.gmailMessageId,
+          },
+        });
+
+        if (sameAccountMsg) {
+          dupCount++;
+          continue;
+        }
+
+        // Rule B: Same Bank Code + trustworthy Bank Transaction Reference ID -> Authoritative duplicate
+        if (event.bankRefId) {
+          const sameBankRef = await prisma.bankTransaction.findFirst({
+            where: {
+              bankCode: event.bankCode,
+              bankRefId: event.bankRefId,
+            },
+          });
+
+          if (sameBankRef) {
+            dupCount++;
+            continue;
+          }
+        }
+
+        // Rule C: Conservative cross-account forwarding deduplication:
+        const crossAccountForwarded = await prisma.bankTransaction.findFirst({
+          where: {
+            gmailConnectionId: { not: conn.id },
+            bankCode: event.bankCode,
+            direction: event.direction,
+            amount: BigInt(event.amount),
+            fingerprint: event.fingerprint,
+          },
+        });
+
+        if (crossAccountForwarded) {
+          // If both have bank reference IDs and they contradict, preserve both!
+          if (
+            event.bankRefId &&
+            crossAccountForwarded.bankRefId &&
+            event.bankRefId !== crossAccountForwarded.bankRefId
+          ) {
+            // Keep both legitimate transactions!
+          } else {
+            dupCount++;
+            continue;
+          }
+        }
+
+        // Distinct legitimate transaction: create record
+        await prisma.bankTransaction.create({
+          data: {
+            gmailConnectionId: conn.id,
+            sourceEmail: conn.email,
+            gmailMessageId: event.gmailMessageId,
+            gmailThreadId: event.gmailThreadId,
+            bankRefId: event.bankRefId,
+            fingerprint: event.fingerprint,
+            bankCode: event.bankCode,
+            bankName: event.bankName,
+            accountHint: event.accountHint,
+            direction: event.direction,
+            amount: BigInt(event.amount),
+            currency: event.currency,
+            occurredAt: event.occurredAt,
+            emailReceivedAt: event.emailReceivedAt,
+            counterparty: event.counterparty,
+            merchantLabel: event.merchantLabel,
+            summary: event.summary,
+            classificationState: 'UNCLASSIFIED',
+          },
+        });
+
+        newCount++;
+      }
+
+      // Update sync run audit log using authoritative effective dates
+      await prisma.syncRun.create({
+        data: {
+          gmailConnectionId: conn.id,
+          accountEmail: conn.email,
+          fromDate:
+            effectiveMode === 'QUICK'
+              ? new Date(connLowerBoundEpoch! * 1000)
+              : effectiveFromDateObj,
+          toDate:
+            effectiveMode === 'QUICK'
+              ? new Date(connQuickScanUpperBoundEpoch! * 1000)
+              : effectiveToDateObj,
+          startedAt,
+          finishedAt: new Date(),
+          fetchedCount: ingestionResult.totalFetched,
+          importedCount: newCount,
+          duplicateCount: dupCount,
+          failedCount: ingestionResult.failedCount,
+        },
+      });
+
+      // WATERMARK COMMIT INVARIANT:
+      // lastSyncAt represents ONLY the upper watermark of the last FULLY COMPLETED Quick Scan.
+      // 1. Historical imports MUST NOT advance lastSyncAt.
+      // 2. Truncated Quick Scans MUST NOT advance lastSyncAt.
+      // 3. Only when mode is QUICK and truncated is false (all pages completed), advance lastSyncAt to quickScanUpperBound.
+      if (effectiveMode === 'QUICK' && !ingestionResult.truncated && connQuickScanUpperBoundEpoch) {
+        await prisma.gmailConnection.update({
+          where: { id: conn.id },
+          data: { lastSyncAt: new Date(connQuickScanUpperBoundEpoch * 1000) },
+        });
+      }
+
+      accountsProcessed.push(conn.email);
+      aggregateStats.totalFetched += ingestionResult.totalFetched;
+      aggregateStats.totalNew += newCount;
+      aggregateStats.totalDuplicates += dupCount;
+      aggregateStats.totalFailed += ingestionResult.failedCount;
+
+      let signedContinuationToken: string | undefined;
+      if (ingestionResult.truncated && ingestionResult.nextPageToken) {
+        aggregateStats.truncated = true;
+        signedContinuationToken =
+          effectiveMode === 'QUICK'
+            ? signContinuationToken({
+                mode: 'QUICK',
+                gmailConnectionId: conn.id,
+                pageToken: ingestionResult.nextPageToken,
+                lowerBoundEpoch: connLowerBoundEpoch!,
+                upperBoundEpoch: connQuickScanUpperBoundEpoch!,
+              })
+            : signContinuationToken({
+                mode: 'HISTORICAL',
+                gmailConnectionId: conn.id,
+                pageToken: ingestionResult.nextPageToken,
+                fromDate: effectiveFromDate!,
+                toDate: effectiveToDate!,
+              });
+
+        if (!aggregateStats.continuationTokens) {
+          aggregateStats.continuationTokens = {};
+        }
+        aggregateStats.continuationTokens[conn.id] = signedContinuationToken;
+
+        if (!aggregateStats.continuationToken) {
+          aggregateStats.continuationToken = signedContinuationToken;
+        }
+      }
+
+      aggregateStats.accountResults?.push({
+        accountId: conn.id,
+        email: conn.email,
+        fetchedCount: ingestionResult.totalFetched,
+        newCount,
+        duplicateCount: dupCount,
+        failedCount: ingestionResult.failedCount,
+        status: 'ok',
+        truncated: ingestionResult.truncated,
+        continuationToken: signedContinuationToken,
+      });
+    }
+
+    if (successfulAccounts === 0 && targetConnections.length > 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Tất cả các tài khoản Gmail liên kết đều không thể đồng bộ hoặc cần xác thực lại.',
+          stats: aggregateStats,
+        },
+        { status: 400, headers: NO_CACHE_HEADERS }
+      );
+    }
+
+    aggregateStats.accountEmail = accountsProcessed.join(', ');
+
+    if (effectiveMode === 'HISTORICAL') {
+      const firstTargetId = targetConnections[0]?.id;
+      const firstContinuation = firstTargetId ? verifiedContinuationMap[firstTargetId] : undefined;
+      const respFrom =
+        firstContinuation && firstContinuation.mode === 'HISTORICAL'
+          ? firstContinuation.fromDate
+          : fromDate;
+      const respTo =
+        firstContinuation && firstContinuation.mode === 'HISTORICAL'
+          ? firstContinuation.toDate
+          : toDate;
+      if (respFrom && respTo) {
+        aggregateStats.dateRange = `${respFrom} → ${respTo}`;
+      }
+    }
+
+    const truncatedMessage =
+      effectiveMode === 'QUICK'
+        ? 'Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý.'
+        : 'Đã nhập một phần lịch sử. Vẫn còn email cần quét.';
+    const completedMessage = `Đã hoàn tất quét email: +${aggregateStats.totalNew} biến động mới.`;
+
+    return NextResponse.json(
+      {
+        success: true,
+        isDemoSource: false,
+        stats: aggregateStats,
+        message: aggregateStats.truncated ? truncatedMessage : completedMessage,
+      },
+      { headers: NO_CACHE_HEADERS }
+    );
+  } catch (error) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : 'Lỗi đồng bộ email',
+      },
+      { status: 500, headers: NO_CACHE_HEADERS }
+    );
+  }
+}

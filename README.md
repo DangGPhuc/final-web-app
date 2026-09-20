@@ -1,80 +1,210 @@
-# FinTrack Pro - Web App Quản Lý Chi Tiêu & Mô Phỏng Tài Chính Thông Minh
+# Personal Finance Cockpit
 
-Dự án Web App Quản lý Chi tiêu toàn diện kèm tính năng đột phá **What-If Financial Simulator** (Mô phỏng tài chính phản ứng thời gian thực & Benchmark tối ưu hiệu năng).
-
----
-
-## 🌟 1. Lineup Tính năng Cốt lõi (Features)
-
-### 🔮 Tính Năng Đột Phá: Mô Phỏng Tài Chính "What-If" (What-If Simulator)
-- **Kéo - Thả - Cập nhật tức thời (60 FPS Reactive)**:
-  - **Thanh trượt 1: Cắt giảm chi tiêu danh mục** (0% - 50%): Tùy chọn cắt giảm Ăn uống, Mua sắm, Giải trí... và xem số tiền tiết kiệm được ngay.
-  - **Thanh trượt 2: Đầu tư / Gửi tiết kiệm thêm** (0 - 5.000.000 ₫/tháng).
-  - **Tùy chọn lãi suất kỳ vọng** (5.5% - 11%/năm) & **Khung thời gian dự phóng** (6, 12, 24, 36 tháng).
-- **Biểu đồ kép so sánh 2 kịch bản**:
-  - *Đường Baseline (nét đứt)*: Quỹ đạo tài sản nếu giữ nguyên cách chi tiêu hiện tại.
-  - *Đường What-If (nét liền có phủ gradient)*: Quỹ đạo tài sản bứt phá sau khi tối ưu và sinh lời nhờ lãi kép.
-  - Thẻ hiển thị **Số tiền gia tăng thêm (Delta Extra Gain)** nổi bật (ví dụ: `+28.780.000 ₫`).
-- **Trung tâm Benchmark Kỹ thuật Trực tiếp (Live Performance Audit)**:
-  - Nút bấm **"Chạy Benchmark Kiểm Tra"** stress-test đo trực tiếp độ trễ trên trình duyệt.
-  - So sánh trực quan: **Chưa tối ưu (184.5 ms - Full Table Scan)** vs **Đã tối ưu (1.8 ms - Compound Index & Cache)**, tốc độ nhanh hơn **102 lần**, throughput đạt **2.840 req/s**.
-
-### 💳 Quản lý Tài khoản & Ví (Accounts & Wallets)
-- **Hỗ trợ 4 loại nguồn tiền**: Tiền mặt (Cash), Tài khoản ngân hàng (Bank Accounts), Thẻ tín dụng (Credit Cards - hạn mức, dư nợ), Sổ tiết kiệm (Savings - lãi suất, kỳ hạn).
-- **Tổng hợp tự động**: Số dư khả dụng & Tổng tài sản ròng (Net Worth).
-- **Chuyển khoản nội bộ (Internal Transfer)**: Chuyển tiền giữa các ví, tính phí giao dịch và tự động cập nhật số dư.
-
-### 📝 Ghi nhận Giao dịch (Transaction Recording) & Nút Nhập Nhanh (Quick Add)
-- **Đầy đủ 3 hình thức**: Khoản chi (Expense), Khoản thu (Income), Chuyển khoản nội bộ (Transfer).
-- **Nút Nhập nhanh (Quick Add)**: Mở tức thì ở mọi màn hình qua nút bấm hoặc thanh điều hướng. Có sẵn các nút tăng giảm tiền nhanh (`+50k`, `+100k`, `+500k`, `+1M`, `+2M`, `+5M`).
-- **Đính kèm ảnh chụp hóa đơn (Receipt Image)**: Hỗ trợ upload ảnh chụp chứng từ, xem thumbnail, phóng to xem chi tiết trong modal và tải ảnh về máy.
-- **Toàn vẹn dữ liệu**: Khi chỉnh sửa hoặc xóa giao dịch, hệ thống tự động hoàn trả (rollback) số dư ví chính xác 100%.
-
-### 🎯 Thiết lập Ngân sách (Budgeting) & Tạo Budget từ Thu nhập
-- **Hạn mức theo từng danh mục**: Cài đặt ngân sách chi tiêu tháng cho Ăn uống, Mua sắm, Di chuyển, Hóa đơn...
-- **Hệ thống cảnh báo 2 cấp độ**:
-  - 🟡 **Cảnh báo chạm mốc 80%**: Banner vàng kèm gợi ý số tiền tối đa nên chi tiêu mỗi ngày.
-  - 🔴 **Cảnh báo vượt 100%**: Banner đỏ cảnh báo khẩn cấp khi danh mục bị chi vượt ngưỡng.
-- **Thêm thu nhập cá nhân → Tạo Budget khả dụng để tiêu**:
-  - Phân bổ theo quy tắc **50/30/20** (50% Thiết yếu, 30% Mong muốn, 20% Tích lũy).
-  - Tự động trừ chi phí cố định (Hóa đơn) và mục tiêu tích lũy để tính ra **Ngân sách chi tiêu khả dụng thực tế**.
-
-### ⏰ Chi phí Định kỳ & Mục tiêu Tích lũy (Recurring Bills & Savings Goals)
-- **Hóa đơn định kỳ (Recurring Bills)**: Tiền nhà, điện EVN, nước, internet FPT, netflix... Đếm ngược ngày và nút **"Thanh toán ngay"** tự động trừ ví.
-- **Hũ tiết kiệm & Mục tiêu tích lũy (Savings Goals)**: Đặt mục tiêu mua xe, mua laptop, quỹ khẩn cấp... Thao tác nạp/rút tiền kèm pháo hoa mừng (Confetti celebration) khi đạt 100%!
-
-### 📊 Báo cáo & Phân tích Chuyên sâu (Reports & Analytics)
-- **Biểu đồ tròn (Donut)**: Cơ cấu tỷ trọng % chi tiêu theo danh mục.
-- **Biểu đồ cột (Bar)**: So sánh Thu nhập vs Chi tiêu qua các tháng.
-- **Biểu đồ vùng (Area)**: Xu hướng dòng tiền và tăng trưởng tài sản tích lũy.
-- **Xuất báo cáo đa định dạng**: CSV UTF-8, Excel (.xlsx) nhiều sheet và In / Xuất PDF chuyên nghiệp.
+Trung tâm chỉ huy tài chính cá nhân dành riêng cho **DUY NHẤT MỘT CHỦ SỞ HỮU (Single-Owner Cockpit)**.
+Dự án phục vụ đồ án tốt nghiệp với cơ chế tự động đọc email ngân hàng qua **Google OAuth 2.0 đa tài khoản**, lưu trữ bền vững với **PostgreSQL 17 & Prisma**, mã hóa xác thực **AES-256-GCM**, mô hình phân loại tài chính minh bạch, và giao diện tối giản Obsidian cao cấp.
 
 ---
 
-## 💻 2. Lineup Công nghệ (Tech Stack)
+## 1. Triết lý Thiết kế (Single-Owner Architecture)
 
-- **Frontend**: **Next.js 15** (React 19, App Router, TypeScript) + **Tailwind CSS v4**
-- **Data Visualization**: **Recharts** (Interactive Area, Bar, Pie charts)
-- **Reactive State & Debounce**: Tối ưu 60 FPS khi kéo thanh trượt mô phỏng
-- **Iconography**: **Lucide React**
-- **Spreadsheet Engine**: **SheetJS (xlsx)**
-- **Animations**: **canvas-confetti**
-- **Backend REST API**: `/api/wallets`, `/api/transactions`, `/api/budgets`, `/api/bills`, `/api/goals`, `/api/simulation/what-if`, `/api/summary`
+Ứng dụng này **không phải là phần mềm SaaS** và không phục vụ khách hàng đại trà:
+- **Không đăng ký / Không tạo tài khoản khách hàng**: Không có bảng users khách hàng, không password reset, không CRM, không đa người thuê (multi-tenant).
+- **Màn hình Mở khóa Cockpit (Owner Unlock Screen)**: Ứng dụng khởi động ở trạng thái khóa với màn hình đen Obsidian tối giản. Chủ sở hữu nhập `Owner Access Key` để thiết lập phiên làm việc được ký bằng HMAC-SHA256 lưu trong cookie HTTP-only (`cockpit_owner_session`).
+- **Chính sách Cookie SameSite=Lax**: Cookie phiên chủ sở hữu sử dụng `SameSite=Lax` (thay vì Strict) để tương thích an toàn với luồng điều hướng top-level cross-site GET từ Google OAuth callback (`/api/google/callback`), bảo đảm phiên không bị gián đoạn sau khi hoàn tất đăng nhập Google.
+- **Khóa Cockpit**: Chủ sở hữu có thể chủ động khóa lại Cockpit bất kỳ lúc nào từ Settings, xóa sạch session cookie khỏi trình duyệt.
+- **Bảo mật Google OAuth**: Trình duyệt **tuyệt đối không bao giờ nhận được refresh token**. Toàn bộ refresh token được mã hóa authenticated `AES-256-GCM` trước khi lưu vào PostgreSQL.
+- **Mô hình riêng tư (Privacy Model)**:
+  - *Phương án A*: Kết nối trực tiếp tài khoản Gmail nhận thông báo ngân hàng.
+  - *Phương án B*: Thiết lập Gmail chính tự động chuyển tiếp (forward) email biến động sang một Gmail phụ, rồi kết nối Gmail phụ vào Personal Finance Cockpit.
 
 ---
 
-## 🚀 3. Hướng dẫn Chạy Ứng dụng
+## 2. Kiến trúc Luồng Dữ liệu (Data Flow Overview)
 
-1. Mở Terminal và điều hướng vào thư mục đã clone:
-```bash
-cd "final prj webapp"
+```
+[ BANK NOTIFICATION EMAILS (VCB, TCB, MB, ACB, VPB, BIDV...) ]
+                               ↓
+         [ GOOGLE OAUTH 2.0 (gmail.readonly, offline) ]
+                               ↓
+  [ PAGINATED CANDIDATE SCAN (BANK_NOTIFICATION_REGISTRY + Epoch Seconds) ]
+  ├── Quick Scan: Bounded Snapshot (after:<lastSyncAt> before:<serverInstant>)
+  └── Historical Import: Vietnam Date Range [fromDate..toDate] + Cushion
+                               ↓
+    [ FACTUAL FINANCIAL PARSER (Direction, Amount, Time Asia/Ho_Chi_Minh) ]
+                               ↓
+      [ SEPARATION: occurredAt (Event Time) vs emailReceivedAt (Gmail Time) ]
+                               ↓
+        [ ENFORCE TRANSACTION DATE RANGE (occurredAt in [from..to] for Historical) ]
+                               ↓
+   [ AUTHORITATIVE MULTI-ACCOUNT DEDUPLICATION & FORWARDING HEURISTIC ]
+   ├── Rule A: @@unique([gmailConnectionId, gmailMessageId])
+   ├── Rule B: @@index([bankCode, bankRefId])
+   └── Rule C: Conservative cross-account forwarding heuristic
+                               ↓
+      [ BANK TRANSACTIONS (PostgreSQL + Prisma Persistence: BigInt VND) ]
+   (Tác động ngay lập tức vào Authoritative Balance = IN - OUT)
+                               ↓
+        [ "BIẾN ĐỘNG CẦN PHÂN LOẠI" (Manual Classification) ]
+        ├── User-defined Categories (Lưu vĩnh viễn trong DB)
+        └── Budget Funds (Hạn mức quỹ chi tiêu độc lập với số dư)
+                               ↓
+     [ DATA RESET / RE-IMPORT: Xóa dữ liệu tài chính vs Factory Reset ]
 ```
 
-2. Cài đặt thư viện và khởi chạy:
+---
+
+## 3. Các Tính Năng Kỹ Thuật Nổi Bật (Key Features)
+
+### 3.1. Phân định Ngữ nghĩa Đồng bộ: Quick Scan vs Historical Import
+- **Định nghĩa Bất biến Watermark (`lastSyncAt`)**:
+  $$\text{lastSyncAt} = \text{Upper snapshot watermark của lần Quét Nhanh (Quick Scan) hoàn tất 100\%}$$
+- **Historical Import không thay đổi watermark**: Nhập lịch sử (ví dụ: 01/01/2026 → 31/01/2026) **tuyệt đối không cập nhật `lastSyncAt`**, bảo đảm lần Quick Scan tiếp theo không bị nhảy cóc hoặc bỏ sót email từ tháng 2 đến tháng 9.
+- **Quick Scan Bounded Snapshot & Nửa khoảng logic chính xác $[lowerBound, upperBound)$**:
+  1. Khi bắt đầu Quick Scan, hệ thống ghi nhận `quickScanUpperBound = server instant (epoch seconds)`.
+  2. Mốc dưới `lowerBound = conn.lastSyncAt || conn.connectedAt`.
+  3. Khoảng thời gian logic tuyệt đối của Quick Scan là **nửa khoảng mở phải**:
+     $$[\text{lowerBoundEpoch}, \text{quickScanUpperBoundEpoch})$$
+  4. **Defensive Boundary Overlap**: Câu truy vấn ứng viên Gmail (candidate query) chủ động nới rộng biên an toàn 2 giây:
+     `after:(lowerBoundEpoch - 2) before:(upperBoundEpoch + 2)`
+     nhằm loại trừ hoàn toàn sự nhập nhằng trong tính đóng/mở của toán tử tìm kiếm Gmail.
+  5. **Bộ lọc Gmail `internalDate` độc quyền & tối cao**: Sau khi nạp chi tiết message, hệ thống đối soát chính xác Gmail `internalDate`:
+     $$\text{internalDate} \ge \text{lowerBoundEpoch} \times 1000 \quad \text{AND} \quad \text{internalDate} < \text{upperBoundEpoch} \times 1000$$
+     Chỉ các email nằm chính xác trong nửa khoảng này mới trở thành giao dịch của đợt quét. Nhờ đó không có bất kỳ tích tắc nào bị bỏ sót (zero boundary-gap) giữa 2 lần quét liên tiếp, không phát sinh trùng lặp (kết hợp với DB deduplication độc quyền), và email sau mốc upper snapshot được để dành nguyên vẹn cho lần quét kế tiếp.
+  6. **Không dùng `occurredAt` cho Quick Scan & Fail-closed `internalDate`**: Cửa sổ nhận thư Quick Scan căn cứ duy nhất vào Gmail `internalDate`. Nếu `internalDate` bị thiếu, không phải số, hoặc $\le 0$, message lập tức bị loại bỏ và tăng `failedCount` (fail-closed, không dùng header Date RFC làm fallback). Chế độ Historical Import tiếp tục sử dụng candidate cushion và lọc theo `occurredAt` trong khoảng ngày Việt Nam.
+  7. Nếu quét bị ngắt phân trang (truncated), `lastSyncAt` **giữ nguyên không đổi**.
+  8. Chỉ khi trang cuối cùng hoàn tất thành công (`truncated === false`), `lastSyncAt` mới được cam kết tiến tới `quickScanUpperBound`.
+- **Watermark độc lập theo từng tài khoản**: Khi quét nhiều tài khoản (A xong, B dở dang, C lỗi), watermark của A tiến lên độc lập, B và C giữ nguyên watermark cũ.
+
+### 3.2. Phân biệt Thời gian Giao dịch (`occurredAt`) và Thời gian Nhận Mail (`emailReceivedAt`)
+- `occurredAt`: Bóc tách trực tiếp ngày giờ giao dịch ghi trong thông báo ngân hàng (chuẩn múi giờ `Asia/Ho_Chi_Minh` / UTC+7). Dùng để ghi sổ cái, phân tích dòng tiền và nhóm theo tháng. Một email nhận trễ hay được forward 1 ngày sau vẫn giữ đúng ngày giao dịch gốc.
+- `emailReceivedAt`: Ghi nhận thời điểm nhận thư của Gmail (`internalDate` ưu tiên hơn RFC Header `Date`). Dùng cho cửa sổ lọc Quick Scan và đối soát kiểm toán.
+
+### 3.3. Cơ chế Chống Trùng Lặp Thận trọng (Conservative Deduplication)
+- **Authoritative Identity**:
+  1. Khóa duy nhất tổng hợp `@@unique([gmailConnectionId, gmailMessageId])` ngăn nhập trùng lặp cùng 1 email trên 1 kết nối Gmail.
+  2. Định danh `(bankCode, bankRefId)` với chỉ mục chuyên biệt nhận diện chính xác các mã giao dịch ngân hàng (Mã GD, Số GD, FT...).
+- **Conservative Cross-Account Heuristic**:
+  - Chỉ áp dụng heuristic vân tay tài chính (`fingerprint`) giữa các tài khoản Gmail **khác nhau** khi chuyển tiếp email.
+  - Các giao dịch độc lập cùng số tiền xảy ra trong cùng một phút (ví dụ: thanh toán 2 cốc Highland cách nhau vài chục giây) được **giữ nguyên toàn vẹn**.
+
+### 3.4. Opaque Server-Authenticated Continuation Tokens & Phân trang An toàn
+- **Không tin tưởng raw query state từ client**: Trình duyệt tuyệt đối không được tự ý sửa đổi tham số truy vấn (`pageToken`, mốc `quickScanBounds`, ngày `fromDate`/`toDate`) khi tiếp tục quét.
+- **HMAC-SHA256 Signed Opaque Token**:
+  - Server ký số payload phân trang bằng HMAC-SHA256 với khóa phái sinh từ `OWNER_SECRET_KEY`:
+    $$\text{Signing Key} = \text{HMAC}(\text{OWNER\_SECRET\_KEY}, \text{"gmail-continuation:v1"})$$
+  - Payload bao gồm: `version`, `mode`, `gmailConnectionId`, `pageToken`, các mốc thời gian đã khóa (`lowerBoundEpoch`/`upperBoundEpoch` cho QUICK, hoặc `fromDate`/`toDate` cho HISTORICAL), và `expiresAt`.
+  - Client chỉ nhận và gửi lại chuỗi token mờ (opaque string) qua trường `continuationTokens: Record<accountId, opaqueToken>`.
+- **Thẩm định Server-side nghiêm ngặt & Quyền sở hữu khoảng ngày (Range Ownership)**:
+  - Xác thực chữ ký cryptographic, từ chối mọi token bị giả mạo hoặc chỉnh sửa (`400 invalid_continuation_token`).
+  - Đối chiếu đúng `gmailConnectionId` (token của Gmail A không thể đem sang dùng cho Gmail B).
+  - Đối chiếu đúng `mode` (token QUICK không thể dùng cho HISTORICAL).
+  - **Signed Historical Range Invariant**: Token Historical đã ký sở hữu toàn bộ khoảng ngày (`fromDate`, `toDate`). Tham số `fromDate`/`toDate` gửi từ client (nếu có) bị bỏ qua hoàn toàn; câu truy vấn Gmail, bộ lọc `occurredAt`, nhật ký kiểm toán `SyncRun` và phản hồi `dateRange` đều trích xuất đồng nhất từ token đã ký.
+  - Thẩm định nghiêm ngặt lịch ngày YYYY-MM-DD và điều kiện `fromDate <= toDate` ngay trong schema payload của token tiếp tục.
+  - Kiểm tra thời hạn hết hạn (TTL 30 phút, tức 1800 giây): trả về lỗi an toàn `400 continuation_expired` nếu quá hạn, không tự ý khởi động lại quét với mốc mới.
+- **Cách ly đa tài khoản trong ALL-account mode**:
+  - Trả về bản đồ `continuationTokens` theo từng tài khoản.
+  - Lần gửi tiếp theo chỉ xử lý các tài khoản còn dở dang (`pending`), các tài khoản đã hoàn tất (`completed`) không bao giờ bị chạy lại.
+- **Thông điệp máy chủ chuẩn hóa theo Sync Mode**:
+  - Khi ngắt trang QUICK: *"Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý."*
+  - Khi ngắt trang HISTORICAL: *"Đã nhập một phần lịch sử. Vẫn còn email cần quét."*
+  - Không để lộ bất kỳ raw Gmail `pageToken` hay `quickScanBounds` thô nào trong phản hồi API công khai.
+- **Tách bạch giao diện tiếp tục theo ngữ cảnh**:
+  - **Quick Scan**: Hiển thị banner *"Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý."* cùng nút **[ Tiếp tục quét ]**.
+  - **Historical Import**: Hiển thị banner *"Đã nhập một phần lịch sử. Vẫn còn email cần quét theo phân trang an toàn."* cùng nút **[ Tiếp tục nhập ]**.
+
+### 3.5. Phân loại Lỗi & Trạng thái Reconnect
+- Phát hiện chính xác `invalid_grant` / token bị thu hồi: đánh dấu `reconnect_required` (`revokedAt = new Date()`) và hiển thị badge cảnh báo yêu cầu kết nối lại trên giao diện.
+- Không thu hồi tài khoản nhầm khi gặp lỗi quyền hạn (API permission) hay lỗi mạng tạm thời (transient errors).
+- Chuẩn hóa mã lỗi OAuth trả về trình duyệt (`oauth_state_mismatch`, `oauth_config_error`, `oauth_exchange_failed`, `oauth_refresh_revoked`), không lộ thông tin nội bộ trên URL.
+
+### 3.6. Quản lý Dữ liệu An toàn (Data Management)
+- **Xóa dữ liệu tài chính (Clear Financial Data)**: Xóa toàn bộ biến động giao dịch, quỹ và lịch sử đồng bộ, nhưng **giữ nguyên các kết nối Gmail đã liên kết**.
+- **Khôi phục cài đặt gốc (Factory Reset)**: Thu hồi và hủy token OAuth trên Google, xóa hoàn toàn kết nối Gmail, danh mục, quỹ và đưa hệ thống về trạng thái ban đầu.
+
+---
+
+## 4. Cấu hình Dành Cho Nhà Phát Triển (Developer Setup)
+
+### 4.1. Thiết lập Google Cloud Console
+1. Truy cập [Google Cloud Console](https://console.cloud.google.com/) và tạo dự án.
+2. Bật **Gmail API** trong thư viện APIs.
+3. Thiết lập **OAuth consent screen** (Testing Mode) với các scopes:
+   - `openid`
+   - `.../auth/userinfo.email`
+   - `.../auth/userinfo.profile`
+   - `https://www.googleapis.com/auth/gmail.readonly`
+4. Thêm địa chỉ Gmail dùng thử nghiệm vào mục **Test users**.
+5. Tạo OAuth Client ID (Web application) với Authorized redirect URI:
+   ```
+   http://localhost:3000/api/google/callback
+   ```
+
+### 4.2. Cấu hình Biến Môi Trường (`.env.local`)
+Sao chép `.env.example` thành `.env.local` và điền các giá trị:
+
 ```bash
-npm install
-npm run dev
-# hoặc chạy production:
+# 1. Database (PostgreSQL + Prisma)
+DATABASE_URL="postgresql://user:password@localhost:5432/personal_finance"
+
+# 2. Mã hóa Token AES-256-GCM (64 hex characters = 32 bytes)
+# Sinh ngẫu nhiên: openssl rand -hex 32
+TOKEN_ENCRYPTION_KEY="<generate with openssl rand -hex 32>"
+
+# 3. Bảo vệ Chủ sở hữu Cockpit (Tối thiểu 32 ký tự / 64 hex characters)
+# Sinh ngẫu nhiên: openssl rand -hex 32
+OWNER_SECRET_KEY="<generate with openssl rand -hex 32>"
+
+# Canonical application origin (bắt buộc cho kiểm tra CSRF Origin)
+APP_ORIGIN="http://localhost:3000"
+
+# 4. Google OAuth Credentials
+GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="your-client-secret"
+GOOGLE_REDIRECT_URI="http://localhost:3000/api/google/callback"
+
+# 5. Cờ môi trường kiểm thử (mặc định false)
+ALLOW_DEMO_DATA=false
+ALLOW_MOCK_OAUTH=false
+```
+
+---
+
+## 5. Cài đặt & Vận hành (Installation & Run)
+
+### 5.1. Khởi tạo Database PostgreSQL
+```bash
+# Đảm bảo PostgreSQL 17 đang chạy
+pg_isready
+
+# Đẩy schema Prisma vào database
+npx prisma db push
+```
+
+### 5.2. Chạy Kiểm thử (Test Suite)
+> [!IMPORTANT]
+> **Cơ chế An toàn Cơ sở dữ liệu Kiểm thử (Test DB Safety Guard)**:
+> FinTrack trang bị cơ chế an toàn tự động chặn (`fail-closed`) để ngăn chặn việc chạy nhầm các bài kiểm thử có tính xóa dữ liệu (`deleteMany`) vào cơ sở dữ liệu thật (`personal_finance`). Lệnh `npm test` mặc định sẽ từ chối thực thi trừ khi được cung cấp cờ xác nhận và URL cơ sở dữ liệu test dùng một lần riêng biệt chứa từ khóa `test` (ví dụ `fintrack_test`). Tuyệt đối không bao giờ dùng chung database ứng dụng cho test.
+
+```bash
+# 1. Chạy các bài unit test thuần túy (không yêu cầu cơ sở dữ liệu)
+npx vitest run tests/test-db-safety.test.ts
+npx vitest run tests/bank-timestamp.test.ts
+
+# 2. Chạy toàn bộ test suite với database test riêng biệt (disposable test database)
+# Tạo database test: docker compose --env-file .env.local exec postgres psql -U fintrack -d postgres -c "CREATE DATABASE fintrack_test;"
+ALLOW_DESTRUCTIVE_DB_TESTS=true DATABASE_TEST_URL="postgresql://fintrack:<mat_khau>@127.0.0.1:5432/fintrack_test" npm test
+
+# 3. Kiểm tra tính hợp lệ của TypeScript
+npm run typecheck
+```
+
+### 5.3. Build & Khởi chạy Production
+```bash
+# Build ứng dụng Next.js tối ưu hóa
+npm run build
+
+# Khởi chạy server
 npm start
 ```
-3. Mở trình duyệt tại: **`http://localhost:3000`**
+
+Truy cập `http://localhost:3000`, nhập `OWNER_SECRET_KEY` đã cấu hình để mở khóa Cockpit.

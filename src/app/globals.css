@@ -1,55 +1,32 @@
 @import "tailwindcss";
 
 :root {
-  /* Background & Surface */
-  --background: #f8fafc;
-  --foreground: #0f172a;
-  --surface: #ffffff;
-  --surface-elevated: #ffffff;
+  /* Surface Tokens */
+  --bg-obsidian: #0f1011;
+  --bg-deeper: #090a0b;
+  --surface-elevated: #2e2e2e;
+  --surface-hover: #3f4041;
+  --surface-card: #17181a;
+  --border-subtle: #232427;
+  --border-strong: #34363a;
 
-  /* Brand & Semantic */
-  --primary: #10b981;
-  --primary-dark: #059669;
-  --primary-light: #d1fae5;
-  --secondary: #0ea5e9;
-  --secondary-light: #e0f2fe;
-  --accent: #f59e0b;
-  --accent-light: #fef3c7;
+  /* Typography Colors */
+  --text-heading: #f5f5f7;
+  --text-body: #9f9fa0;
+  --text-muted: #6b6b70;
+  --text-white: #ffffff;
 
-  /* State colors */
-  --income: #10b981;
-  --income-light: #d1fae5;
-  --expense: #f43f5e;
-  --expense-light: #ffe4e6;
-  --transfer: #0ea5e9;
-  --transfer-light: #e0f2fe;
-  --warning: #f59e0b;
-  --danger: #ef4444;
+  /* Semantic Accents (Used with intention) */
+  --signal-cyan: #00b3dd;
+  --signal-iris: #847dff;
+  --signal-positive: #10b981;
+  --signal-negative: #f43f5e;
+  --signal-warning: #f59e0b;
 
-  /* Text */
-  --text-primary: #0f172a;
-  --text-secondary: #64748b;
-  --text-tertiary: #94a3b8;
-  --text-inverse: #ffffff;
-
-  /* Border & Divider */
-  --border: #e2e8f0;
-  --border-strong: #cbd5e1;
-  --divider: #f1f5f9;
-
-  /* Shadow (soft, mobile-app-like) */
-  --shadow-sm: 0 1px 2px 0 rgb(15 23 42 / 0.04);
-  --shadow: 0 2px 8px -1px rgb(15 23 42 / 0.08), 0 1px 3px -1px rgb(15 23 42 / 0.04);
-  --shadow-md: 0 4px 16px -4px rgb(15 23 42 / 0.1), 0 2px 6px -2px rgb(15 23 42 / 0.05);
-  --shadow-lg: 0 10px 30px -6px rgb(15 23 42 / 0.12), 0 4px 10px -4px rgb(15 23 42 / 0.05);
-
-  /* Radius */
-  --radius-sm: 8px;
-  --radius: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --radius-2xl: 24px;
-  --radius-full: 9999px;
+  /* Fonts */
+  --font-sans: var(--font-sans, system-ui, -apple-system, sans-serif);
+  --font-display: var(--font-display, Georgia, serif);
+  --font-mono: var(--font-mono, monospace);
 }
 
 * {
@@ -58,36 +35,107 @@
 
 html {
   -webkit-tap-highlight-color: transparent;
+  color-scheme: dark;
 }
 
 body {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background-color: var(--background);
-  color: var(--text-primary);
+  font-family: var(--font-sans);
+  background-color: var(--bg-obsidian);
+  color: var(--text-body);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Utility classes for design tokens */
-@layer utilities {
-  .bg-app {
-    background-color: var(--background);
-  }
-  .bg-surface {
-    background-color: var(--surface);
-  }
-  .text-primary {
-    color: var(--text-primary);
-  }
-  .text-secondary {
-    color: var(--text-secondary);
-  }
-  .text-tertiary {
-    color: var(--text-tertiary);
+/* Typography styles */
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 400; /* Display headline is unbolded as per DESIGN.md */
+}
+
+.font-mono-data {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Depth & surfaces — No drop shadows, depth by surface contrast */
+.cockpit-card {
+  background-color: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 20px;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.cockpit-card:hover {
+  border-color: var(--border-strong);
+}
+
+.cockpit-card-elevated {
+  background-color: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+}
+
+/* Buttons */
+.btn-primary {
+  background-color: #ffffff;
+  color: #000000;
+  border-radius: 8px;
+  font-weight: 500;
+  padding: 8px 16px;
+  transition: opacity 0.2s ease;
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+.btn-secondary {
+  background-color: var(--surface-elevated);
+  color: var(--text-heading);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 16px;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.btn-secondary:hover {
+  background-color: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.btn-pill {
+  border-radius: 9999px;
+}
+
+/* Input elements */
+.cockpit-input {
+  background-color: var(--bg-deeper);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  color: var(--text-heading);
+  padding: 8px 12px;
+  transition: border-color 0.2s ease;
+}
+
+.cockpit-input:focus {
+  outline: none;
+  border-color: var(--signal-cyan);
+}
+
+/* Motion: 0.2s ease transitions, respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
-/* Scrollbar minimal */
+/* Minimal scrollbar */
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
@@ -96,7 +144,6 @@ body {
   scrollbar-width: none;
 }
 
-/* Safe area helpers for mobile notch */
 .pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
