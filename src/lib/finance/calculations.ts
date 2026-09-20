@@ -3,14 +3,13 @@
  */
 
 import type {
-  Transaction,
+  BankTransaction,
   Fund,
   FundStatus,
   MonthlySnapshot,
   FundSnapshotEntry,
   SavingsProjection,
   ProjectionPoint,
-  AppSettings,
 } from '@/types';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -19,7 +18,7 @@ export function getCurrentYearMonth(d: Date = new Date()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-export function getTransactionYearMonth(tx: Transaction): string {
+export function getTransactionYearMonth(tx: { occurredAt: string | Date }): string {
   const d = new Date(tx.occurredAt);
   if (isNaN(d.getTime())) return '';
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -33,22 +32,26 @@ export function formatCurrency(amount: number, currency: string = 'VND'): string
   }).format(amount);
 }
 
-export function formatDate(dateString: string, type: 'short' | 'full' | 'time' = 'short'): string {
+export function formatDate(dateString: string | Date, type: 'short' | 'full' | 'time' = 'short'): string {
   try {
     const date = new Date(dateString);
-    if (isNaN(date.getTime())) return dateString;
+    if (isNaN(date.getTime())) return String(dateString);
     if (type === 'time') {
       return date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
     }
     if (type === 'full') {
       return date.toLocaleDateString('vi-VN', {
-        weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric',
-        hour: '2-digit', minute: '2-digit',
+        weekday: 'short',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
       });
     }
     return date.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
   } catch {
-    return dateString;
+    return String(dateString);
   }
 }
 
@@ -62,17 +65,20 @@ export function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-// ─── Balance ────────────────────────────────────────────────────────────────
+// ─── Balance Calculation ────────────────────────────────────────────────────
+// In the Personal Finance Cockpit:
+// - All valid bank transactions affect the balance immediately upon ingestion.
+// - Classification does NOT change whether money entered or left the account.
+// - Fund assignment does NOT change the balance.
 
 export function calculateBalance(
-  openingBalance: number,
-  transactions: Transaction[]
+  openingBalance: number = 0,
+  transactions: BankTransaction[]
 ): number {
-  const posted = transactions.filter(tx => tx.status === 'POSTED');
-  const totalIn = posted
+  const totalIn = transactions
     .filter(tx => tx.direction === 'IN')
     .reduce((sum, tx) => sum + tx.amount, 0);
-  const totalOut = posted
+  const totalOut = transactions
     .filter(tx => tx.direction === 'OUT')
     .reduce((sum, tx) => sum + tx.amount, 0);
   return openingBalance + totalIn - totalOut;
@@ -88,14 +94,18 @@ export interface MonthlyCashflow {
 }
 
 export function calculateMonthlyCashflow(
-  transactions: Transaction[],
+  transactions: BankTransaction[],
   month: string
 ): MonthlyCashflow {
-  const posted = transactions.filter(
-    tx => tx.status === 'POSTED' && getTransactionYearMonth(tx) === month
+  const monthTxs = transactions.filter(
+    tx => getTransactionYearMonth(tx) === month
   );
-  const totalIn = posted.filter(tx => tx.direction === 'IN').reduce((s, tx) => s + tx.amount, 0);
-  const totalOut = posted.filter(tx => tx.direction === 'OUT').reduce((s, tx) => s + tx.amount, 0);
+  const totalIn = monthTxs
+    .filter(tx => tx.direction === 'IN')
+    .reduce((s, tx) => s + tx.amount, 0);
+  const totalOut = monthTxs
+    .filter(tx => tx.direction === 'OUT')
+    .reduce((s, tx) => s + tx.amount, 0);
   return { month, totalIn, totalOut, net: totalIn - totalOut };
 }
 
@@ -103,12 +113,11 @@ export function calculateMonthlyCashflow(
 
 export function calculateFundStatus(
   fund: Fund,
-  transactions: Transaction[],
+  transactions: BankTransaction[],
   month: string
 ): FundStatus {
   const monthTxs = transactions.filter(
     tx =>
-      tx.status === 'POSTED' &&
       tx.direction === 'OUT' &&
       tx.fundId === fund.id &&
       getTransactionYearMonth(tx) === month
@@ -137,7 +146,7 @@ export function calculateFundStatus(
 
 export function calculateAllFundStatuses(
   funds: Fund[],
-  transactions: Transaction[],
+  transactions: BankTransaction[],
   month: string
 ): FundStatus[] {
   return funds
@@ -159,7 +168,7 @@ export function calculateUnallocated(
 
 export function calculateMonthlySnapshot(
   month: string,
-  transactions: Transaction[],
+  transactions: BankTransaction[],
   funds: Fund[]
 ): MonthlySnapshot {
   const cashflow = calculateMonthlyCashflow(transactions, month);
@@ -186,67 +195,52 @@ export function calculateMonthlySnapshot(
   };
 }
 
-// ─── Average Savings ────────────────────────────────────────────────────────
+// ─── Savings Forecast ───────────────────────────────────────────────────────
 
-export function calculateAverageSavings(
-  snapshots: MonthlySnapshot[]
-): { average: number; months: number } {
-  if (snapshots.length === 0) return { average: 0, months: 0 };
+export function calculateAverageSavings(snapshots: MonthlySnapshot[]): number {
+  if (snapshots.length === 0) return 0;
   const total = snapshots.reduce((s, snap) => s + snap.netSavings, 0);
-  return {
-    average: total / snapshots.length,
-    months: snapshots.length,
-  };
+  return total / snapshots.length;
 }
-
-// ─── Savings Projection ─────────────────────────────────────────────────────
 
 export function calculateSavingsProjection(
   snapshots: MonthlySnapshot[],
-  currentCumulativeSavings: number,
-  horizonMonths: number
+  cumulativeSavings: number,
+  horizonMonths: number = 12
 ): SavingsProjection {
-  const { average, months } = calculateAverageSavings(snapshots);
+  const avg = calculateAverageSavings(snapshots);
+  const months = snapshots.length;
 
   const projections: ProjectionPoint[] = [];
 
   // Historical actual points
-  let cumulative = currentCumulativeSavings;
-  // Build from snapshots
-  const sortedSnapshots = [...snapshots].sort((a, b) => a.month.localeCompare(b.month));
-
-  // Re-derive cumulative from opening balance perspective
-  let historicalCumulative = 0;
-  for (const snap of sortedSnapshots) {
-    historicalCumulative += snap.netSavings;
+  let running = 0;
+  for (const snap of snapshots) {
+    running += snap.netSavings;
     projections.push({
       month: snap.month,
-      projected: historicalCumulative,
+      projected: running,
       isActual: true,
     });
   }
 
-  // Future forecast points
-  const lastMonth = sortedSnapshots.length > 0
-    ? sortedSnapshots[sortedSnapshots.length - 1].month
-    : getCurrentYearMonth();
-
-  let forecastCumulative = currentCumulativeSavings;
+  // Future projected points
+  let currentProjected = cumulativeSavings;
+  const now = new Date();
   for (let i = 1; i <= horizonMonths; i++) {
-    const [y, m] = lastMonth.split('-').map(Number);
-    const futureDate = new Date(y, m - 1 + i, 1);
-    const futureMonth = getCurrentYearMonth(futureDate);
-    forecastCumulative += average;
+    const futureDate = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    const monthStr = getCurrentYearMonth(futureDate);
+    currentProjected += avg;
     projections.push({
-      month: futureMonth,
-      projected: Math.round(forecastCumulative),
+      month: monthStr,
+      projected: Math.round(currentProjected),
       isActual: false,
     });
   }
 
   return {
-    currentCumulativeSavings,
-    averageMonthlySavings: Math.round(average),
+    currentCumulativeSavings: cumulativeSavings,
+    averageMonthlySavings: Math.round(avg),
     monthsOfData: months,
     projections,
   };
@@ -275,7 +269,7 @@ export function calculatePaperTradePnL(
   takeProfit?: number
 ): TradePnLResult {
   const positionSize = margin * leverage;
-  const feeAmount = positionSize * (feePercent / 100) * 2; // entry + exit fee
+  const feeAmount = positionSize * (feePercent / 100) * 2;
 
   let unrealizedPnL: number;
   if (direction === 'LONG') {
@@ -288,7 +282,6 @@ export function calculatePaperTradePnL(
   const roi = margin > 0 ? (unrealizedPnL / margin) * 100 : 0;
   const priceMovePct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
 
-  // Estimated liquidation (simplified: when equity reaches 0)
   let estimatedLiquidationPrice: number | null = null;
   if (leverage > 1 && entryPrice > 0) {
     if (direction === 'LONG') {
@@ -298,7 +291,6 @@ export function calculatePaperTradePnL(
     }
   }
 
-  // Determine status
   let status: TradePnLResult['status'] = 'OPEN';
   if (estimatedLiquidationPrice !== null) {
     if (direction === 'LONG' && currentPrice <= estimatedLiquidationPrice) {
@@ -309,17 +301,14 @@ export function calculatePaperTradePnL(
   }
 
   if (status !== 'LIQUIDATED') {
-    // Check stop loss
     if (stopLoss !== undefined) {
       if (direction === 'LONG' && currentPrice <= stopLoss) status = 'LOSS';
       if (direction === 'SHORT' && currentPrice >= stopLoss) status = 'LOSS';
     }
-    // Check take profit
     if (takeProfit !== undefined && status === 'OPEN') {
       if (direction === 'LONG' && currentPrice >= takeProfit) status = 'PROFIT';
       if (direction === 'SHORT' && currentPrice <= takeProfit) status = 'PROFIT';
     }
-    // General P&L status
     if (status === 'OPEN') {
       if (unrealizedPnL > 0) status = 'PROFIT';
       else if (unrealizedPnL < 0) status = 'LOSS';
@@ -332,9 +321,10 @@ export function calculatePaperTradePnL(
     roi: Math.round(roi * 100) / 100,
     priceMovePct: Math.round(priceMovePct * 100) / 100,
     remainingEquity: Math.round(remainingEquity * 100) / 100,
-    estimatedLiquidationPrice: estimatedLiquidationPrice !== null
-      ? Math.round(estimatedLiquidationPrice * 100) / 100
-      : null,
+    estimatedLiquidationPrice:
+      estimatedLiquidationPrice !== null
+        ? Math.round(estimatedLiquidationPrice * 100) / 100
+        : null,
     status,
   };
 }
@@ -351,77 +341,22 @@ export function estimateLiquidation(
   return Math.round(entryPrice * (1 + 1 / leverage) * 100) / 100;
 }
 
-// ─── Transaction Classification ─────────────────────────────────────────────
+// ─── Merchant Context Detection (Display Hint Only) ──────────────────────────
+// Detects known merchant brands for UI context display only.
+// This does NOT automatically assign categories or funds.
 
-import type { MerchantRule } from '@/types';
-
-const KEYWORD_MAP: Record<string, string> = {
-  'salary': 'Lương',
-  'payroll': 'Lương',
-  'luong': 'Lương',
-  'lương': 'Lương',
-  'restaurant': 'Ăn uống',
-  'coffee': 'Ăn uống',
-  'cafe': 'Ăn uống',
-  'food': 'Ăn uống',
-  'an uong': 'Ăn uống',
-  'grab': 'Di chuyển',
-  'taxi': 'Di chuyển',
-  'be': 'Di chuyển',
-  'xang': 'Di chuyển',
-  'shopping': 'Mua sắm',
-  'mua sam': 'Mua sắm',
-  'shopee': 'Mua sắm',
-  'lazada': 'Mua sắm',
-  'tiki': 'Mua sắm',
-  'electricity': 'Hóa đơn',
-  'internet': 'Hóa đơn',
-  'dien': 'Hóa đơn',
-  'nuoc': 'Hóa đơn',
-  'water': 'Hóa đơn',
-  'transport': 'Di chuyển',
-};
-
-export function classifyTransaction(
-  description: string,
-  counterparty: string | undefined,
-  merchantRules: MerchantRule[]
-): { category: string; fundId?: string } {
-  const text = `${description} ${counterparty || ''}`.toLowerCase();
-
-  // Check merchant rules first
-  for (const rule of merchantRules) {
-    if (text.includes(rule.pattern.toLowerCase())) {
-      return { category: rule.category, fundId: rule.fundId };
-    }
-  }
-
-  // Keyword matching
-  for (const [keyword, category] of Object.entries(KEYWORD_MAP)) {
-    if (text.includes(keyword)) {
-      return { category };
-    }
-  }
-
-  return { category: 'Khác' };
-}
-
-// ─── Deduplication ──────────────────────────────────────────────────────────
-
-export function dedupeEmailEvents(
-  existing: Transaction[],
-  incoming: Transaction[]
-): Transaction[] {
-  const existingIds = new Set(
-    existing
-      .filter(tx => tx.source === 'EMAIL' && tx.sourceMessageId)
-      .map(tx => tx.sourceMessageId)
-  );
-
-  return incoming.filter(tx => {
-    if (!tx.sourceMessageId) return true;
-    if (existingIds.has(tx.sourceMessageId)) return false;
-    existingIds.add(tx.sourceMessageId);
-    return true;
-  });
+export function detectMerchantContext(text: string): string | null {
+  const lower = text.toLowerCase();
+  if (lower.includes('highland')) return 'Highlands Coffee';
+  if (lower.includes('grab')) return 'Grab';
+  if (lower.includes('shopee')) return 'Shopee';
+  if (lower.includes('lazada')) return 'Lazada';
+  if (lower.includes('tiki')) return 'Tiki';
+  if (lower.includes('starbucks')) return 'Starbucks';
+  if (lower.includes('phuc long') || lower.includes('phúc long')) return 'Phúc Long';
+  if (lower.includes('be group') || lower.includes('be car') || lower.includes('be bike')) return 'Be';
+  if (lower.includes('circle k')) return 'Circle K';
+  if (lower.includes('winmart') || lower.includes('vinmart')) return 'WinMart';
+  if (lower.includes('co.opmart') || lower.includes('coopmart')) return 'Co.opmart';
+  return null;
 }

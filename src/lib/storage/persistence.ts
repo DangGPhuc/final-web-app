@@ -1,38 +1,36 @@
 /**
- * Storage persistence service — load/save AppDataSnapshot with versioned schema
+ * Storage persistence service — handles UI preferences and legacy migration
  */
 
 import type { StorageAdapter } from './storage';
-import type { AppDataSnapshot, AppSettings } from '@/types';
 
 export const STORAGE_KEY = 'personal_finance_v3';
 export const SCHEMA_VERSION = 3;
 
-const DEFAULT_SETTINGS: AppSettings = {
-  openingBalance: 0,
-  defaultCurrency: 'VND',
-  trustedSenders: [],
-  autoPostMinConfidence: 0.8,
-};
+export interface LegacyAppDataSnapshot {
+  schemaVersion: number;
+  exportedAt: string;
+  transactions: unknown[];
+  funds: unknown[];
+  monthlySnapshots: unknown[];
+  paperTrades: unknown[];
+}
 
-export function createEmptySnapshot(): AppDataSnapshot {
+export function createEmptySnapshot(): LegacyAppDataSnapshot {
   return {
     schemaVersion: SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
     transactions: [],
     funds: [],
     monthlySnapshots: [],
-    merchantRules: [],
-    emailParserRules: [],
     paperTrades: [],
-    settings: { ...DEFAULT_SETTINGS },
   };
 }
 
 export type LoadResult =
-  | { status: 'OK'; data: AppDataSnapshot }
-  | { status: 'EMPTY'; data: AppDataSnapshot }
-  | { status: 'MIGRATION'; data: AppDataSnapshot; message: string }
+  | { status: 'OK'; data: LegacyAppDataSnapshot }
+  | { status: 'EMPTY'; data: LegacyAppDataSnapshot }
+  | { status: 'MIGRATION'; data: LegacyAppDataSnapshot; message: string }
   | { status: 'ERROR'; error: string };
 
 export function loadSnapshot(adapter: StorageAdapter, key: string = STORAGE_KEY): LoadResult {
@@ -62,7 +60,6 @@ export function loadSnapshot(adapter: StorageAdapter, key: string = STORAGE_KEY)
 
   // Check for old schema (v2 or earlier with wallets/budgets)
   if (obj.wallets || obj.budgets || (obj.schemaVersion && Number(obj.schemaVersion) < 3)) {
-    // Old schema detected — start fresh
     return {
       status: 'MIGRATION',
       data: createEmptySnapshot(),
@@ -70,35 +67,29 @@ export function loadSnapshot(adapter: StorageAdapter, key: string = STORAGE_KEY)
     };
   }
 
-  // Validate v3 schema
-  const snapshot = obj as unknown as Partial<AppDataSnapshot>;
   return {
     status: 'OK',
     data: {
       schemaVersion: SCHEMA_VERSION,
-      exportedAt: typeof snapshot.exportedAt === 'string' ? snapshot.exportedAt : new Date().toISOString(),
-      transactions: Array.isArray(snapshot.transactions) ? snapshot.transactions : [],
-      funds: Array.isArray(snapshot.funds) ? snapshot.funds : [],
-      monthlySnapshots: Array.isArray(snapshot.monthlySnapshots) ? snapshot.monthlySnapshots : [],
-      merchantRules: Array.isArray(snapshot.merchantRules) ? snapshot.merchantRules : [],
-      emailParserRules: Array.isArray(snapshot.emailParserRules) ? snapshot.emailParserRules : [],
-      paperTrades: Array.isArray(snapshot.paperTrades) ? snapshot.paperTrades : [],
-      settings: {
-        openingBalance: typeof snapshot.settings?.openingBalance === 'number' ? snapshot.settings.openingBalance : DEFAULT_SETTINGS.openingBalance,
-        defaultCurrency: typeof snapshot.settings?.defaultCurrency === 'string' ? snapshot.settings.defaultCurrency : DEFAULT_SETTINGS.defaultCurrency,
-        trustedSenders: Array.isArray(snapshot.settings?.trustedSenders) ? snapshot.settings.trustedSenders : DEFAULT_SETTINGS.trustedSenders,
-        autoPostMinConfidence: typeof snapshot.settings?.autoPostMinConfidence === 'number' ? snapshot.settings.autoPostMinConfidence : DEFAULT_SETTINGS.autoPostMinConfidence,
-      },
+      exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
+      transactions: Array.isArray(obj.transactions) ? obj.transactions : [],
+      funds: Array.isArray(obj.funds) ? obj.funds : [],
+      monthlySnapshots: Array.isArray(obj.monthlySnapshots) ? obj.monthlySnapshots : [],
+      paperTrades: Array.isArray(obj.paperTrades) ? obj.paperTrades : [],
     },
   };
 }
 
-export function saveSnapshot(adapter: StorageAdapter, data: AppDataSnapshot, key: string = STORAGE_KEY): { ok: boolean; error?: string } {
+export function saveSnapshot(
+  adapter: StorageAdapter,
+  data: LegacyAppDataSnapshot,
+  key: string = STORAGE_KEY
+): { ok: boolean; error?: string } {
   try {
     const payload = { ...data, schemaVersion: SCHEMA_VERSION, exportedAt: new Date().toISOString() };
     adapter.setItem(key, JSON.stringify(payload));
     return { ok: true };
   } catch {
-    return { ok: false, error: 'Không thể ghi dữ liệu vào bộ nhớ (dung lượng có thể đã đầy)' };
+    return { ok: false, error: 'Không thể ghi dữ liệu vào bộ nhớ' };
   }
 }

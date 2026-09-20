@@ -9,11 +9,18 @@ import { FundsView } from '@/components/funds/FundsView';
 import { ForecastView } from '@/components/forecast/ForecastView';
 import { TradingView } from '@/components/trading/TradingView';
 import { SettingsView } from '@/components/settings/SettingsView';
-import { QuickAddModal } from '@/components/shared/QuickAddModal';
+import { ClassificationModal } from '@/components/shared/ClassificationModal';
 import { Toast } from '@/components/shared/Toast';
 
 function MainContent() {
-  const { activeTab } = useApp();
+  const {
+    activeTab,
+    classifyingTransaction,
+    setClassifyingTransaction,
+    classifyTransaction,
+    categories,
+    funds,
+  } = useApp();
 
   return (
     <div className="min-h-screen bg-[#0f1011] text-[#9f9fa0] flex flex-col antialiased">
@@ -28,15 +35,24 @@ function MainContent() {
         {activeTab === 'settings' && <SettingsView />}
       </main>
 
-      <QuickAddModal />
+      {classifyingTransaction && (
+        <ClassificationModal
+          transaction={classifyingTransaction}
+          categories={categories}
+          funds={funds}
+          onClose={() => setClassifyingTransaction(null)}
+          onClassify={classifyTransaction}
+        />
+      )}
+
       <Toast />
 
       {/* Minimal Cockpit Footer */}
       <footer className="border-t border-[#232427] bg-[#090a0b]/60 py-4 text-xs text-[#6b6b70]">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div>Personal Finance Cockpit • Single-User Local Architecture</div>
+          <div>Personal Finance Cockpit • Single-Owner Local Architecture</div>
           <div className="font-mono text-[11px] text-[#9f9fa0]">
-            LocalStorage Adapter v3 • No Cloud DB • Deterministic Engine
+            PostgreSQL &amp; Prisma • Gmail OAuth • AES-256-GCM
           </div>
         </div>
       </footer>

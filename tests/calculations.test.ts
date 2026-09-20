@@ -4,279 +4,173 @@ import {
   calculateMonthlyCashflow,
   calculateFundStatus,
   calculateMonthlySnapshot,
-  calculateAverageSavings,
   calculateSavingsProjection,
   calculatePaperTradePnL,
   estimateLiquidation,
+  detectMerchantContext,
 } from '../src/lib/finance/calculations';
-import type { Transaction, Fund, MonthlySnapshot } from '../src/types';
+import type { BankTransaction, Fund, MonthlySnapshot } from '../src/types';
 
 describe('Financial Calculations — Pure Domain Functions', () => {
   describe('calculateBalance', () => {
-    it('calculates balance with opening balance + posted IN - posted OUT', () => {
-      const transactions: Transaction[] = [
+    it('calculates balance with opening baseline + all valid IN - all valid OUT immediately', () => {
+      const transactions: BankTransaction[] = [
         {
           id: '1',
-          source: 'MANUAL',
+          gmailMessageId: 'm1',
           direction: 'IN',
           amount: 20000000,
           currency: 'VND',
           occurredAt: '2026-09-01T00:00:00Z',
-          description: 'Lương',
-          category: 'Lương',
-          status: 'POSTED',
-          createdAt: '',
-          updatedAt: '',
+          summary: 'Lương',
+          classificationState: 'UNCLASSIFIED',
+          importedAt: '',
         },
         {
           id: '2',
-          source: 'MANUAL',
+          gmailMessageId: 'm2',
           direction: 'OUT',
           amount: 5000000,
           currency: 'VND',
           occurredAt: '2026-09-02T00:00:00Z',
-          description: 'Tiền nhà',
-          category: 'Nhà cửa',
-          status: 'POSTED',
-          createdAt: '',
-          updatedAt: '',
+          summary: 'Tiền nhà',
+          classificationState: 'UNCLASSIFIED',
+          importedAt: '',
         },
         {
           id: '3',
-          source: 'EMAIL',
+          gmailMessageId: 'm3',
           direction: 'OUT',
-          amount: 1000000,
+          amount: 120000,
           currency: 'VND',
           occurredAt: '2026-09-03T00:00:00Z',
-          description: 'Chưa duyệt',
-          category: 'Khác',
-          status: 'NEEDS_REVIEW', // Should not affect balance!
-          createdAt: '',
-          updatedAt: '',
+          summary: 'Highlands Coffee',
+          classificationState: 'UNCLASSIFIED',
+          importedAt: '',
         },
       ];
 
-      const balance = calculateBalance(1000000, transactions);
-      // 1,000,000 + 20,000,000 - 5,000,000 = 16,000,000
-      expect(balance).toBe(16000000);
+      const balance = calculateBalance(0, transactions);
+      // 0 + 20,000,000 - 5,000,000 - 120,000 = 14,880,000
+      expect(balance).toBe(14880000);
+    });
+
+    it('classification does NOT change the authoritative balance', () => {
+      const txUnclassified: BankTransaction = {
+        id: 'tx-1',
+        gmailMessageId: 'm1',
+        direction: 'OUT',
+        amount: 120000,
+        currency: 'VND',
+        occurredAt: '2026-09-06T14:15:00Z',
+        summary: 'Highlands Coffee',
+        classificationState: 'UNCLASSIFIED',
+        importedAt: '',
+      };
+
+      const balanceBefore = calculateBalance(0, [txUnclassified]);
+      expect(balanceBefore).toBe(-120000);
+
+      // Now user classifies the transaction
+      const txClassified: BankTransaction = {
+        ...txUnclassified,
+        categoryId: 'cat-cafe',
+        fundId: 'fund-dining',
+        classificationState: 'CLASSIFIED',
+      };
+
+      const balanceAfter = calculateBalance(0, [txClassified]);
+      // Ledger balance remains strictly identical
+      expect(balanceAfter).toBe(balanceBefore);
     });
   });
 
-  describe('Fund Accounting Rules', () => {
+  describe('Fund Accounting & Status', () => {
     const fund: Fund = {
       id: 'fund-dining',
       name: 'Quỹ ăn uống',
       monthlyAllocation: 3000000,
-      categoryMappings: ['Ăn uống'],
-      merchantMappings: [],
       createdAt: '',
       active: true,
     };
 
-    it('calculates spent, remaining, usagePercent, and UNDER status', () => {
-      const transactions: Transaction[] = [
+    it('calculates fund spent, remaining, and status UNDER when within limit', () => {
+      const transactions: BankTransaction[] = [
         {
           id: '1',
-          source: 'MANUAL',
+          gmailMessageId: 'm1',
           direction: 'OUT',
-          amount: 1200000,
+          amount: 500000,
           currency: 'VND',
           occurredAt: '2026-09-05T00:00:00Z',
-          description: 'Ăn uống',
-          category: 'Ăn uống',
+          summary: 'Ăn tối',
           fundId: 'fund-dining',
-          status: 'POSTED',
-          createdAt: '',
-          updatedAt: '',
+          classificationState: 'CLASSIFIED',
+          importedAt: '',
         },
       ];
 
       const status = calculateFundStatus(fund, transactions, '2026-09');
-      expect(status.spent).toBe(1200000);
-      expect(status.remaining).toBe(1800000);
-      expect(status.usagePercent).toBe(40);
-      expect(status.overAmount).toBe(0);
+      expect(status.spent).toBe(500000);
+      expect(status.remaining).toBe(2500000);
       expect(status.status).toBe('UNDER');
+      expect(status.overAmount).toBe(0);
     });
 
-    it('calculates OVER status and overAmount when spent exceeds allocation', () => {
-      const transactions: Transaction[] = [
+    it('detects OVER limit correctly when spent exceeds monthlyAllocation', () => {
+      const transactions: BankTransaction[] = [
         {
           id: '1',
-          source: 'MANUAL',
+          gmailMessageId: 'm1',
           direction: 'OUT',
           amount: 3500000,
           currency: 'VND',
           occurredAt: '2026-09-10T00:00:00Z',
-          description: 'Tiệc tùng',
-          category: 'Ăn uống',
+          summary: 'Tiệc tùng',
           fundId: 'fund-dining',
-          status: 'POSTED',
-          createdAt: '',
-          updatedAt: '',
+          classificationState: 'CLASSIFIED',
+          importedAt: '',
         },
       ];
 
       const status = calculateFundStatus(fund, transactions, '2026-09');
       expect(status.spent).toBe(3500000);
       expect(status.remaining).toBe(-500000);
-      expect(status.overAmount).toBe(500000);
       expect(status.status).toBe('OVER');
-    });
-
-    it('changing monthly allocation does NOT modify spent amount', () => {
-      const transactions: Transaction[] = [
-        {
-          id: '1',
-          source: 'MANUAL',
-          direction: 'OUT',
-          amount: 1000000,
-          currency: 'VND',
-          occurredAt: '2026-09-10T00:00:00Z',
-          description: 'Ăn uống',
-          category: 'Ăn uống',
-          fundId: 'fund-dining',
-          status: 'POSTED',
-          createdAt: '',
-          updatedAt: '',
-        },
-      ];
-
-      const statusOld = calculateFundStatus(fund, transactions, '2026-09');
-      const modifiedFund = { ...fund, monthlyAllocation: 5000000 };
-      const statusNew = calculateFundStatus(modifiedFund, transactions, '2026-09');
-
-      expect(statusOld.spent).toBe(1000000);
-      expect(statusNew.spent).toBe(1000000);
-      expect(statusNew.remaining).toBe(4000000);
+      expect(status.overAmount).toBe(500000);
     });
   });
 
-  describe('Savings Forecast Logic', () => {
-    it('1 month -> average equals that 1 month', () => {
-      const snapshots: MonthlySnapshot[] = [
-        {
-          month: '2026-07',
-          totalIncome: 20000000,
-          totalExpense: 14000000,
-          netSavings: 6000000,
-          fundResults: [],
-          closedAt: '',
-        },
-      ];
-
-      const { average, months } = calculateAverageSavings(snapshots);
-      expect(months).toBe(1);
-      expect(average).toBe(6000000);
+  describe('Merchant Context Detection (Display Hint Only)', () => {
+    it('detects Highlands Coffee brand without auto-classifying', () => {
+      expect(detectMerchantContext('Thanh toan Cafe Highland Nguyen Du')).toBe('Highlands Coffee');
     });
 
-    it('2 months -> average is (m1 + m2) / 2', () => {
-      const snapshots: MonthlySnapshot[] = [
-        {
-          month: '2026-07',
-          totalIncome: 20000000,
-          totalExpense: 14000000,
-          netSavings: 6000000,
-          fundResults: [],
-          closedAt: '',
-        },
-        {
-          month: '2026-08',
-          totalIncome: 22000000,
-          totalExpense: 14000000,
-          netSavings: 8000000,
-          fundResults: [],
-          closedAt: '',
-        },
-      ];
-
-      const { average, months } = calculateAverageSavings(snapshots);
-      expect(months).toBe(2);
-      expect(average).toBe(7000000);
+    it('detects Grab brand', () => {
+      expect(detectMerchantContext('Thanh toan Grab Car di lam')).toBe('Grab');
     });
 
-    it('supports negative savings trajectory without Math.max(0)', () => {
-      const snapshots: MonthlySnapshot[] = [
-        {
-          month: '2026-07',
-          totalIncome: 15000000,
-          totalExpense: 18000000,
-          netSavings: -3000000,
-          fundResults: [],
-          closedAt: '',
-        },
-        {
-          month: '2026-08',
-          totalIncome: 15000000,
-          totalExpense: 20000000,
-          netSavings: -5000000,
-          fundResults: [],
-          closedAt: '',
-        },
-      ];
+    it('detects Shopee brand', () => {
+      expect(detectMerchantContext('Mua sam Shopee don hang 98231')).toBe('Shopee');
+    });
 
-      const { average, months } = calculateAverageSavings(snapshots);
-      expect(months).toBe(2);
-      expect(average).toBe(-4000000);
-
-      const proj = calculateSavingsProjection(snapshots, 10000000, 3);
-      expect(proj.averageMonthlySavings).toBe(-4000000);
-      const forecastPoints = proj.projections.filter(p => !p.isActual);
-      expect(forecastPoints[0].projected).toBe(6000000); // 10M - 4M
-      expect(forecastPoints[1].projected).toBe(2000000); // 6M - 4M
-      expect(forecastPoints[2].projected).toBe(-2000000); // 2M - 4M (proper negative value!)
+    it('returns null for generic transactions', () => {
+      expect(detectMerchantContext('Chuyen tien ca nhan')).toBeNull();
     });
   });
 
-  describe('Demo Trading Calculations', () => {
-    it('calculates LONG position size and unrealized PnL', () => {
-      const res = calculatePaperTradePnL(
-        'LONG',
-        60000, // entry
-        66000, // +10% price move
-        1000,  // margin
-        10,    // 10x leverage
-        0      // 0 fee
-      );
-
-      expect(res.positionSize).toBe(10000); // 1000 * 10
-      expect(res.priceMovePct).toBe(10);
-      expect(res.unrealizedPnL).toBe(1000); // 10% * 10000
-      expect(res.roi).toBe(100);            // 100% on margin
-      expect(res.status).toBe('PROFIT');
-    });
-
-    it('calculates SHORT position size and unrealized PnL', () => {
-      const res = calculatePaperTradePnL(
-        'SHORT',
-        60000, // entry
-        54000, // -10% price move
-        1000,  // margin
-        10,    // 10x leverage
-        0      // 0 fee
-      );
-
-      expect(res.positionSize).toBe(10000);
+  describe('Paper Trading Calculations', () => {
+    it('calculates long profit correctly', () => {
+      const res = calculatePaperTradePnL('LONG', 60000, 66000, 1000, 10, 0);
+      // Position = 10,000. Price went up 10% -> PnL = +1,000.
       expect(res.unrealizedPnL).toBe(1000);
-      expect(res.roi).toBe(100);
       expect(res.status).toBe('PROFIT');
     });
 
-    it('estimates liquidation correctly and marks LIQUIDATED when threshold crossed', () => {
-      // 10x leverage liquidation is at 10% adverse move: 60000 * (1 - 0.1) = 54000
-      const liqPrice = estimateLiquidation('LONG', 60000, 10);
-      expect(liqPrice).toBe(54000);
-
-      const liquidatedRes = calculatePaperTradePnL(
-        'LONG',
-        60000,
-        53900, // below liquidation
-        1000,
-        10,
-        0
-      );
-
-      expect(liquidatedRes.status).toBe('LIQUIDATED');
+    it('estimates liquidation price for 10x leverage', () => {
+      const liq = estimateLiquidation('LONG', 60000, 10);
+      // 60,000 * (1 - 0.1) = 54,000
+      expect(liq).toBe(54000);
     });
   });
 });

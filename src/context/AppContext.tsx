@@ -2,17 +2,16 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import type {
-  Transaction,
+  BankTransaction,
   Fund,
   FundStatus,
+  Category,
   MonthlySnapshot,
-  MerchantRule,
   PaperTradeScenario,
-  AppSettings,
   AppTab,
-  EmailConnectionState,
+  GmailAccountInfo,
   ToastNotification,
-  AppDataSnapshot,
+  SyncResultStats,
 } from '@/types';
 import {
   calculateBalance,
@@ -21,171 +20,133 @@ import {
   calculateMonthlySnapshot,
   getCurrentYearMonth,
   generateId,
-  classifyTransaction,
   type MonthlyCashflow,
 } from '@/lib/finance/calculations';
-import { LocalStorageAdapter } from '@/lib/storage/local-storage-adapter';
-import {
-  loadSnapshot,
-  saveSnapshot,
-  createEmptySnapshot,
-  SCHEMA_VERSION,
-} from '@/lib/storage/persistence';
-import {
-  DEMO_FUNDS,
-  DEMO_TRANSACTIONS,
-  DEMO_MONTHLY_SNAPSHOTS,
-  DEMO_MERCHANT_RULES,
-  DEMO_PAPER_TRADES,
-} from '@/lib/mock-data';
+import { DEMO_PAPER_TRADES } from '@/lib/mock-data';
 
 interface AppContextType {
   // State
-  transactions: Transaction[];
+  transactions: BankTransaction[];
   funds: Fund[];
+  categories: Category[];
+  gmailAccounts: GmailAccountInfo[];
   monthlySnapshots: MonthlySnapshot[];
-  merchantRules: MerchantRule[];
   paperTrades: PaperTradeScenario[];
-  settings: AppSettings;
-  emailConnection: EmailConnectionState;
   activeTab: AppTab;
   selectedMonth: string;
-  quickAddOpen: boolean;
   toast: ToastNotification | null;
+  isSyncing: boolean;
+  classifyingTransaction: BankTransaction | null;
 
   // Derived metrics
   balance: number;
   currentMonthCashflow: MonthlyCashflow;
   selectedMonthCashflow: MonthlyCashflow;
   fundStatuses: FundStatus[];
-  needsReviewTransactions: Transaction[];
+  unclassifiedTransactions: BankTransaction[];
 
   // Navigation & UI
   setActiveTab: (tab: AppTab) => void;
   setSelectedMonth: (month: string) => void;
-  setQuickAddOpen: (open: boolean) => void;
+  setClassifyingTransaction: (tx: BankTransaction | null) => void;
   showToast: (text: string, type?: 'success' | 'error' | 'info') => void;
 
-  // Transaction Operations
-  addTransaction: (tx: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => void;
-  editTransaction: (id: string, updates: Partial<Transaction>) => void;
-  deleteTransaction: (id: string) => void;
-  approveTransaction: (id: string) => void;
-  ignoreTransaction: (id: string) => void;
+  // Data Loading & Refresh
+  refreshData: () => Promise<void>;
 
-  // Fund Operations
-  createFund: (fund: Omit<Fund, 'id' | 'createdAt' | 'active'>) => void;
-  editFund: (id: string, updates: Partial<Fund>) => void;
-  deleteFund: (id: string) => void;
+  // Transaction Operations
+  classifyTransaction: (id: string, categoryName: string, fundId?: string) => Promise<void>;
+  deleteTransaction: (id: string) => Promise<void>;
+
+  // Fund Operations (Persistent via PostgreSQL + Prisma)
+  createFund: (name: string, monthlyAllocation: number) => Promise<void>;
+  editFund: (id: string, updates: { name?: string; monthlyAllocation?: number }) => Promise<void>;
+  deleteFund: (id: string) => Promise<void>;
+
+  // Category Operations
+  createCategory: (name: string, direction?: string) => Promise<Category>;
+
+  // Email Sync & OAuth
+  syncEmail: (params?: { accountId?: string; fromDate?: string; toDate?: string }) => Promise<SyncResultStats | null>;
+  disconnectGmail: (accountId: string) => Promise<void>;
 
   // Month Snapshot / Close Operations
   closeMonth: (month: string) => void;
-
-  // Merchant Rules
-  addMerchantRule: (rule: Omit<MerchantRule, 'id' | 'createdAt'>) => void;
-  deleteMerchantRule: (id: string) => void;
 
   // Paper Trading Operations
   savePaperTrade: (trade: Omit<PaperTradeScenario, 'id' | 'createdAt'>) => void;
   deletePaperTrade: (id: string) => void;
 
-  // Settings & Sync
-  updateSettings: (settings: Partial<AppSettings>) => void;
-  syncEmail: (useDemoIfUnconfigured?: boolean) => Promise<void>;
-  seedDemoData: () => void;
-  clearData: () => void;
+  // Data Management
+  clearFinancialData: () => Promise<void>;
+  factoryReset: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const storageAdapter = new LocalStorageAdapter();
-
 export function AppProvider({ children }: { children: React.ReactNode }) {
-  const [isLoaded, setIsLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState<AppTab>('dashboard');
   const [selectedMonth, setSelectedMonth] = useState<string>(() => getCurrentYearMonth());
-  const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [toast, setToast] = useState<ToastNotification | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [classifyingTransaction, setClassifyingTransaction] = useState<BankTransaction | null>(null);
 
   // Core domain data
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [transactions, setTransactions] = useState<BankTransaction[]>([]);
   const [funds, setFunds] = useState<Fund[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [gmailAccounts, setGmailAccounts] = useState<GmailAccountInfo[]>([]);
   const [monthlySnapshots, setMonthlySnapshots] = useState<MonthlySnapshot[]>([]);
-  const [merchantRules, setMerchantRules] = useState<MerchantRule[]>([]);
-  const [paperTrades, setPaperTrades] = useState<PaperTradeScenario[]>([]);
-  const [settings, setSettings] = useState<AppSettings>({
-    openingBalance: 0,
-    defaultCurrency: 'VND',
-    trustedSenders: ['vietcombank@vcb.com.vn', 'alert@techcombank.com.vn'],
-    autoPostMinConfidence: 0.8,
-  });
-
-  // Email connection state
-  const [emailConnection, setEmailConnection] = useState<EmailConnectionState>({
-    provider: 'gmail',
-    connected: false,
-    syncStatus: 'idle',
-  });
+  const [paperTrades, setPaperTrades] = useState<PaperTradeScenario[]>(DEMO_PAPER_TRADES);
 
   const showToast = useCallback((text: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = generateId();
     setToast({ id, text, type });
     setTimeout(() => {
       setToast(prev => (prev?.id === id ? null : prev));
-    }, 3500);
+    }, 4000);
   }, []);
 
-  // Initialize from storage adapter on mount
-  useEffect(() => {
-    const result = loadSnapshot(storageAdapter);
-    if (result.status === 'OK') {
-      setTransactions(result.data.transactions);
-      setFunds(result.data.funds);
-      setMonthlySnapshots(result.data.monthlySnapshots);
-      setMerchantRules(result.data.merchantRules);
-      setPaperTrades(result.data.paperTrades);
-      setSettings(result.data.settings);
-    } else if (result.status === 'MIGRATION') {
-      showToast(result.message, 'info');
+  // Refresh domain data from server
+  const refreshData = useCallback(async () => {
+    try {
+      const [txRes, fundsRes, catRes, accRes] = await Promise.all([
+        fetch('/api/transactions'),
+        fetch('/api/funds'),
+        fetch('/api/categories'),
+        fetch('/api/google/accounts'),
+      ]);
+
+      if (txRes.ok) {
+        const txData = await txRes.json();
+        if (txData.success) setTransactions(txData.transactions);
+      }
+      if (fundsRes.ok) {
+        const fundsData = await fundsRes.json();
+        if (fundsData.success) setFunds(fundsData.funds);
+      }
+      if (catRes.ok) {
+        const catData = await catRes.json();
+        if (catData.success) setCategories(catData.categories);
+      }
+      if (accRes.ok) {
+        const accData = await accRes.json();
+        if (accData.success) setGmailAccounts(accData.accounts);
+      }
+    } catch {
+      // Offline or network error
     }
-    setIsLoaded(true);
+  }, []);
 
-    // Check email status
-    fetch('/api/email/status')
-      .then(res => res.json())
-      .then(data => {
-        setEmailConnection(prev => ({
-          ...prev,
-          connected: data.connected ?? false,
-          email: data.email,
-        }));
-      })
-      .catch(() => {
-        // Network or offline, keep default
-      });
-  }, [showToast]);
-
-  // Persist snapshot whenever domain data changes
+  // Initial load
   useEffect(() => {
-    if (!isLoaded) return;
-    const snapshot: AppDataSnapshot = {
-      schemaVersion: SCHEMA_VERSION,
-      exportedAt: new Date().toISOString(),
-      transactions,
-      funds,
-      monthlySnapshots,
-      merchantRules,
-      emailParserRules: [],
-      paperTrades,
-      settings,
-    };
-    saveSnapshot(storageAdapter, snapshot);
-  }, [isLoaded, transactions, funds, monthlySnapshots, merchantRules, paperTrades, settings]);
+    refreshData();
+  }, [refreshData]);
 
-  // Pure derived calculations
+  // Derived metrics
   const balance = useMemo(() => {
-    return calculateBalance(settings.openingBalance, transactions);
-  }, [settings.openingBalance, transactions]);
+    return calculateBalance(0, transactions);
+  }, [transactions]);
 
   const currentMonthStr = useMemo(() => getCurrentYearMonth(), []);
 
@@ -201,118 +162,210 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return calculateAllFundStatuses(funds, transactions, selectedMonth);
   }, [funds, transactions, selectedMonth]);
 
-  const needsReviewTransactions = useMemo(() => {
-    return transactions.filter(tx => tx.status === 'NEEDS_REVIEW');
+  const unclassifiedTransactions = useMemo(() => {
+    return transactions.filter(t => t.classificationState === 'UNCLASSIFIED');
   }, [transactions]);
 
-  // Transaction Operations
-  const addTransaction = useCallback((txData: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => {
-    const now = new Date().toISOString();
-    // Check auto classification if category is not set or default
-    let assignedCategory = txData.category;
-    let assignedFundId = txData.fundId;
-
-    if (!assignedCategory || assignedCategory === 'Khác') {
-      const classified = classifyTransaction(txData.description, txData.counterparty, merchantRules);
-      assignedCategory = classified.category;
-      if (!assignedFundId && classified.fundId) {
-        assignedFundId = classified.fundId;
-      }
+  // Category Operation
+  const createCategory = useCallback(async (name: string, direction?: string): Promise<Category> => {
+    const res = await fetch('/api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, direction }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to create category');
     }
+    const created: Category = data.category;
+    setCategories(prev => {
+      if (prev.some(c => c.id === created.id || c.name.toLowerCase() === created.name.toLowerCase())) {
+        return prev;
+      }
+      return [...prev, created].sort((a, b) => a.name.localeCompare(b.name));
+    });
+    return created;
+  }, []);
 
-    const newTx: Transaction = {
-      ...txData,
-      id: generateId(),
-      category: assignedCategory,
-      fundId: assignedFundId,
-      createdAt: now,
-      updatedAt: now,
-    };
+  // Transaction Classification
+  const classifyTransaction = useCallback(
+    async (id: string, categoryName: string, fundId?: string) => {
+      try {
+        // Ensure category exists
+        let cat = categories.find(c => c.name.toLowerCase() === categoryName.trim().toLowerCase());
+        if (!cat) {
+          cat = await createCategory(categoryName.trim());
+        }
 
-    setTransactions(prev => [newTx, ...prev]);
-    showToast('Đã ghi nhận giao dịch', 'success');
-  }, [merchantRules, showToast]);
+        const res = await fetch(`/api/transactions/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            categoryId: cat.id,
+            fundId: fundId || null,
+            classificationState: 'CLASSIFIED',
+          }),
+        });
 
-  const editTransaction = useCallback((id: string, updates: Partial<Transaction>) => {
-    setTransactions(prev =>
-      prev.map(tx => {
-        if (tx.id !== id) return tx;
-        return {
-          ...tx,
-          ...updates,
-          updatedAt: new Date().toISOString(),
-        };
-      })
-    );
-    showToast('Đã cập nhật giao dịch', 'success');
-  }, [showToast]);
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Failed to classify transaction');
+        }
 
-  const deleteTransaction = useCallback((id: string) => {
-    setTransactions(prev => prev.filter(tx => tx.id !== id));
-    showToast('Đã xóa giao dịch', 'info');
-  }, [showToast]);
+        setTransactions(prev =>
+          prev.map(tx => (tx.id === id ? { ...data.transaction, category: cat, fund: funds.find(f => f.id === fundId) || null } : tx))
+        );
+        showToast(`Đã phân loại thành công vào "${cat.name}"`, 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi phân loại giao dịch', 'error');
+      }
+    },
+    [categories, createCategory, funds, showToast]
+  );
 
-  const approveTransaction = useCallback((id: string) => {
-    editTransaction(id, { status: 'POSTED' });
-    showToast('Đã duyệt giao dịch', 'success');
-  }, [editTransaction, showToast]);
-
-  const ignoreTransaction = useCallback((id: string) => {
-    editTransaction(id, { status: 'IGNORED' });
-    showToast('Đã bỏ qua giao dịch email', 'info');
-  }, [editTransaction, showToast]);
+  const deleteTransaction = useCallback(
+    async (id: string) => {
+      try {
+        const res = await fetch(`/api/transactions/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          setTransactions(prev => prev.filter(t => t.id !== id));
+          showToast('Đã xóa giao dịch', 'info');
+        }
+      } catch {
+        showToast('Lỗi xóa giao dịch', 'error');
+      }
+    },
+    [showToast]
+  );
 
   // Fund Operations
-  const createFund = useCallback((fundData: Omit<Fund, 'id' | 'createdAt' | 'active'>) => {
-    const newFund: Fund = {
-      ...fundData,
-      id: generateId(),
-      createdAt: new Date().toISOString(),
-      active: true,
-    };
-    setFunds(prev => [...prev, newFund]);
-    showToast(`Đã tạo quỹ "${newFund.name}"`, 'success');
-  }, [showToast]);
+  const createFund = useCallback(
+    async (name: string, monthlyAllocation: number) => {
+      try {
+        const res = await fetch('/api/funds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, monthlyAllocation }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Lỗi tạo quỹ');
+        }
+        setFunds(prev => [...prev, data.fund]);
+        showToast(`Đã tạo quỹ "${data.fund.name}"`, 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi tạo quỹ', 'error');
+        throw err;
+      }
+    },
+    [showToast]
+  );
 
-  const editFund = useCallback((id: string, updates: Partial<Fund>) => {
-    setFunds(prev =>
-      prev.map(f => (f.id === id ? { ...f, ...updates } : f))
-    );
-    showToast('Đã cập nhật quỹ', 'success');
-  }, [showToast]);
+  const editFund = useCallback(
+    async (id: string, updates: { name?: string; monthlyAllocation?: number }) => {
+      try {
+        const res = await fetch(`/api/funds/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updates),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Lỗi cập nhật quỹ');
+        }
+        setFunds(prev => prev.map(f => (f.id === id ? data.fund : f)));
+        showToast('Đã cập nhật quỹ', 'success');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi cập nhật quỹ', 'error');
+      }
+    },
+    [showToast]
+  );
 
-  const deleteFund = useCallback((id: string) => {
-    setFunds(prev => prev.filter(f => f.id !== id));
-    showToast('Đã xóa quỹ', 'info');
-  }, [showToast]);
+  const deleteFund = useCallback(
+    async (id: string) => {
+      try {
+        const res = await fetch(`/api/funds/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          setFunds(prev => prev.filter(f => f.id !== id));
+          showToast('Đã xóa quỹ', 'info');
+        }
+      } catch {
+        showToast('Lỗi xóa quỹ', 'error');
+      }
+    },
+    [showToast]
+  );
 
-  // Close month snapshot
-  const closeMonth = useCallback((month: string) => {
-    const snapshot = calculateMonthlySnapshot(month, transactions, funds);
-    setMonthlySnapshots(prev => {
-      const filtered = prev.filter(s => s.month !== month);
-      return [...filtered, snapshot].sort((a, b) => a.month.localeCompare(b.month));
-    });
-    showToast(`Đã chốt sổ và lưu báo cáo tháng ${month}`, 'success');
-  }, [transactions, funds, showToast]);
+  // Email Sync
+  const syncEmail = useCallback(
+    async (params?: { accountId?: string; fromDate?: string; toDate?: string }) => {
+      setIsSyncing(true);
+      try {
+        const res = await fetch('/api/email/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params || {}),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Lỗi quét email');
+        }
 
-  // Merchant Rules
-  const addMerchantRule = useCallback((ruleData: Omit<MerchantRule, 'id' | 'createdAt'>) => {
-    const newRule: MerchantRule = {
-      ...ruleData,
-      id: generateId(),
-      createdAt: new Date().toISOString(),
-    };
-    setMerchantRules(prev => [...prev, newRule]);
-    showToast(`Đã lưu quy tắc cho từ khóa "${newRule.pattern}"`, 'success');
-  }, [showToast]);
+        const stats: SyncResultStats = data.stats;
+        showToast(
+          `Quét hoàn tất: +${stats.totalNew} biến động mới, ${stats.totalDuplicates} đã tồn tại`,
+          'success'
+        );
+        await refreshData();
+        return stats;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Lỗi quét email';
+        showToast(msg, 'error');
+        return null;
+      } finally {
+        setIsSyncing(false);
+      }
+    },
+    [refreshData, showToast]
+  );
 
-  const deleteMerchantRule = useCallback((id: string) => {
-    setMerchantRules(prev => prev.filter(r => r.id !== id));
-    showToast('Đã xóa quy tắc', 'info');
-  }, [showToast]);
+  // Disconnect Gmail
+  const disconnectGmail = useCallback(
+    async (accountId: string) => {
+      try {
+        const res = await fetch('/api/google/disconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountId }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Lỗi ngắt kết nối Gmail');
+        }
+        setGmailAccounts(prev => prev.filter(a => a.id !== accountId));
+        showToast(data.message || 'Đã ngắt kết nối Gmail', 'info');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Lỗi ngắt kết nối', 'error');
+      }
+    },
+    [showToast]
+  );
 
-  // Paper Trading Operations
+  // Close Month Snapshot
+  const closeMonth = useCallback(
+    (month: string) => {
+      const snapshot = calculateMonthlySnapshot(month, transactions, funds);
+      setMonthlySnapshots(prev => {
+        const filtered = prev.filter(s => s.month !== month);
+        return [...filtered, snapshot].sort((a, b) => a.month.localeCompare(b.month));
+      });
+      showToast(`Đã chốt sổ và lưu báo cáo tháng ${month}`, 'success');
+    },
+    [transactions, funds, showToast]
+  );
+
+  // Paper Trading
   const savePaperTrade = useCallback((tradeData: Omit<PaperTradeScenario, 'id' | 'createdAt'>) => {
     const newTrade: PaperTradeScenario = {
       ...tradeData,
@@ -328,168 +381,117 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     showToast('Đã xóa kịch bản mô phỏng', 'info');
   }, [showToast]);
 
-  // Settings
-  const updateSettings = useCallback((newSettings: Partial<AppSettings>) => {
-    setSettings(prev => ({ ...prev, ...newSettings }));
-    showToast('Đã lưu cài đặt', 'success');
-  }, [showToast]);
-
-  // Email Sync via API
-  const syncEmail = useCallback(async (useDemoIfUnconfigured = true) => {
-    setEmailConnection(prev => ({ ...prev, syncStatus: 'syncing', syncError: undefined }));
+  // Data Management: Clear Financial Data (keeps Gmail connections)
+  const clearFinancialData = useCallback(async () => {
     try {
-      const res = await fetch('/api/email/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          existingTransactions: transactions,
-          merchantRules,
-          trustedSenders: settings.trustedSenders,
-          autoPostMinConfidence: settings.autoPostMinConfidence,
-          useDemoIfUnconfigured,
-        }),
-      });
-
+      const res = await fetch('/api/data/clear-financial', { method: 'POST' });
       const data = await res.json();
       if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Lỗi đồng bộ email');
+        throw new Error(data.error || 'Lỗi xóa dữ liệu tài chính');
       }
-
-      if (data.transactions?.length > 0) {
-        setTransactions(prev => [...data.transactions, ...prev]);
-        showToast(
-          `Đồng bộ hoàn tất: +${data.stats.totalNew} giao dịch mới${
-            data.stats.totalNeedsReview > 0 ? ` (${data.stats.totalNeedsReview} cần duyệt)` : ''
-          }`,
-          'success'
-        );
-      } else {
-        showToast('Không có giao dịch mới từ email', 'info');
-      }
-
-      setEmailConnection(prev => ({
-        ...prev,
-        syncStatus: 'idle',
-        lastSyncAt: data.syncedAt || new Date().toISOString(),
-      }));
+      setTransactions([]);
+      setFunds([]);
+      setCategories([]);
+      setMonthlySnapshots([]);
+      showToast(data.message || 'Đã xóa dữ liệu tài chính', 'info');
+      await refreshData();
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Lỗi đồng bộ email';
-      setEmailConnection(prev => ({
-        ...prev,
-        syncStatus: 'error',
-        syncError: errorMsg,
-      }));
-      showToast(errorMsg, 'error');
+      showToast(err instanceof Error ? err.message : 'Lỗi xóa dữ liệu', 'error');
     }
-  }, [transactions, merchantRules, settings, showToast]);
+  }, [refreshData, showToast]);
 
-  // Seed Demo Data for development / evaluation
-  const seedDemoData = useCallback(() => {
-    setFunds(DEMO_FUNDS);
-    setTransactions(DEMO_TRANSACTIONS);
-    setMonthlySnapshots(DEMO_MONTHLY_SNAPSHOTS);
-    setMerchantRules(DEMO_MERCHANT_RULES);
-    setPaperTrades(DEMO_PAPER_TRADES);
-    setSettings({
-      openingBalance: 5000000,
-      defaultCurrency: 'VND',
-      trustedSenders: ['vietcombank@vcb.com.vn', 'alert@techcombank.com.vn'],
-      autoPostMinConfidence: 0.8,
-    });
-    showToast('Đã nạp dữ liệu mẫu thành công', 'success');
-  }, [showToast]);
-
-  // Clear data
-  const clearData = useCallback(() => {
-    const empty = createEmptySnapshot();
-    setTransactions(empty.transactions);
-    setFunds(empty.funds);
-    setMonthlySnapshots(empty.monthlySnapshots);
-    setMerchantRules(empty.merchantRules);
-    setPaperTrades(empty.paperTrades);
-    setSettings(empty.settings);
-    storageAdapter.removeItem('personal_finance_v3');
-    showToast('Đã xóa toàn bộ dữ liệu cục bộ', 'info');
-  }, [showToast]);
+  // Data Management: Factory Reset (wipes everything)
+  const factoryReset = useCallback(async () => {
+    try {
+      const res = await fetch('/api/data/factory-reset', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Lỗi khôi phục hệ thống');
+      }
+      setTransactions([]);
+      setFunds([]);
+      setCategories([]);
+      setGmailAccounts([]);
+      setMonthlySnapshots([]);
+      showToast(data.message || 'Đã khôi phục cài đặt gốc', 'info');
+      await refreshData();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Lỗi khôi phục hệ thống', 'error');
+    }
+  }, [refreshData, showToast]);
 
   const value = useMemo(
     () => ({
       transactions,
       funds,
+      categories,
+      gmailAccounts,
       monthlySnapshots,
-      merchantRules,
       paperTrades,
-      settings,
-      emailConnection,
       activeTab,
       selectedMonth,
-      quickAddOpen,
       toast,
+      isSyncing,
+      classifyingTransaction,
       balance,
       currentMonthCashflow,
       selectedMonthCashflow,
       fundStatuses,
-      needsReviewTransactions,
+      unclassifiedTransactions,
       setActiveTab,
       setSelectedMonth,
-      setQuickAddOpen,
+      setClassifyingTransaction,
       showToast,
-      addTransaction,
-      editTransaction,
+      refreshData,
+      classifyTransaction,
       deleteTransaction,
-      approveTransaction,
-      ignoreTransaction,
       createFund,
       editFund,
       deleteFund,
+      createCategory,
+      syncEmail,
+      disconnectGmail,
       closeMonth,
-      addMerchantRule,
-      deleteMerchantRule,
       savePaperTrade,
       deletePaperTrade,
-      updateSettings,
-      syncEmail,
-      seedDemoData,
-      clearData,
+      clearFinancialData,
+      factoryReset,
     }),
     [
       transactions,
       funds,
+      categories,
+      gmailAccounts,
       monthlySnapshots,
-      merchantRules,
       paperTrades,
-      settings,
-      emailConnection,
       activeTab,
       selectedMonth,
-      quickAddOpen,
       toast,
+      isSyncing,
+      classifyingTransaction,
       balance,
       currentMonthCashflow,
       selectedMonthCashflow,
       fundStatuses,
-      needsReviewTransactions,
+      unclassifiedTransactions,
       setActiveTab,
       setSelectedMonth,
-      setQuickAddOpen,
+      setClassifyingTransaction,
       showToast,
-      addTransaction,
-      editTransaction,
+      refreshData,
+      classifyTransaction,
       deleteTransaction,
-      approveTransaction,
-      ignoreTransaction,
       createFund,
       editFund,
       deleteFund,
+      createCategory,
+      syncEmail,
+      disconnectGmail,
       closeMonth,
-      addMerchantRule,
-      deleteMerchantRule,
       savePaperTrade,
       deletePaperTrade,
-      updateSettings,
-      syncEmail,
-      seedDemoData,
-      clearData,
+      clearFinancialData,
+      factoryReset,
     ]
   );
 

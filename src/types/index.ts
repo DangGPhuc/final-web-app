@@ -1,43 +1,54 @@
 // ─── Personal Finance Cockpit — Domain Types ────────────────────────────────
 
-// ─── Transaction ─────────────────────────────────────────────────────────────
-
-export type TransactionSource = 'EMAIL' | 'MANUAL';
 export type TransactionDirection = 'IN' | 'OUT';
-export type TransactionStatus = 'POSTED' | 'NEEDS_REVIEW' | 'IGNORED';
+export type ClassificationState = 'UNCLASSIFIED' | 'CLASSIFIED';
 
-export interface Transaction {
+// ─── Bank Transaction Entity ──────────────────────────────────────────────────
+
+export interface BankTransaction {
   id: string;
-  source: TransactionSource;
-  sourceMessageId?: string;
-  sourceProvider?: string;
-  bank?: string;
-  accountHint?: string;
+  gmailConnectionId?: string | null;
+  sourceEmail?: string | null;
+  gmailMessageId: string;
+  gmailThreadId?: string | null;
+  bankCode?: string | null;
+  bankName?: string | null;
+  accountHint?: string | null;
   direction: TransactionDirection;
   amount: number;
   currency: string;
   occurredAt: string; // ISO string
-  counterparty?: string;
-  description: string;
-  category: string;
-  fundId?: string;
-  status: TransactionStatus;
-  parserConfidence?: number;
-  rawSubject?: string;
-  createdAt: string;
-  updatedAt: string;
+  counterparty?: string | null;
+  merchantLabel?: string | null; // Display hint only, does NOT automatically classify
+  summary: string;
+  categoryId?: string | null;
+  fundId?: string | null;
+  classificationState: ClassificationState;
+  importedAt: string;
+  category?: Category | null;
+  fund?: Fund | null;
 }
 
-// ─── Fund ────────────────────────────────────────────────────────────────────
+// Alias for convenience across UI components
+export type Transaction = BankTransaction;
+
+// ─── User-Defined Category Entity ─────────────────────────────────────────────
+
+export interface Category {
+  id: string;
+  name: string;
+  direction?: string | null; // IN | OUT | BOTH
+  createdAt: string;
+}
+
+// ─── Fund Entity (Clean budget allocation model) ──────────────────────────────
 
 export interface Fund {
   id: string;
   name: string;
   monthlyAllocation: number;
-  categoryMappings: string[];
-  merchantMappings: string[];
-  createdAt: string;
   active: boolean;
+  createdAt: string;
 }
 
 export interface FundStatus {
@@ -54,6 +65,7 @@ export interface FundStatus {
 // ─── Monthly Snapshot ────────────────────────────────────────────────────────
 
 export interface MonthlySnapshot {
+  id?: string;
   month: string; // YYYY-MM
   totalIncome: number;
   totalExpense: number;
@@ -70,51 +82,26 @@ export interface FundSnapshotEntry {
   remaining: number;
 }
 
-// ─── Email Integration ──────────────────────────────────────────────────────
+// ─── Gmail Connection & Sync ──────────────────────────────────────────────────
 
-export interface EmailMessage {
+export interface GmailAccountInfo {
   id: string;
-  from: string;
-  subject: string;
-  snippet: string;
-  body?: string;
-  receivedAt: string;
-  labels?: string[];
+  googleSub: string;
+  email: string;
+  displayName?: string | null;
+  avatarUrl?: string | null;
+  connectedAt: string;
+  lastSyncAt?: string | null;
+  connectionStatus: 'connected' | 'error' | 'syncing';
 }
 
-export interface EmailConnectionState {
-  provider: 'gmail' | 'none';
-  connected: boolean;
-  email?: string;
-  lastSyncAt?: string;
-  syncStatus: 'idle' | 'syncing' | 'error';
-  syncError?: string;
-}
-
-export interface EmailSyncState {
-  lastSyncAt?: string;
-  totalSynced: number;
-  totalSkipped: number;
-  totalNeedsReview: number;
-}
-
-export interface EmailParserRule {
-  id: string;
-  name: string;
-  senderPattern: string;
-  subjectPattern?: string;
-  bankCode?: string;
-  active: boolean;
-}
-
-// ─── Classification ─────────────────────────────────────────────────────────
-
-export interface MerchantRule {
-  id: string;
-  pattern: string;
-  category: string;
-  fundId?: string;
-  createdAt: string;
+export interface SyncResultStats {
+  totalFetched: number;
+  totalNew: number;
+  totalDuplicates: number;
+  totalFailed: number;
+  accountEmail?: string;
+  dateRange?: string;
 }
 
 // ─── Savings Forecast ───────────────────────────────────────────────────────
@@ -153,7 +140,7 @@ export interface PaperTradeScenario {
 }
 
 export interface MarketCandle {
-  time: number;    // unix timestamp
+  time: number; // unix timestamp
   open: number;
   high: number;
   low: number;
@@ -161,52 +148,9 @@ export interface MarketCandle {
   volume?: number;
 }
 
-// ─── Settings ───────────────────────────────────────────────────────────────
-
-export interface AppSettings {
-  openingBalance: number;
-  defaultCurrency: string;
-  trustedSenders: string[];
-  autoPostMinConfidence: number;
-}
-
-// ─── App State ──────────────────────────────────────────────────────────────
-
-export interface AppDataSnapshot {
-  schemaVersion: number;
-  exportedAt: string;
-  transactions: Transaction[];
-  funds: Fund[];
-  monthlySnapshots: MonthlySnapshot[];
-  merchantRules: MerchantRule[];
-  emailParserRules: EmailParserRule[];
-  paperTrades: PaperTradeScenario[];
-  settings: AppSettings;
-}
-
 // ─── Navigation ─────────────────────────────────────────────────────────────
 
 export type AppTab = 'dashboard' | 'cashflow' | 'funds' | 'forecast' | 'trading' | 'settings';
-
-// ─── Default Categories ─────────────────────────────────────────────────────
-
-export const DEFAULT_CATEGORIES = [
-  'Lương',
-  'Thưởng',
-  'Thu nhập khác',
-  'Ăn uống',
-  'Di chuyển',
-  'Mua sắm',
-  'Hóa đơn',
-  'Nhà cửa',
-  'Giải trí',
-  'Sức khỏe',
-  'Giáo dục',
-  'Đầu tư',
-  'Khác',
-] as const;
-
-export type CategoryName = (typeof DEFAULT_CATEGORIES)[number];
 
 // ─── Toast ──────────────────────────────────────────────────────────────────
 

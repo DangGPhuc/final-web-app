@@ -8,20 +8,15 @@ import {
   getTransactionYearMonth,
   formatMonthLabel,
 } from '@/lib/finance/calculations';
-import { DEFAULT_CATEGORIES } from '@/lib/constants';
-import type { Transaction } from '@/types';
+import type { BankTransaction } from '@/types';
 import {
   ArrowDownLeft,
   ArrowUpRight,
   Search,
-  Filter,
-  Trash2,
-  Edit2,
-  CheckCircle2,
-  XCircle,
-  Mail,
   Calendar,
-  Layers,
+  Tag,
+  Trash2,
+  Sparkles,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -38,14 +33,12 @@ export function CashflowView() {
   const {
     transactions,
     funds,
+    categories,
     selectedMonth,
     setSelectedMonth,
     selectedMonthCashflow,
-    editTransaction,
+    setClassifyingTransaction,
     deleteTransaction,
-    approveTransaction,
-    ignoreTransaction,
-    addMerchantRule,
   } = useApp();
 
   // Filters
@@ -53,13 +46,6 @@ export function CashflowView() {
   const [directionFilter, setDirectionFilter] = useState<'ALL' | 'IN' | 'OUT'>('ALL');
   const [fundFilter, setFundFilter] = useState<string>('ALL');
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
-  const [statusFilter, setStatusFilter] = useState<string>('ALL');
-
-  // Edit modal state
-  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
-  const [editCategory, setEditCategory] = useState('');
-  const [editFundId, setEditFundId] = useState<string | undefined>(undefined);
-  const [rememberMapping, setRememberMapping] = useState(false);
 
   // Available months from transactions
   const availableMonths = useMemo(() => {
@@ -80,20 +66,20 @@ export function CashflowView() {
 
       if (directionFilter !== 'ALL' && tx.direction !== directionFilter) return false;
       if (fundFilter !== 'ALL' && tx.fundId !== fundFilter) return false;
-      if (categoryFilter !== 'ALL' && tx.category !== categoryFilter) return false;
-      if (statusFilter !== 'ALL' && tx.status !== statusFilter) return false;
+      if (categoryFilter !== 'ALL' && tx.category?.name !== categoryFilter) return false;
 
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const descMatch = tx.description.toLowerCase().includes(q);
-        const cpMatch = tx.counterparty?.toLowerCase().includes(q);
-        const bankMatch = tx.bank?.toLowerCase().includes(q);
-        if (!descMatch && !cpMatch && !bankMatch) return false;
+        const descMatch = (tx.summary || '').toLowerCase().includes(q);
+        const cpMatch = (tx.counterparty || '').toLowerCase().includes(q);
+        const bankMatch = (tx.bankName || tx.bankCode || '').toLowerCase().includes(q);
+        const hintMatch = (tx.merchantLabel || '').toLowerCase().includes(q);
+        if (!descMatch && !cpMatch && !bankMatch && !hintMatch) return false;
       }
 
       return true;
     });
-  }, [transactions, selectedMonth, directionFilter, fundFilter, categoryFilter, statusFilter, searchQuery]);
+  }, [transactions, selectedMonth, directionFilter, fundFilter, categoryFilter, searchQuery]);
 
   // Daily cashflow chart data for selected month
   const chartData = useMemo(() => {
@@ -106,7 +92,7 @@ export function CashflowView() {
     }
 
     const monthTxs = transactions.filter(
-      tx => tx.status === 'POSTED' && getTransactionYearMonth(tx) === selectedMonth
+      tx => getTransactionYearMonth(tx) === selectedMonth
     );
 
     for (const tx of monthTxs) {
@@ -125,94 +111,71 @@ export function CashflowView() {
     );
   }, [transactions, selectedMonth]);
 
-  const handleOpenEdit = (tx: Transaction) => {
-    setEditingTx(tx);
-    setEditCategory(tx.category || 'Khác');
-    setEditFundId(tx.fundId);
-    setRememberMapping(false);
-  };
-
-  const handleSaveEdit = () => {
-    if (!editingTx) return;
-
-    editTransaction(editingTx.id, {
-      category: editCategory,
-      fundId: editFundId || undefined,
-    });
-
-    if (rememberMapping && editingTx.counterparty) {
-      addMerchantRule({
-        pattern: editingTx.counterparty,
-        category: editCategory,
-        fundId: editFundId,
-      });
-    }
-
-    setEditingTx(null);
-  };
-
   return (
     <div className="space-y-6">
-      {/* Header & Month Selector */}
+      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="font-display text-2xl sm:text-3xl text-[#f5f5f7]">Dòng tiền</h1>
+          <h1 className="font-display text-2xl sm:text-3xl text-[#f5f5f7]">Dòng tiền chi tiết</h1>
           <p className="text-xs text-[#9f9fa0] mt-1">
-            Tổng hợp luồng thu chi và quản lý chi tiết toàn bộ giao dịch
+            Toàn bộ biến động tài chính theo thời gian thực — Không qua hàng đợi duyệt
           </p>
         </div>
 
+        {/* Month Selector */}
         <div className="flex items-center gap-2">
-          <Calendar className="w-4 h-4 text-[#9f9fa0]" />
-          <select
-            value={selectedMonth}
-            onChange={e => setSelectedMonth(e.target.value)}
-            className="cockpit-input text-xs font-mono py-1.5 px-3"
-          >
-            {availableMonths.map(m => (
-              <option key={m} value={m}>
-                {formatMonthLabel(m)}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-1.5 bg-[#17181a] px-3 py-1.5 rounded-lg border border-[#232427]">
+            <Calendar className="w-3.5 h-3.5 text-[#9f9fa0]" />
+            <select
+              value={selectedMonth}
+              onChange={e => setSelectedMonth(e.target.value)}
+              className="bg-transparent text-xs text-[#f5f5f7] font-mono focus:outline-none"
+            >
+              {availableMonths.map(m => (
+                <option key={m} value={m} className="bg-[#17181a]">
+                  {formatMonthLabel(m)}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
-      {/* Cashflow Summary Cards */}
+      {/* Month Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="cockpit-card p-5">
-          <div className="flex items-center justify-between text-xs text-[#9f9fa0] mb-2">
-            <span className="font-mono-data">TỔNG TIỀN VÀO (IN)</span>
-            <ArrowDownLeft className="w-4 h-4 text-[#10b981]" />
+          <div className="flex items-center justify-between text-xs text-[#9f9fa0] mb-1">
+            <span className="font-mono-data">TỔNG THU ({selectedMonth})</span>
+            <ArrowDownLeft className="w-3.5 h-3.5 text-[#10b981]" />
           </div>
-          <div className="text-2xl font-light text-[#10b981]">
+          <div className="text-2xl font-light text-[#10b981] font-mono">
             +{formatCurrency(selectedMonthCashflow.totalIn)}
           </div>
         </div>
 
         <div className="cockpit-card p-5">
-          <div className="flex items-center justify-between text-xs text-[#9f9fa0] mb-2">
-            <span className="font-mono-data">TỔNG TIỀN RA (OUT)</span>
-            <ArrowUpRight className="w-4 h-4 text-[#f43f5e]" />
+          <div className="flex items-center justify-between text-xs text-[#9f9fa0] mb-1">
+            <span className="font-mono-data">TỔNG CHI ({selectedMonth})</span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-[#f43f5e]" />
           </div>
-          <div className="text-2xl font-light text-[#f43f5e]">
+          <div className="text-2xl font-light text-[#f43f5e] font-mono">
             -{formatCurrency(selectedMonthCashflow.totalOut)}
           </div>
         </div>
 
         <div className="cockpit-card p-5">
-          <div className="flex items-center justify-between text-xs text-[#9f9fa0] mb-2">
+          <div className="flex items-center justify-between text-xs text-[#9f9fa0] mb-1">
             <span className="font-mono-data">DÒNG TIỀN THUẦN (NET)</span>
             <span
               className={`text-xs font-mono ${
                 selectedMonthCashflow.net >= 0 ? 'text-[#10b981]' : 'text-[#f43f5e]'
               }`}
             >
-              {selectedMonthCashflow.net >= 0 ? 'THẶNG DƯ' : 'THÂM HỤT'}
+              {selectedMonthCashflow.net >= 0 ? 'DƯ' : 'ÂM'}
             </span>
           </div>
           <div
-            className={`text-2xl font-light ${
+            className={`text-2xl font-light font-mono ${
               selectedMonthCashflow.net >= 0 ? 'text-[#f5f5f7]' : 'text-[#f43f5e]'
             }`}
           >
@@ -222,41 +185,35 @@ export function CashflowView() {
         </div>
       </div>
 
-      {/* Main Cashflow Time Chart (Recharts) */}
-      <div className="cockpit-card p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-sm font-medium text-[#f5f5f7]">
-              Biểu đồ dòng tiền theo ngày ({formatMonthLabel(selectedMonth)})
-            </h2>
-            <p className="text-[11px] text-[#9f9fa0]">
-              Theo dõi nhịp độ tiền vào và tiền ra trong suốt tháng
-            </p>
-          </div>
-        </div>
-
-        <div className="h-64 w-full">
+      {/* Cashflow Chart */}
+      <div className="cockpit-card p-6 space-y-4">
+        <h2 className="text-sm font-medium text-[#f5f5f7]">Biểu đồ dòng tiền hàng ngày</h2>
+        <div className="h-60 w-full">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+            <BarChart data={chartData} margin={{ top: 10, right: 10, left: 10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#232427" vertical={false} />
-              <XAxis dataKey="day" stroke="#9f9fa0" fontSize={11} tickLine={false} />
+              <XAxis dataKey="day" stroke="#6b6b70" tick={{ fill: '#9f9fa0', fontSize: 11 }} />
               <YAxis
-                stroke="#9f9fa0"
-                fontSize={11}
-                tickLine={false}
-                tickFormatter={val => (val >= 1000000 ? `${val / 1000000}M` : `${val / 1000}k`)}
+                stroke="#6b6b70"
+                tick={{ fill: '#9f9fa0', fontSize: 11 }}
+                tickFormatter={val => `${(val / 1000000).toFixed(1)}M`}
               />
               <Tooltip
                 contentStyle={{
                   backgroundColor: '#17181a',
-                  border: '1px solid #34363a',
-                  borderRadius: '10px',
+                  borderColor: '#34363a',
+                  borderRadius: '12px',
                   color: '#f5f5f7',
                   fontSize: '12px',
                 }}
-                formatter={(val: any) => formatCurrency(Number(val) || 0)}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                formatter={(val: any) => [formatCurrency(Number(val) || 0), '']}
+                labelFormatter={lbl => `Ngày ${lbl}/${selectedMonth.split('-')[1]}`}
               />
-              <Legend wrapperStyle={{ fontSize: '11px', color: '#9f9fa0' }} />
+              <Legend
+                wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }}
+                formatter={val => <span className="text-[#9f9fa0]">{val}</span>}
+              />
               <Bar dataKey="Tiền_Vào" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={20} />
               <Bar dataKey="Tiền_Ra" fill="#f43f5e" radius={[4, 4, 0, 0]} maxBarSize={20} />
             </BarChart>
@@ -264,240 +221,174 @@ export function CashflowView() {
         </div>
       </div>
 
-      {/* Transaction Table & Filters */}
-      <div className="cockpit-card p-6">
-        {/* Filters Bar */}
-        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between mb-6 pb-4 border-b border-[#232427]">
-          {/* Search Input */}
-          <div className="relative flex-1">
+      {/* Filter Bar */}
+      <div className="cockpit-card p-4 space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+          {/* Search */}
+          <div className="relative">
             <Search className="w-3.5 h-3.5 text-[#9f9fa0] absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Tìm kiếm nội dung, đối tác, ngân hàng..."
+              placeholder="Tìm kiếm đối tác, nội dung, ngân hàng..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              className="cockpit-input w-full pl-9 text-xs"
+              className="cockpit-input w-full pl-8 text-xs"
             />
           </div>
 
           {/* Direction Filter */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <select
-              value={directionFilter}
-              onChange={e => setDirectionFilter(e.target.value as any)}
-              className="cockpit-input text-xs py-1.5"
-            >
-              <option value="ALL">Tất cả luồng</option>
-              <option value="IN">Tiền vào (+)</option>
-              <option value="OUT">Tiền ra (-)</option>
-            </select>
+          <select
+            value={directionFilter}
+            onChange={e => setDirectionFilter(e.target.value as 'ALL' | 'IN' | 'OUT')}
+            className="cockpit-input text-xs"
+          >
+            <option value="ALL">Tất cả hướng tiền</option>
+            <option value="IN">Tiền vào (Thu nhập)</option>
+            <option value="OUT">Tiền ra (Chi tiêu)</option>
+          </select>
 
-            {/* Fund Filter */}
-            <select
-              value={fundFilter}
-              onChange={e => setFundFilter(e.target.value)}
-              className="cockpit-input text-xs py-1.5"
-            >
-              <option value="ALL">Tất cả quỹ</option>
-              {funds.map(f => (
-                <option key={f.id} value={f.id}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
+          {/* Category Filter (User created only) */}
+          <select
+            value={categoryFilter}
+            onChange={e => setCategoryFilter(e.target.value)}
+            className="cockpit-input text-xs"
+          >
+            <option value="ALL">Tất cả danh mục</option>
+            {categories.map(c => (
+              <option key={c.id} value={c.name}>
+                {c.name}
+              </option>
+            ))}
+          </select>
 
-            {/* Category Filter */}
-            <select
-              value={categoryFilter}
-              onChange={e => setCategoryFilter(e.target.value)}
-              className="cockpit-input text-xs py-1.5"
-            >
-              <option value="ALL">Tất cả danh mục</option>
-              {DEFAULT_CATEGORIES.map(c => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-
-            {/* Status Filter */}
-            <select
-              value={statusFilter}
-              onChange={e => setStatusFilter(e.target.value)}
-              className="cockpit-input text-xs py-1.5 font-mono"
-            >
-              <option value="ALL">Tất cả trạng thái</option>
-              <option value="POSTED">Đã ghi sổ</option>
-              <option value="NEEDS_REVIEW">Cần xem lại</option>
-              <option value="IGNORED">Đã bỏ qua</option>
-            </select>
-          </div>
+          {/* Fund Filter (User created only) */}
+          <select
+            value={fundFilter}
+            onChange={e => setFundFilter(e.target.value)}
+            className="cockpit-input text-xs"
+          >
+            <option value="ALL">Tất cả quỹ</option>
+            {funds.map(f => (
+              <option key={f.id} value={f.id}>
+                {f.name}
+              </option>
+            ))}
+          </select>
         </div>
+      </div>
 
-        {/* Transaction Table */}
+      {/* Cashflow Table */}
+      <div className="cockpit-card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
+          <table className="w-full text-left text-xs border-collapse">
             <thead>
-              <tr className="border-b border-[#232427] text-[#9f9fa0] font-mono-data">
-                <th className="pb-3 pr-4">THỜI GIAN</th>
-                <th className="pb-3 pr-4">HÌNH THỨC</th>
-                <th className="pb-3 pr-4">NỘI DUNG / ĐỐI TÁC</th>
-                <th className="pb-3 pr-4">DANH MỤC</th>
-                <th className="pb-3 pr-4">QUỸ</th>
-                <th className="pb-3 pr-4 text-right">SỐ TIỀN</th>
-                <th className="pb-3 pr-4 text-center">NGUỒN</th>
-                <th className="pb-3 pr-4 text-center">TRẠNG THÁI</th>
-                <th className="pb-3 text-right">THAO TÁC</th>
+              <tr className="border-b border-[#232427] bg-[#090a0b]/60 text-[#9f9fa0] font-mono-data text-[10px]">
+                <th className="py-3 px-4">THỜI GIAN</th>
+                <th className="py-3 px-4">CHIỀU</th>
+                <th className="py-3 px-4">NGÂN HÀNG / TK</th>
+                <th className="py-3 px-4">ĐỐI TÁC / NỘI DUNG</th>
+                <th className="py-3 px-4">DANH MỤC</th>
+                <th className="py-3 px-4">QUỸ</th>
+                <th className="py-3 px-4 text-right">SỐ TIỀN</th>
+                <th className="py-3 px-4">NGUỒN EMAIL</th>
+                <th className="py-3 px-4 text-center">THAO TÁC</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#232427]">
               {filteredTransactions.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-8 text-center text-[#9f9fa0]">
-                    Không tìm thấy giao dịch nào phù hợp với bộ lọc trong tháng {selectedMonth}.
+                  <td colSpan={9} className="py-12 text-center text-[#9f9fa0] text-xs">
+                    Không tìm thấy giao dịch nào phù hợp với bộ lọc.
                   </td>
                 </tr>
               ) : (
                 filteredTransactions.map(tx => {
                   const isIn = tx.direction === 'IN';
-                  const mappedFund = funds.find(f => f.id === tx.fundId);
-                  const isNeedsReview = tx.status === 'NEEDS_REVIEW';
+                  const isClassified = tx.classificationState === 'CLASSIFIED';
 
                   return (
-                    <tr
-                      key={tx.id}
-                      className={`hover:bg-[#1f2022]/40 transition-colors ${
-                        isNeedsReview ? 'bg-[#f59e0b]/5' : ''
-                      }`}
-                    >
-                      {/* Date / Time */}
-                      <td className="py-3 pr-4 text-[#9f9fa0] font-mono whitespace-nowrap">
-                        {formatDate(tx.occurredAt, 'short')}
+                    <tr key={tx.id} className="hover:bg-[#1f2022]/40 transition-colors">
+                      <td className="py-3 px-4 text-[#9f9fa0] whitespace-nowrap">
+                        {formatDate(tx.occurredAt, 'full')}
                       </td>
-
-                      {/* Direction Type */}
-                      <td className="py-3 pr-4 whitespace-nowrap">
+                      <td className="py-3 px-4">
                         <span
-                          className={`inline-flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded ${
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-medium ${
                             isIn
-                              ? 'bg-[#10b981]/10 text-[#10b981]'
-                              : 'bg-[#f43f5e]/10 text-[#f43f5e]'
+                              ? 'bg-[#10b981]/15 text-[#10b981]'
+                              : 'bg-[#f43f5e]/15 text-[#f43f5e]'
                           }`}
                         >
-                          {isIn ? '+' : '-'} {isIn ? 'THU' : 'CHI'}
+                          {isIn ? 'THU' : 'CHI'}
                         </span>
                       </td>
-
-                      {/* Description & Counterparty */}
-                      <td className="py-3 pr-4">
-                        <div className="font-medium text-[#f5f5f7] line-clamp-1 max-w-[240px]">
-                          {tx.description}
+                      <td className="py-3 px-4 font-mono whitespace-nowrap">
+                        <span className="text-[#f5f5f7]">{tx.bankName || tx.bankCode || 'Ngân hàng'}</span>
+                        {tx.accountHint && (
+                          <span className="text-[#6b6b70] ml-1.5">{tx.accountHint}</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 max-w-xs">
+                        <div className="text-[#f5f5f7] font-medium truncate">
+                          {tx.summary || tx.counterparty}
                         </div>
-                        {tx.counterparty && (
-                          <div className="text-[11px] text-[#9f9fa0] line-clamp-1">
-                            {tx.counterparty}
+                        {tx.merchantLabel && (
+                          <div className="flex items-center gap-1 text-[10px] text-[#00b3dd] mt-0.5">
+                            <Sparkles className="w-2.5 h-2.5" />
+                            <span>{tx.merchantLabel}</span>
                           </div>
                         )}
                       </td>
-
-                      {/* Category */}
-                      <td className="py-3 pr-4 text-[#9f9fa0] whitespace-nowrap">
-                        {tx.category || '—'}
-                      </td>
-
-                      {/* Mapped Fund */}
-                      <td className="py-3 pr-4 whitespace-nowrap">
-                        {mappedFund ? (
-                          <span className="text-[11px] px-2 py-0.5 rounded bg-[#2e2e2e] text-[#f5f5f7]">
-                            {mappedFund.name}
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        {tx.category ? (
+                          <span className="px-2 py-0.5 rounded bg-[#2e2e2e] text-[#f5f5f7] text-[11px]">
+                            {tx.category.name}
                           </span>
                         ) : (
-                          <span className="text-[#6b6b70]">Chưa phân bổ</span>
+                          <span className="text-[#f59e0b] text-[11px] italic">
+                            Chưa phân loại
+                          </span>
                         )}
                       </td>
-
-                      {/* Amount */}
-                      <td
-                        className={`py-3 pr-4 text-right font-mono font-medium whitespace-nowrap ${
-                          isIn ? 'text-[#10b981]' : 'text-[#f5f5f7]'
-                        }`}
-                      >
-                        {isIn ? '+' : '-'}
-                        {formatCurrency(tx.amount, tx.currency)}
-                      </td>
-
-                      {/* Source */}
-                      <td className="py-3 pr-4 text-center whitespace-nowrap">
-                        {tx.source === 'EMAIL' ? (
-                          <span
-                            className="inline-flex items-center gap-1 text-[11px] text-[#00b3dd]"
-                            title={tx.rawSubject || 'Nhận tự động từ email'}
-                          >
-                            <Mail className="w-3 h-3" />
-                            <span>{tx.bank || 'Email'}</span>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        {tx.fund ? (
+                          <span className="text-[#00b3dd] text-[11px] font-medium">
+                            {tx.fund.name}
                           </span>
                         ) : (
-                          <span className="text-[11px] text-[#9f9fa0]">Thủ công</span>
+                          <span className="text-[#6b6b70]">—</span>
                         )}
                       </td>
-
-                      {/* Status */}
-                      <td className="py-3 pr-4 text-center whitespace-nowrap">
-                        {tx.status === 'POSTED' && (
-                          <span className="inline-flex items-center gap-1 text-[10px] text-[#10b981] font-mono">
-                            <CheckCircle2 className="w-3 h-3" /> GHI SỔ
-                          </span>
-                        )}
-                        {tx.status === 'NEEDS_REVIEW' && (
-                          <span className="inline-flex items-center gap-1 text-[10px] text-[#f59e0b] font-mono bg-[#f59e0b]/10 px-1.5 py-0.5 rounded">
-                            XEM LẠI
-                          </span>
-                        )}
-                        {tx.status === 'IGNORED' && (
-                          <span className="inline-flex items-center gap-1 text-[10px] text-[#6b6b70] font-mono">
-                            BỎ QUA
-                          </span>
-                        )}
+                      <td className="py-3 px-4 text-right font-mono font-medium whitespace-nowrap">
+                        <span className={isIn ? 'text-[#10b981]' : 'text-[#f5f5f7]'}>
+                          {isIn ? '+' : '-'}
+                          {formatCurrency(tx.amount, tx.currency)}
+                        </span>
                       </td>
-
-                      {/* Actions */}
-                      <td className="py-3 text-right whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-1">
-                          {isNeedsReview && (
-                            <button
-                              onClick={() => approveTransaction(tx.id)}
-                              className="p-1 rounded hover:bg-[#10b981]/20 text-[#10b981]"
-                              title="Phê duyệt giao dịch này"
-                            >
-                              <CheckCircle2 className="w-4 h-4" />
-                            </button>
-                          )}
-
+                      <td className="py-3 px-4 text-[#9f9fa0] font-mono text-[11px] truncate max-w-[150px]">
+                        {tx.sourceEmail || 'demo-bank@gmail.com'}
+                      </td>
+                      <td className="py-3 px-4 text-center whitespace-nowrap">
+                        <div className="flex items-center justify-center gap-2">
                           <button
-                            onClick={() => handleOpenEdit(tx)}
-                            className="p-1 rounded hover:bg-[#2e2e2e] text-[#9f9fa0] hover:text-[#f5f5f7]"
-                            title="Sửa danh mục hoặc quỹ"
+                            onClick={() => setClassifyingTransaction(tx)}
+                            className={`p-1.5 rounded text-xs flex items-center gap-1 transition-colors ${
+                              isClassified
+                                ? 'hover:bg-[#2e2e2e] text-[#9f9fa0] hover:text-[#f5f5f7]'
+                                : 'bg-[#00b3dd]/15 text-[#00b3dd] hover:bg-[#00b3dd]/25 px-2'
+                            }`}
+                            title="Phân loại giao dịch"
                           >
-                            <Edit2 className="w-3.5 h-3.5" />
+                            <Tag className="w-3.5 h-3.5" />
+                            {!isClassified && <span>Phân loại</span>}
                           </button>
-
-                          {tx.source === 'EMAIL' ? (
-                            <button
-                              onClick={() => ignoreTransaction(tx.id)}
-                              className="p-1 rounded hover:bg-[#2e2e2e] text-[#9f9fa0] hover:text-[#f43f5e]"
-                              title="Bỏ qua giao dịch này"
-                            >
-                              <XCircle className="w-3.5 h-3.5" />
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => deleteTransaction(tx.id)}
-                              className="p-1 rounded hover:bg-[#f43f5e]/10 text-[#9f9fa0] hover:text-[#f43f5e]"
-                              title="Xóa giao dịch"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          <button
+                            onClick={() => deleteTransaction(tx.id)}
+                            className="p-1.5 rounded hover:bg-[#f43f5e]/15 text-[#9f9fa0] hover:text-[#f43f5e] transition-colors"
+                            title="Xóa giao dịch"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -508,82 +399,6 @@ export function CashflowView() {
           </table>
         </div>
       </div>
-
-      {/* Edit Transaction Modal */}
-      {editingTx && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="cockpit-card-elevated max-w-md w-full p-6 space-y-4">
-            <h3 className="text-base font-medium text-[#f5f5f7]">Chỉnh sửa giao dịch</h3>
-
-            <div>
-              <div className="text-xs text-[#9f9fa0]">Mô tả</div>
-              <div className="text-sm text-[#f5f5f7] font-medium mt-0.5">
-                {editingTx.description}
-              </div>
-            </div>
-
-            <div>
-              <label className="text-xs text-[#9f9fa0] block mb-1">Danh mục</label>
-              <select
-                value={editCategory}
-                onChange={e => setEditCategory(e.target.value)}
-                className="cockpit-input w-full text-xs"
-              >
-                {DEFAULT_CATEGORIES.map(c => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {editingTx.direction === 'OUT' && (
-              <div>
-                <label className="text-xs text-[#9f9fa0] block mb-1">Phân bổ vào Quỹ</label>
-                <select
-                  value={editFundId || ''}
-                  onChange={e => setEditFundId(e.target.value || undefined)}
-                  className="cockpit-input w-full text-xs"
-                >
-                  <option value="">-- Không phân vào quỹ nào --</option>
-                  {funds.map(f => (
-                    <option key={f.id} value={f.id}>
-                      {f.name} (Hạn mức: {formatCurrency(f.monthlyAllocation)})
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {editingTx.counterparty && (
-              <label className="flex items-center gap-2 text-xs text-[#9f9fa0] cursor-pointer pt-2">
-                <input
-                  type="checkbox"
-                  checked={rememberMapping}
-                  onChange={e => setRememberMapping(e.target.checked)}
-                  className="rounded border-[#34363a] bg-[#090a0b]"
-                />
-                <span>Ghi nhớ quy tắc này cho đối tác "{editingTx.counterparty}"</span>
-              </label>
-            )}
-
-            <div className="flex justify-end gap-2 pt-4 border-t border-[#232427]">
-              <button
-                onClick={() => setEditingTx(null)}
-                className="btn-secondary text-xs"
-              >
-                Hủy
-              </button>
-              <button
-                onClick={handleSaveEdit}
-                className="btn-primary text-xs"
-              >
-                Lưu thay đổi
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

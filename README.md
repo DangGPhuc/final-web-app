@@ -1,219 +1,167 @@
 # Personal Finance Cockpit
 
-Trung tâm chỉ huy tài chính cá nhân toàn diện, thiết kế dành riêng cho **DUY NHẤT MỘT NGƯỜI DÙNG (Single-User)**.
+Trung tâm chỉ huy tài chính cá nhân dành riêng cho **DUY NHẤT MỘT NGƯỜI DÙNG (Single-Owner Cockpit)**.
+Dự án được xây dựng phục vụ báo cáo / đồ án tốt nghiệp với cơ chế tự động đọc email ngân hàng qua **Google OAuth đa tài khoản**, lưu trữ bền vững với **PostgreSQL & Prisma**, mã hóa xác thực **AES-256-GCM**, và quy trình phân loại tài chính thủ công minh bạch.
 
 ---
 
-## 1. Triết lý Sản phẩm (Single-User Philosophy)
+## 1. Triết lý Thiết kế (Single-Owner Architecture)
 
-Ứng dụng này **không phải là phần mềm SaaS** và không dành cho người dùng bên ngoài hay khách hàng:
-- **Không đăng ký / Không đăng nhập ứng dụng**: Không có hệ thống authentication/account nội bộ cho web app.
-- **Không database đám mây cho người dùng**: Không sử dụng PostgreSQL, Supabase, hay SQL database lưu dữ liệu tài chính của khách hàng.
+Ứng dụng này **không phải là phần mềm SaaS** và không dành cho người dùng bên ngoài hay khách hàng đại trà:
+- **Không đăng ký / Không tạo tài khoản khách hàng**: Không có hệ thống authentication hay tài khoản người dùng nội bộ.
 - **Không multi-tenant / Không role / Không CRM / Không subscription**: Hoàn toàn loại bỏ mọi khái niệm quản trị khách hàng.
-- **Bảo mật & Cục bộ**: Toàn bộ dữ liệu tài chính được lưu trữ an toàn trong trình duyệt thông qua cơ chế `StorageAdapter` (LocalStorage Adapter v3).
-- **Email Provider Authorization**: Kết nối Gmail chỉ đóng vai trò ủy quyền đọc thông báo biến động số dư ngân hàng qua OAuth (chỉ quyền `gmail.readonly`), không phải là hệ thống đăng nhập tài khoản. Toàn bộ Access/Refresh Token được giữ trên server, tuyệt đối không gửi xuống trình duyệt.
+- **Lưu trữ chuyên biệt**: Cơ sở dữ liệu PostgreSQL cục bộ chỉ phục vụ lưu trữ số dư, biến động ngân hàng và các quỹ ngân sách của chủ sở hữu.
+- **Bảo mật Google OAuth**: Trình duyệt **tuyệt đối không bao giờ nhận được refresh token**. Toàn bộ refresh token được mã hóa bằng thuật toán `AES-256-GCM` trước khi lưu vào database.
+- **Mô hình riêng tư (Privacy Model)**:
+  - *Phương án A*: Người dùng kết nối trực tiếp tài khoản Gmail nhận thông báo biến động số dư.
+  - *Phương án B*: Người dùng tạo một tài khoản Gmail phụ và thiết lập Gmail chính chuyển tiếp (forward) các email ngân hàng sang tài khoản phụ, sau đó kết nối tài khoản phụ vào ứng dụng qua OAuth.
 
 ---
 
-## 2. Kiến trúc Hệ thống (Architecture)
-
-Hệ thống hoạt động theo pipeline xử lý dữ liệu tài chính khép kín:
+## 2. Kiến trúc Hệ thống (Architecture Overview)
 
 ```
-[ BANK NOTIFICATION EMAILS ]
-             ↓
-[ SERVER GMAIL INGESTION (/api/email/sync) ]
-             ↓
-[ MODULAR PARSER ENGINE ] (Vietcombank, Generic)
-             ↓
-[ DEDUPLICATION & SAFETY REVIEW FLOW ]
-             ↓
-[ AUTHORITATIVE TRANSACTION LEDGER ]
-             ↓
-[ FUNDS ALLOCATION (Hạn mức quỹ không đổi số dư) ]
-             ↓
-[ MONTHLY SNAPSHOTS (Chốt sổ tháng) ]
-             ↓
-[ SAVINGS FORECAST (Dự phóng tuyến tính minh bạch) ]
-
----------------------------------------------------------
-[ ISOLATED PAPER TRADING SIMULATOR (/api/market) ]
-(BTC / XAU mô phỏng giao dịch phái sinh không liên quan tiền thật)
+[ BANK NOTIFICATION EMAILS (VCB, TCB, MB, ACB, VPB, BIDV...) ]
+                              ↓
+        [ GOOGLE OAUTH 2.0 (gmail.readonly, offline) ]
+                              ↓
+    [ REAL PAGINATED INGESTION (nextPageToken, MIME decode) ]
+                              ↓
+      [ FACTUAL FINANCIAL PARSER (Direction, Amount, Time) ]
+                              ↓
+  [ AUTHORITATIVE SERVER DEDUPLICATION: UNIQUE(gmailMessageId) ]
+                              ↓
+     [ BANK TRANSACTIONS (PostgreSQL + Prisma Persistence) ]
+  (Tác động ngay lập tức vào Authoritative Balance = IN - OUT)
+                              ↓
+       [ "BIẾN ĐỘNG CẦN PHÂN LOẠI" (Manual Classification) ]
+       ├── User-defined Categories (Lưu vĩnh viễn, tùy chọn "Khác...")
+       └── Budget Funds (Hạn mức quỹ chi tiêu độc lập với số dư)
+                              ↓
+   [ DATA MANAGEMENT: Xóa dữ liệu tài chính / Re-import theo ngày ]
 ```
 
 ---
 
-## 3. Các Phân hệ Cốt lõi
+## 3. Cấu hình Dành Cho Nhà Phát Triển (Developer OAuth Setup)
 
-### 3.1. Tổng quan (Dashboard)
-- **Tổng số dư tài chính (Authoritative Balance)**: `Số dư ban đầu + Tổng tiền vào (POSTED IN) - Tổng tiền ra (POSTED OUT)`. Không chia nhỏ thành nhiều ví tiền ảo phức tạp.
-- Thống kê tháng hiện tại: Tiền vào, Tiền ra, Dòng tiền thuần (Net).
-- Trạng thái đồng bộ email ngân hàng và cảnh báo nhẹ nhàng khi có giao dịch cần xem lại (`NEEDS_REVIEW`).
-- Biến động gần đây (5–8 giao dịch mới nhất).
+> [!IMPORTANT]
+> Phạm vi truy cập `https://www.googleapis.com/auth/gmail.readonly` là một **Restricted Scope** của Google. Đối với đồ án tốt nghiệp, Google Cloud Project được thiết lập ở chế độ **Testing Mode**.
 
-### 3.2. Dòng tiền (Cashflow)
-- Hợp nhất quản lý giao dịch và báo cáo dòng tiền vào một màn hình duy nhất.
-- Bộ lọc tháng, loại luồng (IN/OUT), Quỹ, Danh mục, Từ khóa tìm kiếm.
-- Biểu đồ Bar Chart theo dõi nhịp độ thu chi từng ngày trong tháng.
-- Thao tác chỉnh sửa giao dịch, gán quỹ, gán danh mục và thiết lập quy tắc tự động ghi nhớ đối tác.
-- Giao dịch email có thể duyệt (`POSTED`) hoặc đánh dấu bỏ qua (`IGNORED`) để không bị nhập lại ở các lần đồng bộ sau.
+### 3.1. Thiết lập trên Google Cloud Console
+1. Truy cập [Google Cloud Console](https://console.cloud.google.com/) và tạo một dự án mới.
+2. Vào **APIs & Services** → **Library**, tìm kiếm và kích hoạt **Gmail API**.
+3. Vào **OAuth consent screen**:
+   - Chọn User Type: **External**.
+   - Điền App name (VD: *Personal Finance Cockpit*), User support email và Developer contact.
+   - Thêm các Scopes:
+     - `openid`
+     - `.../auth/userinfo.email`
+     - `.../auth/userinfo.profile`
+     - `https://www.googleapis.com/auth/gmail.readonly`
+   - Tại mục **Test users**: Thêm các địa chỉ Gmail sẽ dùng để thử nghiệm và demo (bắt buộc trong Testing Mode).
+4. Vào **Credentials** → **Create Credentials** → **OAuth client ID**:
+   - Application type: **Web application**.
+   - Name: *Personal Finance Web Client*.
+   - Authorized redirect URIs:
+     ```
+     http://localhost:3000/api/google/callback
+     ```
+5. Nhận `Client ID` và `Client Secret`.
 
-### 3.3. Quỹ (Funds Model - Thay thế Budget cũ)
-- **Cơ chế hoạt động**: Khi có tiền vào, người dùng phân bổ hạn mức chi tiêu vào từng quỹ (Ăn uống, Sinh hoạt, Di chuyển, Học tập, Dự phòng...).
-- **Quy tắc kế toán**: Việc phân bổ quỹ **KHÔNG** làm thay đổi tổng số dư tài chính.
-- Khi có giao dịch chi tiêu (`OUT`) được gán vào Quỹ:
-  - `spent` của quỹ tăng lên tương ứng.
-  - `remaining = monthlyAllocation - spent`.
-  - `usagePercent = (spent / monthlyAllocation) * 100`.
-  - Nếu `remaining < 0`: `overAmount = |remaining|`, trạng thái chuyển thành `OVER`.
-- Sửa hạn mức quỹ giữ nguyên lịch sử giao dịch và số tiền đã tiêu.
-- Chu kỳ quỹ hoạt động theo tháng (`Monthly Fund Cycle`). Chốt sổ cuối tháng tạo ra `MonthlySnapshot` với `netSavings = totalIncome - totalExpense`.
-
-### 3.4. Dự báo tích lũy (Savings Forecast)
-- Dự báo toán học tuyến tính minh bạch dựa trên số tháng đã chốt sổ:
-  - 1 tháng chốt sổ: `averageMonthlySavings = savings(tháng 1)`.
-  - 2 tháng chốt sổ: `averageMonthlySavings = (tháng 1 + tháng 2) / 2`.
-  - N tháng chốt sổ: `averageMonthlySavings = Σ(tháng 1..N) / N`.
-  - Công thức: `Tích lũy[N] = Tích lũy hiện tại + (Tiết kiệm TB/tháng × N)`.
-- Lựa chọn kỳ hạn dự phóng: 3, 6, 12, 24 tháng.
-- Biểu đồ phân biệt rõ ràng: Đường nét liền (Dữ liệu thực tế) và Đường nét đứt (Dự phóng tương lai).
-- Nếu dữ liệu trung bình mang giá trị âm, biểu đồ thể hiện đúng chiều hướng suy giảm vốn (không sử dụng `Math.max(0)` để che giấu).
-
-### 3.5. Demo Trading (Paper Trading Simulator)
-- **Cảnh báo miễn trừ trách nhiệm**: Đây là công cụ mô phỏng giao dịch giả lập, **hoàn toàn không đặt lệnh thật** và không kết nối API key giao dịch.
-- Tích hợp dữ liệu thị trường công khai cho **Bitcoin (BTC/USD)** qua CoinGecko API và **Vàng (XAU/USD)**, tự động fallback sang dữ liệu mô phỏng nếu không có mạng.
-- Hỗ trợ vị thế LONG / SHORT, Margin (vốn), Đòn bẩy (Leverage 1x - 50x), Stop-Loss, Take-Profit.
-- Tính toán PnL lý thuyết, ROI trên vốn ký quỹ, quy mô vị thế (`margin × leverage`), và đường giá thanh lý ước tính (`estimatedLiquidationPrice`).
-- Hoàn toàn độc lập, không ảnh hưởng đến số dư hay dữ liệu thu chi thực tế.
-
-### 3.6. Cài đặt (Settings)
-- Quản lý cấu hình Email Ingestion (OAuth Gmail), danh sách email người gửi tin cậy (`trustedSenders`), ngưỡng tự tin tối thiểu (`autoPostMinConfidence`).
-- Quản lý quy tắc từ khóa thương nhân/đối tác (`MerchantRule`) để tự động phân loại danh mục và gán quỹ.
-- Cài đặt số dư ban đầu (`openingBalance`), đơn vị tiền tệ VND.
-- Quản lý dữ liệu: Nạp dữ liệu mẫu thử nghiệm (Seed Demo) hoặc Xóa sạch dữ liệu cục bộ.
-
----
-
-## 4. Email Ingestion Flow & Deduplication
-
-1. Ngân hàng gửi email thông báo biến động số dư.
-2. Ứng dụng gọi `POST /api/email/sync` từ server.
-3. Server sử dụng `GmailProvider` để tải các email mới nhất.
-4. `parseEmailMessage()` chạy qua danh sách parsers:
-   - `VietcombankParser`: Parse email cú pháp `VCB: TK ...| GD: +/-... VND`.
-   - `GenericParser`: Parse định dạng ghi nợ / ghi có tiếng Việt tổng quát.
-5. `normalizeToTransaction()` phân tích độ tin cậy và nguồn gửi:
-   - Người gửi nằm trong `trustedSenders` VÀ độ tự tin parser ≥ `autoPostMinConfidence` → Trạng thái `POSTED` (ghi trực tiếp vào số dư).
-   - Ngược lại → Trạng thái `NEEDS_REVIEW` (đưa vào hàng đợi cần người dùng xác nhận).
-6. **Deduplication**: Kiểm tra `sourceMessageId` của Gmail đối chiếu với các giao dịch đã tồn tại. Dù thực hiện đồng bộ bao nhiêu lần cùng 1 email, hệ thống đảm bảo duy nhất 1 giao dịch được tạo.
-
----
-
-## 5. Cấu hình Gmail & Biến Môi trường (Environment Setup)
-
-Để kết nối với tài khoản Gmail cá nhân thật:
-
-1. Truy cập [Google Cloud Console](https://console.cloud.google.com/), tạo một Project mới.
-2. Kích hoạt **Gmail API**.
-3. Tạo **OAuth 2.0 Client IDs** (loại Web Application).
-4. Cấp quyền truy cập (Scope) tối thiểu:
-   `https://www.googleapis.com/auth/gmail.readonly`
-5. Lấy Refresh Token và lưu vào file `.env.local`:
+### 3.2. Cấu hình Biến Môi Trường (`.env.local` / `.env`)
+Tạo file `.env.local` tại thư mục gốc của dự án:
 
 ```bash
-# .env.local (Không bao giờ commit file này)
-GMAIL_CLIENT_ID=your_client_id.apps.googleusercontent.com
-GMAIL_CLIENT_SECRET=your_client_secret
-GMAIL_REFRESH_TOKEN=your_refresh_token
-GMAIL_USER_EMAIL=your_email@gmail.com
-```
+# PostgreSQL Connection URL
+DATABASE_URL="postgresql://kali:kali@localhost:5432/personal_finance"
 
-> **Lưu ý**: Nếu chưa cấu hình biến môi trường Gmail, hệ thống sẽ tự động chuyển sang chế độ Demo Ingestion an toàn với các email mẫu Vietcombank, Techcombank.
+# Google OAuth Credentials (Server-only)
+GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="your-client-secret"
+GOOGLE_REDIRECT_URI="http://localhost:3000/api/google/callback"
 
----
-
-## 6. Thiết kế Giao diện (Visual System)
-
-Theo chuẩn tài liệu thiết kế tối giản:
-- Chủ đề: **Chỉ Dark Mode (Dark Only)**.
-- Màu nền Obsidian: `#0f1011` (nền sâu hơn: `#090a0b`).
-- Bề mặt card: `#17181a`, viền `#232427`, elevated `#2e2e2e`, hover `#3f4041`.
-- Chữ: Tiêu đề `#f5f5f7`, nội dung `#9f9fa0`, dữ liệu kỹ thuật font monospace uppercase.
-- Bo góc: Card 20px, Buttons/Inputs 8px, Pills 9999px.
-- CTA chính: Nền trắng chữ đen (`#ffffff` / `#000000`).
-- Không đổ bóng thẻ, độ sâu tạo bởi tương phản bề mặt (Surface levels).
-
----
-
-## 7. Cấu trúc Thư mục Dự án
-
-```
-src/
-├── app/
-│   ├── api/
-│   │   ├── email/
-│   │   │   ├── status/route.ts      # Kiểm tra trạng thái Gmail
-│   │   │   └── sync/route.ts        # Đọc email, parse & dedupe
-│   │   └── market/route.ts          # API giá công khai BTC & Vàng
-│   ├── globals.css                  # Design tokens, surfaces & typography
-│   ├── layout.tsx                   # Google fonts (Playfair, Inter, Roboto Mono)
-│   └── page.tsx                     # Entry point & Tab switcher
-├── components/
-│   ├── Navigation.tsx               # Top/Bottom navigation bar
-│   ├── dashboard/DashboardView.tsx  # Tổng quan số dư & biến động gần đây
-│   ├── cashflow/CashflowView.tsx    # Dòng tiền, biểu đồ ngày & danh sách giao dịch
-│   ├── funds/FundsView.tsx          # Quản lý quỹ, chu kỳ tháng & chốt sổ
-│   ├── forecast/ForecastView.tsx    # Dự báo tích lũy dựa trên dữ liệu chốt sổ
-│   ├── trading/TradingView.tsx      # Mô phỏng vị thế phái sinh (Paper Trading)
-│   ├── settings/SettingsView.tsx    # Cài đặt email, parser rules & dữ liệu
-│   └── shared/
-│       ├── QuickAddModal.tsx        # Modal ghi chép giao dịch thủ công
-│       └── Toast.tsx                # Thông báo hệ thống
-├── context/
-│   └── AppContext.tsx               # State management cho Single User
-├── lib/
-│   ├── constants.ts                 # Danh mục & danh sách ngân hàng
-│   ├── mock-data.ts                 # Fixtures mẫu theo tháng động
-│   ├── utils.ts                     # Hàm format tiền tệ, ngày tháng
-│   ├── finance/
-│   │   └── calculations.ts          # Pure business calculation functions
-│   ├── storage/
-│   │   ├── storage.ts               # StorageAdapter interface
-│   │   ├── local-storage-adapter.ts # LocalStorage & MemoryStorage implementations
-│   │   └── persistence.ts           # Schema v3 loading, saving & migration
-│   ├── email/
-│   │   ├── provider.ts              # EmailProvider interface
-│   │   ├── gmail-provider.ts        # Server-side Gmail API client
-│   │   ├── dedupe.ts                # Thuật toán chống trùng lặp giao dịch
-│   │   ├── normalizer.ts            # Chuyển đổi parsed email -> Transaction
-│   │   └── parsers/
-│   │       ├── parser.ts            # EmailParser interface
-│   │       └── generic-parser.ts    # Vietcombank & Generic parsers
-│   └── market/
-│       ├── provider.ts              # MarketDataProvider interface
-│       ├── bitcoin-provider.ts      # CoinGecko API provider
-│       └── gold-provider.ts         # Gold/XAU data provider
-└── types/
-    └── index.ts                     # Toàn bộ TypeScript domain interfaces
+# Master key for AES-256-GCM encryption (64 hex characters = 32 bytes)
+# Sinh ngẫu nhiên: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+TOKEN_ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 ```
 
 ---
 
-## 8. Phát triển & Kiểm thử (Development & Testing)
+## 4. Cài Đặt & Khởi Chạy (Installation & Run)
 
+### 4.1. Khởi động PostgreSQL & Tạo Database
 ```bash
-# 1. Cài đặt thư viện phụ thuộc
+# Đảm bảo PostgreSQL đang chạy
+pg_isready
+
+# Tạo database (nếu chưa có)
+psql -U postgres -c "CREATE DATABASE personal_finance;"
+```
+
+### 4.2. Cài đặt Dependencies & Đồng bộ Schema
+```bash
 npm install
+npx prisma db push
+```
 
-# 2. Kiểm tra type TypeScript
-npm run typecheck
-
-# 3. Chạy unit tests
-npm test
-
-# 4. Chạy dev server
+### 4.3. Chạy Dev Server
+```bash
 npm run dev
+```
+Truy cập ứng dụng tại: `http://localhost:3000`
 
-# 5. Build production bundle
+---
+
+## 5. Quy Trình Nghiệm Thu & Demo (Acceptance Flow)
+
+Dưới đây là kịch bản demo mẫu phục vụ buổi bảo vệ đồ án:
+
+1. **Khởi đầu**: Mở ứng dụng → vào tab **Cài đặt**. Danh sách Gmail ban đầu hoàn toàn trống.
+2. **Liên kết Gmail**:
+   - Bấm **"+ Thêm tài khoản Gmail"**.
+   - Màn hình Google OAuth hiển thị → Chọn tài khoản Gmail thử nghiệm và cấp quyền đọc Gmail readonly.
+   - Ứng dụng tự động điều hướng trở lại tab Cài đặt: Thẻ Gmail xuất hiện với Google Avatar, Tên và Email.
+3. **Nhập Lịch Sử (Historical Import)**:
+   - Tại mục **Nhập dữ liệu email**, chọn khoảng thời gian (VD: `01/09/2026` → `20/09/2026`).
+   - Bấm **"Nhập lịch sử"**.
+   - Hệ thống quét phân trang, giải mã MIME và trích xuất biến động.
+   - Thẻ kết quả hiển thị: Số email đã đọc, biến động mới, trùng lặp và không đọc được.
+4. **Kiểm tra Tổng quan (Dashboard)**:
+   - Tổng số dư tài chính (Authoritative Balance) cập nhật tức thì theo `IN - OUT`.
+   - Mục **"Biến động cần phân loại"** ưu tiên hiển thị các giao dịch chưa phân loại, đi kèm gợi ý đối tác/thương nhân (VD: *Highlands Coffee*, *Grab*, *Shopee*).
+5. **Phân Loại Thủ Công & Danh Mục Tự Định Nghĩa**:
+   - Bấm nút **[Phân loại]** tại giao dịch Highlands Coffee (-120.000 ₫).
+   - Chọn **"+ Khác... (Tạo danh mục mới)"** → Nhập `Cafe` → Chọn Quỹ (nếu có) → Bấm **Lưu phân loại**.
+   - Giao dịch chuyển sang trạng thái đã phân loại; danh mục `Cafe` được lưu vĩnh viễn và tự động xuất hiện trong bộ lọc Dòng tiền.
+   - Việc phân loại **hoàn toàn không làm thay đổi số dư**.
+6. **Tạo Quỹ Ngân Sách (Funds)**:
+   - Vào tab **Quỹ** → Bấm **"Tạo quỹ"**.
+   - Nhập tên `Quỹ ăn uống`, hạn mức `3.000.000 ₫` → Lưu.
+   - Thẻ quỹ xuất hiện ngay lập tức với thanh tiến độ; refresh lại trình duyệt quỹ vẫn tồn tại bền vững.
+7. **Xóa Dữ Liệu Tài Chính & Nạp Lại (Reset / Re-import)**:
+   - Vào **Cài đặt** → Bấm **"Xóa dữ liệu tài chính"** → Xác nhận.
+   - Toàn bộ giao dịch, quỹ, danh mục bị xóa khỏi database.
+   - **Tài khoản Gmail vẫn giữ nguyên liên kết**.
+   - Bấm lại **"Nhập lịch sử"** cùng khoảng ngày → Toàn bộ biến động ngân hàng được tái tạo chuẩn xác mà không cần đăng nhập lại Google.
+
+---
+
+## 6. Kiểm Thử Hệ Thống (Testing & Verification)
+
+Chạy toàn bộ 41 unit & integration tests:
+```bash
+npm test
+```
+Kiểm tra type và build sản phẩm:
+```bash
+npm run typecheck
 npm run build
 ```
+
+---
+
+## 7. Ranh Giới An Toàn & Bảo Mật (Security Boundary)
+
+- **Không đưa lên mạng công cộng**: Ứng dụng là cockpit cá nhân không có lớp phân quyền nhiều người dùng. Một phiên bản triển khai thực tế có kết nối Gmail **tuyệt đối không được mở public** nếu không có reverse proxy xác thực chủ sở hữu (Basic Auth, Tailscale, Cloudflare Access).
+- **Chế độ Demo An Toàn**: Khi demo tại lớp học mà không muốn để lộ email ngân hàng thật, người dùng có thể sử dụng tính năng demo fixture an toàn có sẵn trong hệ thống.

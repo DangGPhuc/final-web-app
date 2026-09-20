@@ -1,137 +1,221 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GmailProvider } from '@/lib/email/gmail-provider';
-import { parseEmailMessage, normalizeToTransaction } from '@/lib/email/normalizer';
-import { deduplicateTransactions } from '@/lib/email/dedupe';
-import type { Transaction, MerchantRule, EmailMessage } from '@/types';
-
-// Fixture demo emails for demonstration/testing when Gmail credentials are not set
-const DEMO_EMAILS: EmailMessage[] = [
-  {
-    id: 'msg_vcb_001',
-    from: 'vietcombank@vcb.com.vn',
-    subject: 'VCB: TK 1234| GD: +25,000,000 VND | 05/09/2026 | Cong ty CP Cong nghe chuyen luong Thang 9',
-    snippet: 'VCB: TK 1234| GD: +25,000,000 VND | 05/09/2026 | Cong ty CP Cong nghe chuyen luong Thang 9',
-    receivedAt: '2026-09-05T09:30:00.000Z',
-  },
-  {
-    id: 'msg_vcb_002',
-    from: 'vietcombank@vcb.com.vn',
-    subject: 'VCB: TK 1234| GD: -120,000 VND | 06/09/2026 | Thanh toan Cafe Highland Nguyen Du',
-    snippet: 'VCB: TK 1234| GD: -120,000 VND | 06/09/2026 | Thanh toan Cafe Highland Nguyen Du',
-    receivedAt: '2026-09-06T14:15:00.000Z',
-  },
-  {
-    id: 'msg_vcb_003',
-    from: 'vietcombank@vcb.com.vn',
-    subject: 'VCB: TK 1234| GD: -350,000 VND | 08/09/2026 | Thanh toan Grab Car di lam',
-    snippet: 'VCB: TK 1234| GD: -350,000 VND | 08/09/2026 | Thanh toan Grab Car di lam',
-    receivedAt: '2026-09-08T08:00:00.000Z',
-  },
-  {
-    id: 'msg_tcb_004',
-    from: 'alert@techcombank.com.vn',
-    subject: 'Thông báo biến động số dư tài khoản',
-    snippet: 'So tien ghi no: 1,850,000 VND luc 10/09/2026. Dien giai: Mua sam Shopee don hang 98231',
-    receivedAt: '2026-09-10T19:20:00.000Z',
-  },
-  {
-    id: 'msg_unknown_005',
-    from: 'billing@unrecognized-sender.org',
-    subject: 'Xác nhận dịch vụ trực tuyến',
-    snippet: 'Giao dịch thanh toan 500,000 VND vao ngay 12/09/2026',
-    receivedAt: '2026-09-12T11:00:00.000Z',
-  },
-];
+import { prisma } from '@/lib/db';
+import { decryptToken } from '@/lib/security/crypto';
+import {
+  ingestFromGmail,
+  getDemoBankEmails,
+  type IngestionResult,
+} from '@/lib/email/gmail-client';
+import { parseBankNotification } from '@/lib/email/bank-parsers';
+import type { SyncResultStats } from '@/types';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const {
-      since,
-      existingTransactions = [],
-      merchantRules = [],
-      trustedSenders = ['vietcombank@vcb.com.vn', 'alert@techcombank.com.vn'],
-      autoPostMinConfidence = 0.8,
-      useDemoIfUnconfigured = true,
+      accountId, // optional: specific GmailConnection ID or 'ALL'
+      fromDate, // optional ISO string
+      toDate, // optional ISO string
+      useDemoIfNoAccounts = true,
     } = body as {
-      since?: string;
-      existingTransactions?: Transaction[];
-      merchantRules?: MerchantRule[];
-      trustedSenders?: string[];
-      autoPostMinConfidence?: number;
-      useDemoIfUnconfigured?: boolean;
+      accountId?: string;
+      fromDate?: string;
+      toDate?: string;
+      useDemoIfNoAccounts?: boolean;
     };
 
-    const provider = new GmailProvider();
-    const isConnected = await provider.isConnected();
+    const fromDateObj = fromDate ? new Date(fromDate) : undefined;
+    const toDateObj = toDate ? new Date(toDate) : undefined;
 
-    let messages: EmailMessage[] = [];
-    let isDemoSource = false;
+    // 1. Fetch target Gmail connections
+    let connections = await prisma.gmailConnection.findMany({
+      where: {
+        revokedAt: null,
+        ...(accountId && accountId !== 'ALL' ? { id: accountId } : {}),
+      },
+    });
 
-    if (isConnected) {
-      messages = await provider.fetchMessages(since);
-    } else if (useDemoIfUnconfigured) {
-      // Use demo bank notifications for offline testing & demo
-      messages = DEMO_EMAILS;
-      isDemoSource = true;
-    } else {
+    let isDemoMode = false;
+    let aggregateStats: SyncResultStats = {
+      totalFetched: 0,
+      totalNew: 0,
+      totalDuplicates: 0,
+      totalFailed: 0,
+      dateRange: fromDate && toDate ? `${fromDate} → ${toDate}` : undefined,
+    };
+
+    // If no real Gmail accounts connected and demo mode enabled
+    if (connections.length === 0 && useDemoIfNoAccounts) {
+      isDemoMode = true;
+      const demoEmails = getDemoBankEmails();
+
+      // Filter by date range if specified
+      const filteredEmails = demoEmails.filter(e => {
+        const d = new Date(e.date).getTime();
+        if (fromDateObj && d < fromDateObj.getTime()) return false;
+        if (toDateObj && d > toDateObj.getTime() + 24 * 60 * 60 * 1000) return false;
+        return true;
+      });
+
+      aggregateStats.totalFetched = filteredEmails.length;
+      aggregateStats.accountEmail = 'demo-bank@gmail.com';
+
+      for (const email of filteredEmails) {
+        const parsed = parseBankNotification(email);
+        if (!parsed) {
+          aggregateStats.totalFailed++;
+          continue;
+        }
+
+        // Authoritative deduplication check
+        const exists = await prisma.bankTransaction.findUnique({
+          where: { gmailMessageId: parsed.gmailMessageId },
+        });
+
+        if (exists) {
+          aggregateStats.totalDuplicates++;
+          continue;
+        }
+
+        await prisma.bankTransaction.create({
+          data: {
+            sourceEmail: 'demo-bank@gmail.com',
+            gmailMessageId: parsed.gmailMessageId,
+            bankCode: parsed.bankCode,
+            bankName: parsed.bankName,
+            accountHint: parsed.accountHint,
+            direction: parsed.direction,
+            amount: parsed.amount,
+            currency: parsed.currency,
+            occurredAt: parsed.occurredAt,
+            counterparty: parsed.counterparty,
+            merchantLabel: parsed.merchantLabel,
+            summary: parsed.summary,
+            classificationState: 'UNCLASSIFIED',
+          },
+        });
+
+        aggregateStats.totalNew++;
+      }
+
+      return NextResponse.json({
+        success: true,
+        isDemoSource: true,
+        stats: aggregateStats,
+        message: 'Đã nhập biến động thành công từ nguồn demo an toàn.',
+      });
+    }
+
+    if (connections.length === 0) {
       return NextResponse.json(
         {
           success: false,
-          error: 'Gmail chưa kết nối. Vui lòng cấu hình OAuth trong Settings hoặc bật chế độ demo.',
+          error: 'Chưa có tài khoản Gmail nào được liên kết. Vui lòng bấm "+ Thêm tài khoản Gmail" trong Cài đặt.',
         },
         { status: 400 }
       );
     }
 
-    const candidateTransactions: Transaction[] = [];
-    let totalSkipped = 0;
-    let totalNeedsReview = 0;
-    let totalPosted = 0;
+    // 2. Perform real ingestion for each connected account
+    const accountsProcessed: string[] = [];
 
-    for (const msg of messages) {
-      const parsed = parseEmailMessage(msg);
-      if (!parsed) {
-        totalSkipped++;
+    for (const conn of connections) {
+      const startedAt = new Date();
+      let refreshToken = '';
+      try {
+        refreshToken = decryptToken(conn.encryptedRefreshToken);
+      } catch (err) {
+        console.error(`Failed to decrypt token for account ${conn.email}`);
         continue;
       }
 
-      const tx = normalizeToTransaction(
-        parsed,
-        msg,
-        merchantRules,
-        trustedSenders,
-        autoPostMinConfidence
-      );
+      // Default quick scan from lastSyncAt if no fromDate specified
+      const effectiveFromDate = fromDateObj || (conn.lastSyncAt ? new Date(conn.lastSyncAt) : undefined);
 
-      if (tx.status === 'NEEDS_REVIEW') {
-        totalNeedsReview++;
-      } else {
-        totalPosted++;
+      let ingestionResult: IngestionResult;
+      try {
+        ingestionResult = await ingestFromGmail(refreshToken, {
+          fromDate: effectiveFromDate,
+          toDate: toDateObj,
+        });
+      } catch (err) {
+        console.error(`Ingestion error for ${conn.email}:`, err);
+        continue;
       }
 
-      candidateTransactions.push(tx);
+      let newCount = 0;
+      let dupCount = 0;
+
+      for (const event of ingestionResult.events) {
+        // Authoritative deduplication check by UNIQUE(gmailMessageId)
+        const exists = await prisma.bankTransaction.findUnique({
+          where: { gmailMessageId: event.gmailMessageId },
+        });
+
+        if (exists) {
+          dupCount++;
+          continue;
+        }
+
+        await prisma.bankTransaction.create({
+          data: {
+            gmailConnectionId: conn.id,
+            sourceEmail: conn.email,
+            gmailMessageId: event.gmailMessageId,
+            gmailThreadId: event.gmailThreadId,
+            bankCode: event.bankCode,
+            bankName: event.bankName,
+            accountHint: event.accountHint,
+            direction: event.direction,
+            amount: event.amount,
+            currency: event.currency,
+            occurredAt: event.occurredAt,
+            counterparty: event.counterparty,
+            merchantLabel: event.merchantLabel,
+            summary: event.summary,
+            classificationState: 'UNCLASSIFIED',
+          },
+        });
+
+        newCount++;
+      }
+
+      // Update sync run audit log
+      await prisma.syncRun.create({
+        data: {
+          gmailConnectionId: conn.id,
+          accountEmail: conn.email,
+          fromDate: effectiveFromDate,
+          toDate: toDateObj,
+          startedAt,
+          finishedAt: new Date(),
+          fetchedCount: ingestionResult.totalFetched,
+          importedCount: newCount,
+          duplicateCount: dupCount,
+          failedCount: ingestionResult.failedCount,
+        },
+      });
+
+      // Update last sync time
+      await prisma.gmailConnection.update({
+        where: { id: conn.id },
+        data: { lastSyncAt: new Date() },
+      });
+
+      accountsProcessed.push(conn.email);
+      aggregateStats.totalFetched += ingestionResult.totalFetched;
+      aggregateStats.totalNew += newCount;
+      aggregateStats.totalDuplicates += dupCount;
+      aggregateStats.totalFailed += ingestionResult.failedCount;
     }
 
-    // Deduplicate against existing transactions
-    const newTransactions = deduplicateTransactions(
-      existingTransactions,
-      candidateTransactions
-    );
+    aggregateStats.accountEmail = accountsProcessed.join(', ');
 
     return NextResponse.json({
       success: true,
-      isDemoSource,
-      syncedAt: new Date().toISOString(),
-      transactions: newTransactions,
-      stats: {
-        totalFetched: messages.length,
-        totalParsed: candidateTransactions.length,
-        totalNew: newTransactions.length,
-        totalSkipped,
-        totalNeedsReview,
-        totalPosted,
-      },
+      isDemoSource: isDemoMode,
+      stats: aggregateStats,
+      message: `Đã hoàn tất quét email: +${aggregateStats.totalNew} biến động mới.`,
     });
   } catch (error) {
     return NextResponse.json(

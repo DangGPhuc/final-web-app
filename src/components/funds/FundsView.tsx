@@ -8,7 +8,6 @@ import {
   calculateUnallocated,
   getTransactionYearMonth,
 } from '@/lib/finance/calculations';
-import { DEFAULT_CATEGORIES } from '@/lib/constants';
 import type { Fund } from '@/types';
 import {
   Plus,
@@ -17,9 +16,6 @@ import {
   Calendar,
   Lock,
   PieChart,
-  AlertTriangle,
-  CheckCircle2,
-  Layers,
 } from 'lucide-react';
 
 export function FundsView() {
@@ -42,9 +38,8 @@ export function FundsView() {
 
   // Form states
   const [name, setName] = useState('');
-  const [monthlyAllocation, setMonthlyAllocation] = useState(0);
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-  const [merchantInput, setMerchantInput] = useState('');
+  const [monthlyAllocation, setMonthlyAllocation] = useState(3000000);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Available months
   const availableMonths = useMemo(() => {
@@ -73,9 +68,7 @@ export function FundsView() {
   const openCreateModal = () => {
     setEditingFund(null);
     setName('');
-    setMonthlyAllocation(2000000);
-    setSelectedCategories([]);
-    setMerchantInput('');
+    setMonthlyAllocation(3000000);
     setModalOpen(true);
   };
 
@@ -83,42 +76,27 @@ export function FundsView() {
     setEditingFund(fund);
     setName(fund.name);
     setMonthlyAllocation(fund.monthlyAllocation);
-    setSelectedCategories(fund.categoryMappings || []);
-    setMerchantInput(fund.merchantMappings ? fund.merchantMappings.join(', ') : '');
     setModalOpen(true);
   };
 
-  const handleSaveFund = () => {
+  const handleSaveFund = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (!name.trim()) return;
 
-    const merchants = merchantInput
-      .split(',')
-      .map(m => m.trim().toLowerCase())
-      .filter(Boolean);
-
-    if (editingFund) {
-      editFund(editingFund.id, {
-        name: name.trim(),
-        monthlyAllocation,
-        categoryMappings: selectedCategories,
-        merchantMappings: merchants,
-      });
-    } else {
-      createFund({
-        name: name.trim(),
-        monthlyAllocation,
-        categoryMappings: selectedCategories,
-        merchantMappings: merchants,
-      });
+    setIsSubmitting(true);
+    try {
+      if (editingFund) {
+        await editFund(editingFund.id, {
+          name: name.trim(),
+          monthlyAllocation,
+        });
+      } else {
+        await createFund(name.trim(), monthlyAllocation);
+      }
+      setModalOpen(false);
+    } finally {
+      setIsSubmitting(false);
     }
-
-    setModalOpen(false);
-  };
-
-  const toggleCategory = (cat: string) => {
-    setSelectedCategories(prev =>
-      prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]
-    );
   };
 
   return (
@@ -176,7 +154,7 @@ export function FundsView() {
           <div className="text-xs text-[#9f9fa0] font-mono-data mb-1">
             TỔNG THU NHẬP THÁNG {selectedMonth}
           </div>
-          <div className="text-2xl font-light text-[#10b981]">
+          <div className="text-2xl font-light text-[#10b981] font-mono">
             +{formatCurrency(selectedMonthCashflow.totalIn)}
           </div>
           <div className="text-[11px] text-[#9f9fa0] mt-1">
@@ -188,7 +166,7 @@ export function FundsView() {
           <div className="text-xs text-[#9f9fa0] font-mono-data mb-1">
             TỔNG TIỀN ĐÃ PHÂN BỔ VÀO CÁC QUỸ
           </div>
-          <div className="text-2xl font-light text-[#f5f5f7]">
+          <div className="text-2xl font-light text-[#f5f5f7] font-mono">
             {formatCurrency(totalAllocated)}
           </div>
           <div className="text-[11px] text-[#9f9fa0] mt-1">
@@ -201,7 +179,7 @@ export function FundsView() {
             CHƯA PHÂN BỔ (UNALLOCATED)
           </div>
           <div
-            className={`text-2xl font-light ${
+            className={`text-2xl font-light font-mono ${
               unallocatedAmount >= 0 ? 'text-[#00b3dd]' : 'text-[#f43f5e]'
             }`}
           >
@@ -216,12 +194,12 @@ export function FundsView() {
       </div>
 
       {/* Funds Cards Grid */}
-      {fundStatuses.length === 0 ? (
+      {funds.length === 0 ? (
         <div className="cockpit-card p-12 text-center space-y-3">
           <PieChart className="w-8 h-8 text-[#9f9fa0] mx-auto opacity-40" />
           <div className="text-sm text-[#f5f5f7]">Chưa có quỹ nào được tạo</div>
           <div className="text-xs text-[#9f9fa0] max-w-sm mx-auto">
-            Hãy tạo các quỹ như Ăn uống, Sinh hoạt, Mua sắm, Dự phòng để kiểm soát chi tiêu theo từng mục tiêu.
+            Hãy tạo các quỹ như Quỹ ăn uống, Quỹ sinh hoạt, Quỹ dự phòng để kiểm soát chi tiêu theo từng mục tiêu.
           </div>
           <button onClick={openCreateModal} className="btn-primary text-xs mt-2">
             Tạo quỹ đầu tiên
@@ -229,14 +207,19 @@ export function FundsView() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {fundStatuses.map(status => {
-            const fund = funds.find(f => f.id === status.fundId);
-            if (!fund) return null;
+          {funds.map(fund => {
+            const status = fundStatuses.find(s => s.fundId === fund.id) || {
+              fundId: fund.id,
+              name: fund.name,
+              allocated: fund.monthlyAllocation,
+              spent: 0,
+              remaining: fund.monthlyAllocation,
+              usagePercent: 0,
+              overAmount: 0,
+              status: 'UNDER' as const,
+            };
 
             const isOver = status.status === 'OVER';
-            const isAtLimit = status.status === 'AT_LIMIT';
-
-            // Progress bar percentage capped visually at 100 for container
             const visualProgress = Math.min(status.usagePercent, 100);
 
             return (
@@ -297,7 +280,7 @@ export function FundsView() {
                     </div>
                   </div>
 
-                  {/* Progress Bar (Visual clean, no neon) */}
+                  {/* Progress Bar */}
                   <div className="mt-4 space-y-1.5">
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="text-[#9f9fa0]">Tiến độ sử dụng</span>
@@ -324,26 +307,6 @@ export function FundsView() {
                     </div>
                   </div>
                 </div>
-
-                {/* Fund Rules / Mappings preview */}
-                <div className="pt-3 border-t border-[#232427] flex flex-wrap gap-1 items-center">
-                  {fund.categoryMappings?.map(c => (
-                    <span
-                      key={c}
-                      className="text-[10px] px-2 py-0.5 rounded bg-[#2e2e2e] text-[#9f9fa0]"
-                    >
-                      {c}
-                    </span>
-                  ))}
-                  {fund.merchantMappings?.map(m => (
-                    <span
-                      key={m}
-                      className="text-[10px] px-2 py-0.5 rounded bg-[#090a0b] border border-[#232427] text-[#9f9fa0] font-mono"
-                    >
-                      @{m}
-                    </span>
-                  ))}
-                </div>
               </div>
             );
           })}
@@ -353,7 +316,10 @@ export function FundsView() {
       {/* Fund Create / Edit Modal */}
       {modalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="cockpit-card-elevated max-w-lg w-full p-6 space-y-5">
+          <form
+            onSubmit={handleSaveFund}
+            className="cockpit-card-elevated max-w-md w-full p-6 space-y-5 bg-[#17181a] border border-[#34363a]"
+          >
             <h3 className="text-base font-medium text-[#f5f5f7]">
               {editingFund ? 'Chỉnh sửa quỹ' : 'Tạo quỹ mới'}
             </h3>
@@ -363,6 +329,8 @@ export function FundsView() {
               <label className="text-xs text-[#9f9fa0] block mb-1">Tên quỹ</label>
               <input
                 type="text"
+                required
+                autoFocus
                 placeholder="VD: Quỹ ăn uống, Quỹ sinh hoạt..."
                 value={name}
                 onChange={e => setName(e.target.value)}
@@ -377,73 +345,40 @@ export function FundsView() {
               </label>
               <input
                 type="number"
+                min={0}
                 step={100000}
+                required
                 value={monthlyAllocation}
                 onChange={e => setMonthlyAllocation(Number(e.target.value) || 0)}
                 className="cockpit-input w-full text-xs font-mono"
               />
               <div className="text-[11px] text-[#9f9fa0] mt-1">
-                Số tiền này chỉ dùng để theo dõi hạn mức, KHÔNG làm thay đổi tổng số dư tài chính.
+                Số tiền này dùng để theo dõi giới hạn chi tiêu, KHÔNG làm thay đổi tổng số dư tài chính.
               </div>
-            </div>
-
-            {/* Category Mappings */}
-            <div>
-              <label className="text-xs text-[#9f9fa0] block mb-1.5">
-                Tự động gán cho danh mục
-              </label>
-              <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-1">
-                {DEFAULT_CATEGORIES.map(cat => {
-                  const isSelected = selectedCategories.includes(cat);
-                  return (
-                    <button
-                      type="button"
-                      key={cat}
-                      onClick={() => toggleCategory(cat)}
-                      className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                        isSelected
-                          ? 'bg-[#ffffff] text-[#000000] border-transparent font-medium'
-                          : 'bg-[#17181a] text-[#9f9fa0] border-[#232427] hover:border-[#34363a]'
-                      }`}
-                    >
-                      {cat}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Merchant Mappings */}
-            <div>
-              <label className="text-xs text-[#9f9fa0] block mb-1">
-                Từ khóa đối tác / thương nhân tự động gán (phân cách bởi dấu phẩy)
-              </label>
-              <input
-                type="text"
-                placeholder="grab, highland, shoppee..."
-                value={merchantInput}
-                onChange={e => setMerchantInput(e.target.value)}
-                className="cockpit-input w-full text-xs"
-              />
             </div>
 
             {/* Modal Actions */}
             <div className="flex justify-end gap-2 pt-4 border-t border-[#232427]">
               <button
+                type="button"
                 onClick={() => setModalOpen(false)}
                 className="btn-secondary text-xs"
               >
                 Hủy
               </button>
               <button
-                onClick={handleSaveFund}
-                disabled={!name.trim()}
+                type="submit"
+                disabled={isSubmitting || !name.trim()}
                 className="btn-primary text-xs"
               >
-                {editingFund ? 'Lưu thay đổi' : 'Tạo quỹ'}
+                {isSubmitting
+                  ? 'Đang lưu...'
+                  : editingFund
+                  ? 'Lưu thay đổi'
+                  : 'Tạo quỹ'}
               </button>
             </div>
-          </div>
+          </form>
         </div>
       )}
     </div>

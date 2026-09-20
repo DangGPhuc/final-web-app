@@ -2,432 +2,443 @@
 
 import React, { useState } from 'react';
 import { useApp } from '@/context/AppContext';
-import { formatCurrency, formatDate } from '@/lib/finance/calculations';
-import { DEFAULT_CATEGORIES, SUPPORTED_BANKS } from '@/lib/constants';
+import { formatDate } from '@/lib/finance/calculations';
+import type { SyncResultStats } from '@/types';
 import {
   Mail,
-  ShieldCheck,
-  Sliders,
-  Database,
-  Trash2,
   Plus,
   RefreshCw,
+  Trash2,
   AlertTriangle,
-  Info,
   CheckCircle2,
-  Sparkles,
+  Calendar,
+  AlertCircle,
+  ExternalLink,
+  ShieldCheck,
 } from 'lucide-react';
 
 export function SettingsView() {
   const {
-    settings,
-    updateSettings,
-    emailConnection,
+    gmailAccounts,
+    disconnectGmail,
     syncEmail,
-    merchantRules,
-    addMerchantRule,
-    deleteMerchantRule,
-    funds,
-    seedDemoData,
-    clearData,
+    isSyncing,
+    clearFinancialData,
+    factoryReset,
   } = useApp();
 
-  // Local form states
-  const [openingBalance, setOpeningBalance] = useState<number>(settings.openingBalance);
-  const [newSender, setNewSender] = useState('');
-  const [newRulePattern, setNewRulePattern] = useState('');
-  const [newRuleCategory, setNewRuleCategory] = useState<string>(DEFAULT_CATEGORIES[0]);
-  const [newRuleFundId, setNewRuleFundId] = useState<string>('');
+  // Historical import state
+  const [selectedAccountForSync, setSelectedAccountForSync] = useState<string>('ALL');
+  const [fromDate, setFromDate] = useState<string>('2026-09-01');
+  const [toDate, setToDate] = useState<string>('2026-09-20');
+  const [lastSyncStats, setLastSyncStats] = useState<SyncResultStats | null>(null);
 
-  const handleSaveFinance = () => {
-    updateSettings({
-      openingBalance,
-    });
+  // Modals & confirmation states
+  const [disconnectingAccount, setDisconnectingAccount] = useState<string | null>(null);
+  const [clearDataConfirmOpen, setClearDataConfirmOpen] = useState(false);
+  const [factoryResetConfirmOpen, setFactoryResetConfirmOpen] = useState(false);
+  const [isOperating, setIsOperating] = useState(false);
+
+  // Handle Quick Scan
+  const handleQuickScan = async () => {
+    const stats = await syncEmail({ accountId: selectedAccountForSync });
+    if (stats) setLastSyncStats(stats);
   };
 
-  const handleAddSender = () => {
-    if (!newSender.trim()) return;
-    const current = settings.trustedSenders || [];
-    if (!current.includes(newSender.trim().toLowerCase())) {
-      updateSettings({
-        trustedSenders: [...current, newSender.trim().toLowerCase()],
-      });
+  // Handle Historical Import
+  const handleHistoricalImport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const stats = await syncEmail({
+      accountId: selectedAccountForSync,
+      fromDate,
+      toDate,
+    });
+    if (stats) setLastSyncStats(stats);
+  };
+
+  // Confirm Disconnect Gmail
+  const handleConfirmDisconnect = async () => {
+    if (!disconnectingAccount) return;
+    setIsOperating(true);
+    try {
+      await disconnectGmail(disconnectingAccount);
+      setDisconnectingAccount(null);
+    } finally {
+      setIsOperating(false);
     }
-    setNewSender('');
   };
 
-  const handleRemoveSender = (sender: string) => {
-    const current = settings.trustedSenders || [];
-    updateSettings({
-      trustedSenders: current.filter(s => s !== sender),
-    });
+  // Confirm Clear Financial Data
+  const handleConfirmClearFinancial = async () => {
+    setIsOperating(true);
+    try {
+      await clearFinancialData();
+      setClearDataConfirmOpen(false);
+      setLastSyncStats(null);
+    } finally {
+      setIsOperating(false);
+    }
   };
 
-  const handleAddRule = () => {
-    if (!newRulePattern.trim()) return;
-    addMerchantRule({
-      pattern: newRulePattern.trim().toLowerCase(),
-      category: newRuleCategory,
-      fundId: newRuleFundId || undefined,
-    });
-    setNewRulePattern('');
+  // Confirm Factory Reset
+  const handleConfirmFactoryReset = async () => {
+    setIsOperating(true);
+    try {
+      await factoryReset();
+      setFactoryResetConfirmOpen(false);
+      setLastSyncStats(null);
+    } finally {
+      setIsOperating(false);
+    }
   };
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-4xl pb-10">
       <div>
         <h1 className="font-display text-2xl sm:text-3xl text-[#f5f5f7]">Cài đặt hệ thống</h1>
         <p className="text-xs text-[#9f9fa0] mt-1">
-          Quản lý kết nối Email Ingestion, quy tắc tự động phân loại và tham số tài chính cá nhân
+          Quản lý tài khoản Gmail liên kết, nhập lịch sử biến động ngân hàng và quản trị dữ liệu
         </p>
       </div>
 
-      {/* 1. EMAIL CONNECTION SECTION */}
+      {/* A. TÀI KHOẢN GMAIL ĐÃ LIÊN KẾT */}
       <div className="cockpit-card p-6 space-y-4">
-        <div className="flex items-center gap-2 text-sm font-medium text-[#f5f5f7]">
-          <Mail className="w-4 h-4 text-[#00b3dd]" />
-          <span>KẾT NỐI EMAIL (GMAIL INGESTION)</span>
-        </div>
-
-        <div className="p-4 rounded-xl bg-[#090a0b] border border-[#232427] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-[#f5f5f7] font-medium">Trạng thái kết nối:</span>
-              <span
-                className={`text-xs px-2 py-0.5 rounded font-mono ${
-                  emailConnection.connected
-                    ? 'bg-[#10b981]/20 text-[#10b981]'
-                    : 'bg-[#f59e0b]/20 text-[#f59e0b]'
-                }`}
-              >
-                {emailConnection.connected ? 'ĐÃ KẾT NỐI' : 'CHẾ ĐỘ TỰ ĐỘNG / DEMO'}
-              </span>
-            </div>
-            <div className="text-xs text-[#9f9fa0] mt-1">
-              {emailConnection.connected
-                ? `Tài khoản Gmail: ${emailConnection.email}`
-                : 'Chưa cấu hình OAuth Gmail trong .env.local. Đang sử dụng demo parser & fixture an toàn.'}
-            </div>
-            {emailConnection.lastSyncAt && (
-              <div className="text-[11px] text-[#6b6b70] mt-0.5">
-                Lần đồng bộ gần nhất: {formatDate(emailConnection.lastSyncAt, 'full')}
-              </div>
-            )}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Mail className="w-4 h-4 text-[#00b3dd]" />
+            <h2 className="text-sm font-medium text-[#f5f5f7]">A. TÀI KHOẢN GMAIL ĐÃ LIÊN KẾT</h2>
           </div>
 
-          <button
-            onClick={() => syncEmail(true)}
-            disabled={emailConnection.syncStatus === 'syncing'}
-            className="btn-primary text-xs flex items-center justify-center gap-1.5 whitespace-nowrap"
+          <a
+            href="/api/google/connect"
+            className="btn-primary text-xs flex items-center gap-1.5 py-1.5 px-3.5 shadow-none"
           >
-            <RefreshCw
-              className={`w-3.5 h-3.5 ${
-                emailConnection.syncStatus === 'syncing' ? 'animate-spin' : ''
-              }`}
-            />
-            <span>
-              {emailConnection.syncStatus === 'syncing' ? 'Đang đọc...' : 'Đồng bộ ngay'}
-            </span>
-          </button>
+            <Plus className="w-3.5 h-3.5" />
+            <span>Thêm tài khoản Gmail</span>
+          </a>
         </div>
 
-        <div className="text-xs text-[#9f9fa0] space-y-1">
-          <div className="text-[#f5f5f7] font-medium">Hướng dẫn kết nối Gmail thật:</div>
-          <div>
-            1. Tạo ứng dụng trên Google Cloud Console & bật <code>Gmail API</code>.
+        <p className="text-xs text-[#9f9fa0]">
+          Hỗ trợ liên kết một hoặc nhiều tài khoản Gmail nhận thông báo ngân hàng qua giao thức Google OAuth 2.0 an toàn.
+        </p>
+
+        {gmailAccounts.length === 0 ? (
+          <div className="p-6 rounded-xl bg-[#090a0b] border border-[#232427] text-center space-y-2">
+            <div className="text-xs text-[#f5f5f7] font-medium">Chưa có tài khoản Gmail nào được liên kết</div>
+            <div className="text-[11px] text-[#9f9fa0] max-w-md mx-auto">
+              Bấm "+ Thêm tài khoản Gmail" để kết nối tài khoản Gmail nhận email biến động ngân hàng của bạn. Bạn cũng có thể dùng địa chỉ Gmail thứ hai nhận chuyển tiếp (forwarding).
+            </div>
           </div>
-          <div>
-            2. Cấp quyền chỉ đọc tối thiểu: <code>https://www.googleapis.com/auth/gmail.readonly</code>.
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+            {gmailAccounts.map(account => (
+              <div
+                key={account.id}
+                className="p-4 rounded-xl bg-[#090a0b] border border-[#232427] hover:border-[#34363a] transition-colors flex items-center justify-between gap-3"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  {account.avatarUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={account.avatarUrl}
+                      alt={account.displayName || account.email}
+                      className="w-10 h-10 rounded-full border border-[#34363a] flex-shrink-0"
+                    />
+                  ) : (
+                    <div className="w-10 h-10 rounded-full bg-[#2e2e2e] text-[#f5f5f7] flex items-center justify-center text-xs font-mono font-bold flex-shrink-0">
+                      {account.email.charAt(0).toUpperCase()}
+                    </div>
+                  )}
+
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-[#f5f5f7] truncate">
+                      {account.displayName || account.email}
+                    </div>
+                    <div className="text-[11px] text-[#9f9fa0] font-mono truncate">
+                      {account.email}
+                    </div>
+                    <div className="text-[10px] text-[#6b6b70] mt-0.5">
+                      Lần quét: {account.lastSyncAt ? formatDate(account.lastSyncAt, 'short') : 'Chưa quét'}
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setDisconnectingAccount(account.id)}
+                  className="btn-secondary text-xs py-1 px-2.5 text-[#9f9fa0] hover:text-[#f43f5e] hover:border-[#f43f5e]/40 whitespace-nowrap flex-shrink-0"
+                >
+                  Ngắt kết nối
+                </button>
+              </div>
+            ))}
           </div>
-          <div>
-            3. Thiết lập các biến môi trường phía server trong <code>.env.local</code>:
-            <pre className="mt-1 p-2 rounded bg-[#090a0b] font-mono text-[11px] text-[#00b3dd] overflow-x-auto">
-              GMAIL_CLIENT_ID=...{'\n'}
-              GMAIL_CLIENT_SECRET=...{'\n'}
-              GMAIL_REFRESH_TOKEN=...{'\n'}
-              GMAIL_USER_EMAIL=youremail@gmail.com
-            </pre>
-          </div>
-          <div className="text-[11px] text-[#6b6b70]">
-            * Token OAuth được lưu an toàn trên server, tuyệt đối KHÔNG bao giờ truyền xuống trình duyệt.
-          </div>
-        </div>
+        )}
       </div>
 
-      {/* 2. EMAIL PARSER & TRUSTED SENDERS */}
+      {/* B. NHẬP DỮ LIỆU EMAIL */}
       <div className="cockpit-card p-6 space-y-5">
-        <div className="flex items-center gap-2 text-sm font-medium text-[#f5f5f7]">
-          <ShieldCheck className="w-4 h-4 text-[#10b981]" />
-          <span>BỘ PHÂN TÍCH EMAIL & AN TOÀN SỐ DƯ</span>
+        <div className="flex items-center gap-2">
+          <RefreshCw className="w-4 h-4 text-[#10b981]" />
+          <h2 className="text-sm font-medium text-[#f5f5f7]">B. NHẬP DỮ LIỆU EMAIL</h2>
         </div>
 
-        {/* Confidence Threshold */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-[#9f9fa0]">
-              Độ tin cậy tối thiểu để tự động ghi sổ (Auto-Post Confidence):
-            </span>
-            <span className="font-mono text-[#f5f5f7] font-semibold">
-              {(settings.autoPostMinConfidence * 100).toFixed(0)}%
-            </span>
-          </div>
-          <input
-            type="range"
-            min={0.5}
-            max={1.0}
-            step={0.05}
-            value={settings.autoPostMinConfidence}
-            onChange={e =>
-              updateSettings({ autoPostMinConfidence: parseFloat(e.target.value) })
-            }
-            className="w-full accent-[#ffffff]"
-          />
-          <div className="text-[11px] text-[#9f9fa0]">
-            Email từ người gửi tin cậy với độ tự tin parser ≥{' '}
-            {(settings.autoPostMinConfidence * 100).toFixed(0)}% sẽ tự động được ghi sổ (POSTED).
-            Dưới ngưỡng này sẽ chuyển vào hàng đợi <span className="text-[#f59e0b]">"Cần xem lại"</span> để tránh làm sai lệch số dư.
-          </div>
-        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          {/* Quick Scan */}
+          <div className="p-5 rounded-xl bg-[#090a0b] border border-[#232427] flex flex-col justify-between space-y-4">
+            <div>
+              <h3 className="text-xs font-medium text-[#f5f5f7] uppercase tracking-wider font-mono-data">
+                1. QUÉT EMAIL MỚI (QUICK SCAN)
+              </h3>
+              <p className="text-xs text-[#9f9fa0] mt-1.5">
+                Quét nhanh các email ngân hàng mới nhất kể từ lần đồng bộ thành công trước đó cho đến hiện tại.
+              </p>
+            </div>
 
-        {/* Trusted Senders List */}
-        <div className="space-y-3 pt-3 border-t border-[#232427]">
-          <label className="text-xs text-[#f5f5f7] font-medium block">
-            Danh sách email người gửi tin cậy (Trusted Bank Senders)
-          </label>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              placeholder="VD: vietcombank@vcb.com.vn, alert@techcombank.com.vn"
-              value={newSender}
-              onChange={e => setNewSender(e.target.value)}
-              className="cockpit-input flex-1 text-xs"
-            />
             <button
-              type="button"
-              onClick={handleAddSender}
-              className="btn-secondary text-xs flex items-center gap-1"
+              onClick={handleQuickScan}
+              disabled={isSyncing}
+              className="btn-primary text-xs flex items-center justify-center gap-2 py-2"
             >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Thêm</span>
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span>{isSyncing ? 'Đang đọc email...' : 'Quét email mới'}</span>
             </button>
           </div>
 
-          <div className="flex flex-wrap gap-2 pt-1">
-            {settings.trustedSenders?.map(sender => (
-              <span
-                key={sender}
-                className="text-xs px-2.5 py-1 rounded-lg bg-[#090a0b] border border-[#232427] text-[#f5f5f7] font-mono flex items-center gap-2"
-              >
-                <span>{sender}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveSender(sender)}
-                  className="text-[#9f9fa0] hover:text-[#f43f5e]"
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        </div>
-
-        {/* Supported Banks Status */}
-        <div className="pt-3 border-t border-[#232427] space-y-2">
-          <div className="text-xs text-[#f5f5f7] font-medium">
-            Trạng thái các parser ngân hàng hiện hỗ trợ:
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {SUPPORTED_BANKS.map(b => (
-              <div
-                key={b.code}
-                className="p-2 rounded-lg bg-[#090a0b] border border-[#232427] flex items-center justify-between text-xs"
-              >
-                <span className="text-[#f5f5f7]">{b.name}</span>
-                <span
-                  className={`text-[10px] font-mono ${
-                    b.parserSupported ? 'text-[#10b981]' : 'text-[#6b6b70]'
-                  }`}
-                >
-                  {b.parserSupported ? 'SẴN SÀNG' : 'GENERIC'}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* 3. AUTO CLASSIFICATION & MERCHANT RULES */}
-      <div className="cockpit-card p-6 space-y-4">
-        <div className="flex items-center gap-2 text-sm font-medium text-[#f5f5f7]">
-          <Sliders className="w-4 h-4 text-[#847dff]" />
-          <span>QUY TẮC TỰ ĐỘNG PHÂN LOẠI & GÁN QUỸ</span>
-        </div>
-        <p className="text-xs text-[#9f9fa0]">
-          Khi nội dung email hoặc giao dịch chứa từ khóa đối tác, tự động xếp vào danh mục và quỹ tương ứng.
-        </p>
-
-        {/* Add New Rule Form */}
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-          <input
-            type="text"
-            placeholder="Từ khóa (VD: grab, highland...)"
-            value={newRulePattern}
-            onChange={e => setNewRulePattern(e.target.value)}
-            className="cockpit-input text-xs"
-          />
-          <select
-            value={newRuleCategory}
-            onChange={e => setNewRuleCategory(e.target.value)}
-            className="cockpit-input text-xs"
-          >
-            {DEFAULT_CATEGORIES.map(c => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-          <select
-            value={newRuleFundId}
-            onChange={e => setNewRuleFundId(e.target.value)}
-            className="cockpit-input text-xs"
-          >
-            <option value="">-- Không gắn quỹ --</option>
-            {funds.map(f => (
-              <option key={f.id} value={f.id}>
-                {f.name}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={handleAddRule}
-            className="btn-secondary text-xs flex items-center justify-center gap-1"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Thêm quy tắc</span>
-          </button>
-        </div>
-
-        {/* Existing Rules */}
-        <div className="divide-y divide-[#232427] pt-2">
-          {merchantRules.length === 0 ? (
-            <div className="py-4 text-center text-xs text-[#9f9fa0]">
-              Chưa có quy tắc tự động nào được thêm.
+          {/* Historical Import */}
+          <div className="p-5 rounded-xl bg-[#090a0b] border border-[#232427] space-y-4">
+            <div>
+              <h3 className="text-xs font-medium text-[#f5f5f7] uppercase tracking-wider font-mono-data">
+                2. NHẬP LỊCH SỬ (HISTORICAL IMPORT)
+              </h3>
+              <p className="text-xs text-[#9f9fa0] mt-1.5">
+                Nhập lại biến động theo khoảng thời gian tùy chọn (ví dụ: từ 01/09/2026 đến 20/09/2026).
+              </p>
             </div>
-          ) : (
-            merchantRules.map(rule => {
-              const mappedFund = funds.find(f => f.id === rule.fundId);
-              return (
-                <div
-                  key={rule.id}
-                  className="py-2.5 flex items-center justify-between text-xs hover:bg-[#1f2022]/40 px-2 rounded-lg"
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono text-[#00b3dd]">@{rule.pattern}</span>
-                    <span className="text-[#9f9fa0]">→</span>
-                    <span className="text-[#f5f5f7]">{rule.category}</span>
-                    {mappedFund && (
-                      <span className="text-[11px] px-2 py-0.5 rounded bg-[#2e2e2e] text-[#f5f5f7]">
-                        {mappedFund.name}
-                      </span>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => deleteMerchantRule(rule.id)}
-                    className="text-[#9f9fa0] hover:text-[#f43f5e] p-1"
+
+            <form onSubmit={handleHistoricalImport} className="space-y-3">
+              {gmailAccounts.length > 1 && (
+                <div>
+                  <label className="text-[11px] text-[#9f9fa0] block mb-1">Tài khoản Gmail</label>
+                  <select
+                    value={selectedAccountForSync}
+                    onChange={e => setSelectedAccountForSync(e.target.value)}
+                    className="cockpit-input w-full text-xs font-mono"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                    <option value="ALL">Tất cả tài khoản liên kết</option>
+                    {gmailAccounts.map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.email}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-              );
-            })
-          )}
-        </div>
-      </div>
+              )}
 
-      {/* 4. PERSONAL FINANCE SETTINGS */}
-      <div className="cockpit-card p-6 space-y-4">
-        <div className="flex items-center gap-2 text-sm font-medium text-[#f5f5f7]">
-          <Database className="w-4 h-4 text-[#f5f5f7]" />
-          <span>THAM SỐ TÀI CHÍNH CÁ NHÂN</span>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[11px] text-[#9f9fa0] block mb-1">Từ ngày</label>
+                  <input
+                    type="date"
+                    required
+                    value={fromDate}
+                    onChange={e => setFromDate(e.target.value)}
+                    className="cockpit-input w-full text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-[#9f9fa0] block mb-1">Đến ngày</label>
+                  <input
+                    type="date"
+                    required
+                    value={toDate}
+                    onChange={e => setToDate(e.target.value)}
+                    className="cockpit-input w-full text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSyncing}
+                className="btn-secondary text-xs w-full py-2 flex items-center justify-center gap-1.5 font-medium hover:border-[#00b3dd] text-[#f5f5f7]"
+              >
+                <Calendar className="w-3.5 h-3.5 text-[#00b3dd]" />
+                <span>{isSyncing ? 'Đang nhập lịch sử...' : 'Nhập lịch sử'}</span>
+              </button>
+            </form>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="text-xs text-[#9f9fa0] block mb-1">
-              Số dư ban đầu (Opening Balance - VND)
-            </label>
-            <input
-              type="number"
-              step={100000}
-              value={openingBalance}
-              onChange={e => setOpeningBalance(parseFloat(e.target.value) || 0)}
-              className="cockpit-input w-full text-xs font-mono"
-            />
-            <div className="text-[11px] text-[#9f9fa0] mt-1">
-              Số dư hiện tại = Số dư ban đầu + Tiền vào - Tiền ra
+        {/* Sync Result Summary Card */}
+        {lastSyncStats && (
+          <div className="p-4 rounded-xl bg-[#090a0b] border border-[#00b3dd]/30 space-y-2 animate-in fade-in duration-200">
+            <div className="flex items-center gap-2 text-xs font-medium text-[#00b3dd]">
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Quét hoàn tất</span>
             </div>
-          </div>
 
-          <div>
-            <label className="text-xs text-[#9f9fa0] block mb-1">Đơn vị tiền tệ mặc định</label>
-            <input
-              type="text"
-              disabled
-              value="VND (Việt Nam Đồng)"
-              className="cockpit-input w-full text-xs opacity-60 font-mono"
-            />
-          </div>
-        </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-[#232427] text-xs">
+              <div>
+                <span className="text-[#9f9fa0] block text-[10px] font-mono-data">ĐÃ ĐỌC</span>
+                <span className="text-[#f5f5f7] font-mono font-medium">{lastSyncStats.totalFetched} email phù hợp</span>
+              </div>
+              <div>
+                <span className="text-[#9f9fa0] block text-[10px] font-mono-data">BIẾN ĐỘNG MỚI</span>
+                <span className="text-[#10b981] font-mono font-medium">+{lastSyncStats.totalNew}</span>
+              </div>
+              <div>
+                <span className="text-[#9f9fa0] block text-[10px] font-mono-data">ĐÃ TỒN TẠI</span>
+                <span className="text-[#9f9fa0] font-mono font-medium">{lastSyncStats.totalDuplicates}</span>
+              </div>
+              <div>
+                <span className="text-[#9f9fa0] block text-[10px] font-mono-data">KHÔNG ĐỌC ĐƯỢC</span>
+                <span className="text-[#f59e0b] font-mono font-medium">{lastSyncStats.totalFailed}</span>
+              </div>
+            </div>
 
-        <div className="flex justify-end pt-2">
-          <button
-            type="button"
-            onClick={handleSaveFinance}
-            className="btn-primary text-xs"
-          >
-            Lưu tham số tài chính
-          </button>
-        </div>
+            {(lastSyncStats.accountEmail || lastSyncStats.dateRange) && (
+              <div className="text-[11px] text-[#6b6b70] pt-1">
+                {lastSyncStats.accountEmail && <span>Gmail: {lastSyncStats.accountEmail} </span>}
+                {lastSyncStats.dateRange && <span>• Khoảng thời gian: {lastSyncStats.dateRange}</span>}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* 5. DATA MANAGEMENT & DEMO SEED */}
+      {/* C. QUẢN TRỊ DỮ LIỆU */}
       <div className="cockpit-card p-6 space-y-4">
         <div className="flex items-center gap-2 text-sm font-medium text-[#f5f5f7]">
-          <Database className="w-4 h-4 text-[#f43f5e]" />
-          <span>QUẢN TRỊ DỮ LIỆU CỤC BỘ</span>
+          <AlertTriangle className="w-4 h-4 text-[#f59e0b]" />
+          <span>C. QUẢN TRỊ DỮ LIỆU</span>
         </div>
         <p className="text-xs text-[#9f9fa0]">
-          Toàn bộ dữ liệu được lưu trữ trực tiếp trên thiết bị (LocalStorage Adapter v3). Không gửi thông tin tài chính cá nhân lên bất kỳ database đám mây nào.
+          Hỗ trợ thiết lập lại dữ liệu phục vụ buổi bảo vệ đồ án hoặc dọn dẹp số liệu cá nhân.
         </p>
 
-        <div className="flex flex-wrap gap-3 pt-2">
-          {/* Seed Demo Data button */}
-          <button
-            type="button"
-            onClick={seedDemoData}
-            className="btn-secondary text-xs flex items-center gap-1.5"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-[#00b3dd]" />
-            <span>Nạp dữ liệu mẫu thử nghiệm (Seed Demo)</span>
-          </button>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+          {/* Action 1: Xóa dữ liệu tài chính */}
+          <div className="p-4 rounded-xl bg-[#090a0b] border border-[#232427] flex flex-col justify-between space-y-3">
+            <div>
+              <div className="text-xs font-medium text-[#f5f5f7]">Xóa dữ liệu tài chính</div>
+              <p className="text-[11px] text-[#9f9fa0] mt-1">
+                Xóa biến động ngân hàng, danh mục, quỹ và snapshot. <strong>Giữ nguyên liên kết Gmail</strong> để bạn có thể bấm "Nhập lịch sử" nạp lại bất kỳ lúc nào.
+              </p>
+            </div>
+            <button
+              onClick={() => setClearDataConfirmOpen(true)}
+              className="btn-secondary text-xs text-[#f59e0b] hover:bg-[#f59e0b]/10 hover:border-[#f59e0b]/40 py-2"
+            >
+              Xóa dữ liệu tài chính
+            </button>
+          </div>
 
-          {/* Reset / Clear Data button */}
-          <button
-            type="button"
-            onClick={() => {
-              if (window.confirm('Bạn có chắc chắn muốn xóa toàn bộ dữ liệu tài chính cục bộ?')) {
-                clearData();
-              }
-            }}
-            className="text-xs px-4 py-2 rounded-lg bg-[#f43f5e]/10 hover:bg-[#f43f5e]/20 text-[#f43f5e] border border-[#f43f5e]/30 transition-colors flex items-center gap-1.5"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span>Xóa sạch dữ liệu cục bộ</span>
-          </button>
+          {/* Action 2: Khôi phục hệ thống về ban đầu (Factory Reset) */}
+          <div className="p-4 rounded-xl bg-[#090a0b] border border-[#f43f5e]/20 flex flex-col justify-between space-y-3">
+            <div>
+              <div className="text-xs font-medium text-[#f43f5e]">Khôi phục hệ thống về ban đầu</div>
+              <p className="text-[11px] text-[#9f9fa0] mt-1">
+                Thu hồi token Google, xóa sạch tài khoản liên kết và xóa toàn bộ dữ liệu tài chính.
+              </p>
+            </div>
+            <button
+              onClick={() => setFactoryResetConfirmOpen(true)}
+              className="btn-secondary text-xs text-[#f43f5e] hover:bg-[#f43f5e]/10 hover:border-[#f43f5e]/40 py-2"
+            >
+              Khôi phục ban đầu (Reset toàn bộ)
+            </button>
+          </div>
         </div>
       </div>
+
+      {/* Confirmation Modal: Disconnect Gmail */}
+      {disconnectingAccount && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="cockpit-card-elevated max-w-md w-full p-6 space-y-4 bg-[#17181a] border border-[#34363a]">
+            <h3 className="text-base font-medium text-[#f5f5f7]">Ngắt liên kết Gmail này?</h3>
+            <p className="text-xs text-[#9f9fa0] leading-relaxed">
+              Các giao dịch đã nhập sẽ được giữ lại trong lịch sử tài chính của bạn. Ứng dụng sẽ không thể quét thêm email mới từ tài khoản này.
+            </p>
+            <div className="flex justify-end gap-2 pt-3 border-t border-[#232427]">
+              <button
+                onClick={() => setDisconnectingAccount(null)}
+                className="btn-secondary text-xs"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleConfirmDisconnect}
+                disabled={isOperating}
+                className="btn-primary text-xs text-[#f43f5e] bg-transparent border border-[#f43f5e] hover:bg-[#f43f5e]/10"
+              >
+                {isOperating ? 'Đang ngắt...' : 'Xác nhận ngắt liên kết'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal: Clear Financial Data */}
+      {clearDataConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="cockpit-card-elevated max-w-md w-full p-6 space-y-4 bg-[#17181a] border border-[#34363a]">
+            <div className="flex items-center gap-2 text-[#f59e0b]">
+              <AlertTriangle className="w-5 h-5" />
+              <h3 className="text-base font-medium text-[#f5f5f7]">Xóa toàn bộ dữ liệu tài chính?</h3>
+            </div>
+            <p className="text-xs text-[#9f9fa0] leading-relaxed">
+              Thao tác này sẽ xóa toàn bộ biến động ngân hàng, danh mục đã tạo và các quỹ ngân sách trong database.
+              <br /><br />
+              <strong className="text-[#f5f5f7]">Tài khoản Gmail vẫn được giữ lại</strong>, bạn có thể ngay lập tức bấm "Nhập lịch sử" để nạp lại giao dịch.
+            </p>
+            <div className="flex justify-end gap-2 pt-3 border-t border-[#232427]">
+              <button
+                onClick={() => setClearDataConfirmOpen(false)}
+                className="btn-secondary text-xs"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleConfirmClearFinancial}
+                disabled={isOperating}
+                className="btn-primary text-xs text-[#f59e0b] bg-transparent border border-[#f59e0b] hover:bg-[#f59e0b]/10"
+              >
+                {isOperating ? 'Đang xóa...' : 'Xác nhận xóa tài chính'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal: Factory Reset */}
+      {factoryResetConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="cockpit-card-elevated max-w-md w-full p-6 space-y-4 bg-[#17181a] border border-[#f43f5e]/40">
+            <div className="flex items-center gap-2 text-[#f43f5e]">
+              <AlertCircle className="w-5 h-5" />
+              <h3 className="text-base font-medium text-[#f5f5f7]">Khôi phục hệ thống về ban đầu?</h3>
+            </div>
+            <p className="text-xs text-[#9f9fa0] leading-relaxed">
+              Thao tác này sẽ <strong className="text-[#f43f5e]">xóa vĩnh viễn toàn bộ dữ liệu</strong>, thu hồi token truy cập với Google và xóa tất cả tài khoản Gmail đã liên kết.
+            </p>
+            <div className="flex justify-end gap-2 pt-3 border-t border-[#232427]">
+              <button
+                onClick={() => setFactoryResetConfirmOpen(false)}
+                className="btn-secondary text-xs"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleConfirmFactoryReset}
+                disabled={isOperating}
+                className="btn-primary text-xs text-white bg-[#f43f5e] hover:bg-[#f43f5e]/90 border-none"
+              >
+                {isOperating ? 'Đang khôi phục...' : 'Xác nhận khôi phục cài đặt gốc'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

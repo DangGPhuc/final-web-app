@@ -1,0 +1,111 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model GmailConnection {
+  id                    String            @id @default(uuid())
+  googleSub             String            @unique
+  email                 String
+  displayName           String?
+  avatarUrl             String?
+  encryptedRefreshToken String            @db.Text
+  connectedAt           DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  lastSyncAt            DateTime?
+  revokedAt             DateTime?
+  transactions          BankTransaction[]
+  syncRuns              SyncRun[]
+}
+
+model BankTransaction {
+  id                  String           @id @default(uuid())
+  gmailConnectionId   String?
+  sourceEmail         String?
+  gmailMessageId      String           @unique
+  gmailThreadId       String?
+  bankCode            String?
+  bankName            String?
+  accountHint         String?
+  direction           String           // IN | OUT
+  amount              Float
+  currency            String           @default("VND")
+  occurredAt          DateTime
+  counterparty        String?
+  merchantLabel       String?          // Display hint only, does NOT classify automatically
+  summary             String
+  categoryId          String?
+  fundId              String?
+  classificationState String           @default("UNCLASSIFIED") // UNCLASSIFIED | CLASSIFIED
+  importedAt          DateTime         @default(now())
+
+  gmailConnection     GmailConnection? @relation(fields: [gmailConnectionId], references: [id], onDelete: SetNull)
+  category            Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  fund                Fund?            @relation(fields: [fundId], references: [id], onDelete: SetNull)
+
+  @@index([occurredAt])
+  @@index([classificationState])
+  @@index([gmailConnectionId])
+}
+
+model Category {
+  id           String            @id @default(uuid())
+  name         String            @unique
+  direction    String?           // IN | OUT | BOTH
+  createdAt    DateTime          @default(now())
+  transactions BankTransaction[]
+}
+
+model Fund {
+  id                String            @id @default(uuid())
+  name              String
+  monthlyAllocation Float
+  active            Boolean           @default(true)
+  createdAt         DateTime          @default(now())
+  transactions      BankTransaction[]
+}
+
+model SyncRun {
+  id                String           @id @default(uuid())
+  gmailConnectionId String?
+  accountEmail      String?
+  fromDate          DateTime?
+  toDate            DateTime?
+  startedAt         DateTime         @default(now())
+  finishedAt        DateTime?
+  fetchedCount      Int              @default(0)
+  importedCount     Int              @default(0)
+  duplicateCount    Int              @default(0)
+  failedCount       Int              @default(0)
+
+  gmailConnection   GmailConnection? @relation(fields: [gmailConnectionId], references: [id], onDelete: SetNull)
+}
+
+model MonthlySnapshot {
+  id              String   @id @default(uuid())
+  month           String   @unique // YYYY-MM
+  totalIncome     Float
+  totalExpense    Float
+  netSavings      Float
+  fundResultsJson String   @db.Text
+  closedAt        DateTime @default(now())
+}
+
+model PaperTrade {
+  id           String   @id @default(uuid())
+  instrument   String
+  direction    String
+  entryPrice   Float
+  currentPrice Float
+  margin       Float
+  leverage     Float
+  stopLoss     Float?
+  takeProfit   Float?
+  feePercent   Float    @default(0)
+  status       String   @default("OPEN")
+  createdAt    DateTime @default(now())
+}

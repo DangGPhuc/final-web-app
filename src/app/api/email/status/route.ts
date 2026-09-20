@@ -1,15 +1,22 @@
 import { NextResponse } from 'next/server';
-import { GmailProvider } from '@/lib/email/gmail-provider';
+import { prisma } from '@/lib/db';
 
 export async function GET() {
   try {
-    const provider = new GmailProvider();
-    const status = await provider.getStatus();
+    const connections = await prisma.gmailConnection.findMany({
+      where: { revokedAt: null },
+      orderBy: { connectedAt: 'desc' },
+    });
+
+    const isConnected = connections.length > 0;
+    const emails = connections.map(c => c.email);
+
     return NextResponse.json({
       provider: 'gmail',
-      connected: status.connected,
-      email: status.email,
-      error: status.error,
+      connected: isConnected,
+      email: emails[0] || undefined,
+      accountsCount: connections.length,
+      emails,
     });
   } catch (error) {
     return NextResponse.json(
