@@ -33,6 +33,10 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Generate Ephemeral Test Secrets
+        run: |
+          echo "TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+          echo "OWNER_SECRET_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
       - name: Apply Prisma Database Schema
         run: npx prisma db push --accept-data-loss
         env:
@@ -43,14 +47,10 @@ jobs:
           DATABASE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
           DATABASE_TEST_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
           ALLOW_DESTRUCTIVE_DB_TESTS: "true"
-          TOKEN_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-          OWNER_SECRET_KEY: "ci-owner-secret-key-test-32bytes"
       - name: Next.js Production Build
         run: npm run build
         env:
           DATABASE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
-          TOKEN_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-          OWNER_SECRET_KEY: "ci-owner-secret-key-test-32bytes"
       - name: Production Dependency Audit (omit dev)
         run: npm audit --omit=dev --audit-level=high
       - name: Full Dependency Audit (including dev)
