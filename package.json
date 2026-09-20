@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "test": "vitest run",
-    "typecheck": "next typegen && tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit",
+    "preflight:real": "node scripts/preflight-real-env.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
