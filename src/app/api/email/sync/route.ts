@@ -49,9 +49,6 @@ export async function POST(req: NextRequest) {
       isDemoMode = false,
       continuationTokens, // Record<string, string>: accountId -> opaque signed token
       continuationToken, // optional string for single-account
-      accountContinuationTokens, // deprecated alias
-      pageToken, // deprecated alias
-      quickScanBounds, // deprecated alias
     } = body as {
       mode?: 'QUICK' | 'HISTORICAL';
       accountId?: string;
@@ -60,28 +57,38 @@ export async function POST(req: NextRequest) {
       isDemoMode?: boolean;
       continuationTokens?: Record<string, string>;
       continuationToken?: string;
-      accountContinuationTokens?: Record<string, string>;
-      pageToken?: string;
-      quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
     };
-
-    const effectiveMode: 'QUICK' | 'HISTORICAL' =
-      mode || (fromDate || toDate ? 'HISTORICAL' : 'QUICK');
 
     // Build incoming continuation tokens map
     const incomingTokens: Record<string, string> = {
-      ...(accountContinuationTokens || {}),
       ...(continuationTokens || {}),
     };
     if (continuationToken && accountId && accountId !== 'ALL') {
       incomingTokens[accountId] = continuationToken;
     }
-    if (pageToken && accountId && accountId !== 'ALL' && !incomingTokens[accountId]) {
-      incomingTokens[accountId] = pageToken;
-    }
 
     const isAllAccounts = !accountId || accountId === 'ALL';
     const isContinuationMode = Object.keys(incomingTokens).length > 0;
+
+    // Determine effective mode:
+    // 1. Explicit mode in request takes precedence
+    // 2. If continuation token exists, inspect token mode
+    // 3. Fall back to HISTORICAL if dates provided, else QUICK
+    let requestedMode = mode;
+    if (!requestedMode && isContinuationMode) {
+      const firstToken = Object.values(incomingTokens)[0];
+      if (firstToken && firstToken.includes('.')) {
+        try {
+          const payload = JSON.parse(Buffer.from(firstToken.split('.')[0], 'base64url').toString('utf-8'));
+          if (payload?.mode === 'QUICK' || payload?.mode === 'HISTORICAL') {
+            requestedMode = payload.mode;
+          }
+        } catch {}
+      }
+    }
+    const effectiveMode: 'QUICK' | 'HISTORICAL' =
+      requestedMode || (fromDate || toDate ? 'HISTORICAL' : 'QUICK');
+
     const verifiedContinuationMap: Record<string, ContinuationData> = {};
 
     // Validate and authenticate continuation tokens server-side
@@ -145,38 +152,44 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 2. Validate date range parameters for Historical Mode
-    let fromDateObj: Date | undefined;
-    let toDateObj: Date | undefined;
-    let rangeStartMs: number | undefined;
-    let rangeEndMs: number | undefined;
+    // 2. Validate date range parameters for Historical Mode (initial non-continuation requests)
+    let reqFromDateObj: Date | undefined;
+    let reqToDateObj: Date | undefined;
+    let reqRangeStartMs: number | undefined;
+    let reqRangeEndMs: number | undefined;
 
-    if (effectiveMode === 'HISTORICAL') {
-      if (fromDate) {
-        try {
-          parseAndValidateIsoDate(fromDate);
-          fromDateObj = new Date(fromDate);
-        } catch (err) {
-          return NextResponse.json(
-            { success: false, error: err instanceof Error ? err.message : 'Tham số ngày bắt đầu (fromDate) không hợp lệ.' },
-            { status: 400, headers: NO_CACHE_HEADERS }
-          );
-        }
+    if (effectiveMode === 'HISTORICAL' && !isContinuationMode) {
+      if (!fromDate || !toDate) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Thiếu khoảng ngày cho Historical Import. Vui lòng cung cấp đầy đủ ngày bắt đầu và kết thúc.',
+          },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
       }
 
-      if (toDate) {
-        try {
-          parseAndValidateIsoDate(toDate);
-          toDateObj = new Date(toDate);
-        } catch (err) {
-          return NextResponse.json(
-            { success: false, error: err instanceof Error ? err.message : 'Tham số ngày kết thúc (toDate) không hợp lệ.' },
-            { status: 400, headers: NO_CACHE_HEADERS }
-          );
-        }
+      try {
+        parseAndValidateIsoDate(fromDate);
+        reqFromDateObj = new Date(fromDate);
+      } catch (err) {
+        return NextResponse.json(
+          { success: false, error: err instanceof Error ? err.message : 'Tham số ngày bắt đầu (fromDate) không hợp lệ.' },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
       }
 
-      if (fromDateObj && toDateObj && fromDateObj.getTime() > toDateObj.getTime()) {
+      try {
+        parseAndValidateIsoDate(toDate);
+        reqToDateObj = new Date(toDate);
+      } catch (err) {
+        return NextResponse.json(
+          { success: false, error: err instanceof Error ? err.message : 'Tham số ngày kết thúc (toDate) không hợp lệ.' },
+          { status: 400, headers: NO_CACHE_HEADERS }
+        );
+      }
+
+      if (fromDate > toDate) {
         return NextResponse.json(
           {
             success: false,
@@ -187,8 +200,8 @@ export async function POST(req: NextRequest) {
       }
 
       const boundaries = getVietnamDateRangeBoundaries(fromDate, toDate);
-      rangeStartMs = boundaries.rangeStartMs;
-      rangeEndMs = boundaries.rangeEndMs;
+      reqRangeStartMs = boundaries.rangeStartMs;
+      reqRangeEndMs = boundaries.rangeEndMs;
     }
 
     // 3. Fetch target Gmail connections
@@ -215,12 +228,10 @@ export async function POST(req: NextRequest) {
       totalNew: 0,
       totalDuplicates: 0,
       totalFailed: 0,
-      dateRange: effectiveMode === 'HISTORICAL' && fromDate && toDate ? `${fromDate} → ${toDate}` : undefined,
+      dateRange: undefined,
       truncated: false,
       accountResults: [],
       continuationTokens: {},
-      accountContinuationTokens: {},
-      quickScanBounds: {},
     };
 
     // 4. Handle Demo Mode (Explicit action only — Never automatic surprise)
@@ -238,8 +249,8 @@ export async function POST(req: NextRequest) {
         if (!parsed) return false;
         if (effectiveMode === 'HISTORICAL') {
           const d = parsed.occurredAt.getTime();
-          if (rangeStartMs !== undefined && d < rangeStartMs) return false;
-          if (rangeEndMs !== undefined && d >= rangeEndMs) return false;
+          if (reqRangeStartMs !== undefined && d < reqRangeStartMs) return false;
+          if (reqRangeEndMs !== undefined && d >= reqRangeEndMs) return false;
         }
         return true;
       });
@@ -353,8 +364,13 @@ export async function POST(req: NextRequest) {
       // Quick Scan bounded snapshot calculations
       let connLowerBoundEpoch: number | undefined;
       let connQuickScanUpperBoundEpoch: number | undefined;
-      let effectiveFromDate = fromDate;
-      let effectiveToDate = toDate;
+
+      let effectiveFromDate: string | undefined;
+      let effectiveToDate: string | undefined;
+      let effectiveFromDateObj: Date | undefined;
+      let effectiveToDateObj: Date | undefined;
+      let effectiveRangeStartMs: number | undefined;
+      let effectiveRangeEndMs: number | undefined;
 
       if (effectiveMode === 'QUICK') {
         if (continuationData && continuationData.mode === 'QUICK') {
@@ -370,10 +386,31 @@ export async function POST(req: NextRequest) {
           connLowerBoundEpoch = Math.floor(lowerBoundDate.getTime() / 1000);
         }
       } else {
+        // HISTORICAL MODE:
+        // Signed continuation token owns the ENTIRE historical range!
         if (continuationData && continuationData.mode === 'HISTORICAL') {
-          if (continuationData.fromDate) effectiveFromDate = continuationData.fromDate;
-          if (continuationData.toDate) effectiveToDate = continuationData.toDate;
+          effectiveFromDate = continuationData.fromDate;
+          effectiveToDate = continuationData.toDate;
+        } else {
+          effectiveFromDate = fromDate;
+          effectiveToDate = toDate;
         }
+
+        if (!effectiveFromDate || !effectiveToDate) {
+          return NextResponse.json(
+            { success: false, error: 'Thiếu khoảng ngày cho Historical Import.' },
+            { status: 400, headers: NO_CACHE_HEADERS }
+          );
+        }
+
+        parseAndValidateIsoDate(effectiveFromDate);
+        parseAndValidateIsoDate(effectiveToDate);
+        effectiveFromDateObj = new Date(effectiveFromDate);
+        effectiveToDateObj = new Date(effectiveToDate);
+
+        const boundaries = getVietnamDateRangeBoundaries(effectiveFromDate, effectiveToDate);
+        effectiveRangeStartMs = boundaries.rangeStartMs;
+        effectiveRangeEndMs = boundaries.rangeEndMs;
       }
 
       let ingestionResult: IngestionResult;
@@ -453,12 +490,13 @@ export async function POST(req: NextRequest) {
 
       for (const event of ingestionResult.events) {
         // In HISTORICAL mode: strictly enforce transaction-date range on actual occurredAt
+        // using the connection's effective range (signed token if continuation)
         if (effectiveMode === 'HISTORICAL') {
           const eventTimeMs = event.occurredAt.getTime();
-          if (rangeStartMs !== undefined && eventTimeMs < rangeStartMs) {
+          if (effectiveRangeStartMs !== undefined && eventTimeMs < effectiveRangeStartMs) {
             continue;
           }
-          if (rangeEndMs !== undefined && eventTimeMs >= rangeEndMs) {
+          if (effectiveRangeEndMs !== undefined && eventTimeMs >= effectiveRangeEndMs) {
             continue;
           }
         }
@@ -555,7 +593,7 @@ export async function POST(req: NextRequest) {
         newCount++;
       }
 
-      // Update sync run audit log
+      // Update sync run audit log using authoritative effective dates
       await prisma.syncRun.create({
         data: {
           gmailConnectionId: conn.id,
@@ -563,11 +601,11 @@ export async function POST(req: NextRequest) {
           fromDate:
             effectiveMode === 'QUICK'
               ? new Date(connLowerBoundEpoch! * 1000)
-              : fromDateObj,
+              : effectiveFromDateObj,
           toDate:
             effectiveMode === 'QUICK'
               ? new Date(connQuickScanUpperBoundEpoch! * 1000)
-              : toDateObj,
+              : effectiveToDateObj,
           startedAt,
           finishedAt: new Date(),
           fetchedCount: ingestionResult.totalFetched,
@@ -595,18 +633,6 @@ export async function POST(req: NextRequest) {
       aggregateStats.totalDuplicates += dupCount;
       aggregateStats.totalFailed += ingestionResult.failedCount;
 
-      const accountBounds =
-        effectiveMode === 'QUICK' && connLowerBoundEpoch && connQuickScanUpperBoundEpoch
-          ? {
-              lowerBoundEpoch: connLowerBoundEpoch,
-              quickScanUpperBoundEpoch: connQuickScanUpperBoundEpoch,
-            }
-          : undefined;
-
-      if (accountBounds && aggregateStats.quickScanBounds) {
-        aggregateStats.quickScanBounds[conn.id] = accountBounds;
-      }
-
       let signedContinuationToken: string | undefined;
       if (ingestionResult.truncated && ingestionResult.nextPageToken) {
         aggregateStats.truncated = true;
@@ -623,8 +649,8 @@ export async function POST(req: NextRequest) {
                 mode: 'HISTORICAL',
                 gmailConnectionId: conn.id,
                 pageToken: ingestionResult.nextPageToken,
-                fromDate: effectiveFromDate,
-                toDate: effectiveToDate,
+                fromDate: effectiveFromDate!,
+                toDate: effectiveToDate!,
               });
 
         if (!aggregateStats.continuationTokens) {
@@ -634,12 +660,6 @@ export async function POST(req: NextRequest) {
 
         if (!aggregateStats.continuationToken) {
           aggregateStats.continuationToken = signedContinuationToken;
-        }
-        if (!aggregateStats.nextPageToken) {
-          aggregateStats.nextPageToken = signedContinuationToken;
-        }
-        if (aggregateStats.accountContinuationTokens) {
-          aggregateStats.accountContinuationTokens[conn.id] = signedContinuationToken;
         }
       }
 
@@ -653,8 +673,6 @@ export async function POST(req: NextRequest) {
         status: 'ok',
         truncated: ingestionResult.truncated,
         continuationToken: signedContinuationToken,
-        nextPageToken: signedContinuationToken,
-        quickScanBounds: accountBounds,
       });
     }
 
@@ -671,14 +689,34 @@ export async function POST(req: NextRequest) {
 
     aggregateStats.accountEmail = accountsProcessed.join(', ');
 
+    if (effectiveMode === 'HISTORICAL') {
+      const firstTargetId = targetConnections[0]?.id;
+      const firstContinuation = firstTargetId ? verifiedContinuationMap[firstTargetId] : undefined;
+      const respFrom =
+        firstContinuation && firstContinuation.mode === 'HISTORICAL'
+          ? firstContinuation.fromDate
+          : fromDate;
+      const respTo =
+        firstContinuation && firstContinuation.mode === 'HISTORICAL'
+          ? firstContinuation.toDate
+          : toDate;
+      if (respFrom && respTo) {
+        aggregateStats.dateRange = `${respFrom} → ${respTo}`;
+      }
+    }
+
+    const truncatedMessage =
+      effectiveMode === 'QUICK'
+        ? 'Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý.'
+        : 'Đã nhập một phần lịch sử. Vẫn còn email cần quét.';
+    const completedMessage = `Đã hoàn tất quét email: +${aggregateStats.totalNew} biến động mới.`;
+
     return NextResponse.json(
       {
         success: true,
         isDemoSource: false,
         stats: aggregateStats,
-        message: aggregateStats.truncated
-          ? `Đã nhập một phần lịch sử: +${aggregateStats.totalNew} biến động mới. Vẫn còn email cần quét.`
-          : `Đã hoàn tất quét email: +${aggregateStats.totalNew} biến động mới.`,
+        message: aggregateStats.truncated ? truncatedMessage : completedMessage,
       },
       { headers: NO_CACHE_HEADERS }
     );

@@ -136,4 +136,63 @@ describe('Server-Authenticated Opaque Continuation Tokens', () => {
     expect(decoded).not.toContain(TEST_OWNER_KEY);
     expect(decoded).not.toContain('refresh');
   });
+
+  it('rejects invalid historical continuation calendar date', () => {
+    // Construct a token with invalid calendar date
+    const payload = {
+      version: 1,
+      mode: 'HISTORICAL',
+      gmailConnectionId: 'conn-hist-456',
+      pageToken: 'hist_token_001',
+      fromDate: '2026-02-31', // impossible date
+      toDate: '2026-03-15',
+      exp: Math.floor(Date.now() / 1000) + 1800,
+    };
+    const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const secret = Buffer.alloc(32, 9).toString('hex');
+    const crypto = require('crypto');
+    const key = crypto.createHmac('sha256', secret).update('gmail-continuation:v1').digest();
+    const sig = crypto.createHmac('sha256', key).update(payloadB64).digest('base64url');
+    const token = `${payloadB64}.${sig}`;
+
+    expect(() => verifyContinuationToken(token)).toThrow(InvalidContinuationError);
+  });
+
+  it('rejects historical token with fromDate > toDate', () => {
+    const payload = {
+      version: 1,
+      mode: 'HISTORICAL',
+      gmailConnectionId: 'conn-hist-456',
+      pageToken: 'hist_token_001',
+      fromDate: '2026-03-31',
+      toDate: '2026-03-01', // fromDate > toDate
+      exp: Math.floor(Date.now() / 1000) + 1800,
+    };
+    const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const secret = Buffer.alloc(32, 9).toString('hex');
+    const crypto = require('crypto');
+    const key = crypto.createHmac('sha256', secret).update('gmail-continuation:v1').digest();
+    const sig = crypto.createHmac('sha256', key).update(payloadB64).digest('base64url');
+    const token = `${payloadB64}.${sig}`;
+
+    expect(() => verifyContinuationToken(token)).toThrow(InvalidContinuationError);
+  });
+
+  it('rejects historical token missing fromDate or toDate', () => {
+    const payload = {
+      version: 1,
+      mode: 'HISTORICAL',
+      gmailConnectionId: 'conn-hist-456',
+      pageToken: 'hist_token_001',
+      exp: Math.floor(Date.now() / 1000) + 1800,
+    };
+    const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const secret = Buffer.alloc(32, 9).toString('hex');
+    const crypto = require('crypto');
+    const key = crypto.createHmac('sha256', secret).update('gmail-continuation:v1').digest();
+    const sig = crypto.createHmac('sha256', key).update(payloadB64).digest('base64url');
+    const token = `${payloadB64}.${sig}`;
+
+    expect(() => verifyContinuationToken(token)).toThrow(InvalidContinuationError);
+  });
 });

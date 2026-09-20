@@ -100,11 +100,6 @@ export interface GmailAccountInfo {
 
 export type SyncMode = 'QUICK' | 'HISTORICAL';
 
-export interface QuickScanBounds {
-  lowerBoundEpoch: number;
-  quickScanUpperBoundEpoch: number;
-}
-
 export interface AccountSyncResult {
   accountId: string;
   email: string;
@@ -116,10 +111,6 @@ export interface AccountSyncResult {
   errorMessage?: string;
   truncated?: boolean;
   continuationToken?: string;
-  /** @deprecated use continuationToken */
-  nextPageToken?: string;
-  /** @deprecated handled server-side in continuationToken */
-  quickScanBounds?: QuickScanBounds;
 }
 
 export interface SyncResultStats {
@@ -134,12 +125,6 @@ export interface SyncResultStats {
   continuationTokens?: Record<string, string>;
   continuationToken?: string;
   accountResults?: AccountSyncResult[];
-  /** @deprecated use continuationTokens */
-  accountContinuationTokens?: Record<string, string>;
-  /** @deprecated use continuationToken */
-  nextPageToken?: string;
-  /** @deprecated handled server-side in continuationTokens */
-  quickScanBounds?: Record<string, QuickScanBounds>;
 }
 
 // ─── Savings Forecast ───────────────────────────────────────────────────────

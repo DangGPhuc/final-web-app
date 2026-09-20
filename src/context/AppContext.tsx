@@ -80,9 +80,6 @@ interface AppContextType {
     isDemoMode?: boolean;
     continuationTokens?: Record<string, string>;
     continuationToken?: string;
-    pageToken?: string;
-    accountContinuationTokens?: Record<string, string>;
-    quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
   }) => Promise<SyncResultStats | null>;
   disconnectGmail: (accountId: string) => Promise<void>;
 
@@ -384,9 +381,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       isDemoMode?: boolean;
       continuationTokens?: Record<string, string>;
       continuationToken?: string;
-      pageToken?: string;
-      accountContinuationTokens?: Record<string, string>;
-      quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
     }) => {
       setIsSyncing(true);
       try {

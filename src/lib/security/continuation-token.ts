@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { getOwnerSecretKey } from './owner-auth';
+import { parseAndValidateIsoDate } from '../date';
 
 export class ContinuationExpiredError extends Error {
   code = 'continuation_expired' as const;
@@ -32,8 +33,8 @@ export interface HistoricalContinuationData {
   mode: 'HISTORICAL';
   gmailConnectionId: string;
   pageToken: string;
-  fromDate?: string;
-  toDate?: string;
+  fromDate: string;
+  toDate: string;
   exp: number;
 }
 
@@ -63,13 +64,21 @@ export function signContinuationToken(
         mode: 'HISTORICAL';
         gmailConnectionId: string;
         pageToken: string;
-        fromDate?: string;
-        toDate?: string;
+        fromDate: string;
+        toDate: string;
       },
   ttlSeconds = 1800
 ): string {
   const now = Math.floor(Date.now() / 1000);
   const exp = now + ttlSeconds;
+
+  if (params.mode === 'HISTORICAL') {
+    parseAndValidateIsoDate(params.fromDate);
+    parseAndValidateIsoDate(params.toDate);
+    if (params.fromDate > params.toDate) {
+      throw new InvalidContinuationError('Khoảng ngày trong token tiếp tục Historical không hợp lệ (fromDate > toDate).');
+    }
+  }
 
   const data: ContinuationData =
     params.mode === 'QUICK'
@@ -164,7 +173,18 @@ export function verifyContinuationToken(token: string): ContinuationData {
       throw new InvalidContinuationError('Khoảng thời gian Quick Scan trong token không hợp lệ.');
     }
   } else if (data.mode === 'HISTORICAL') {
-    // fromDate and toDate can be optional or valid strings
+    if (typeof data.fromDate !== 'string' || typeof data.toDate !== 'string') {
+      throw new InvalidContinuationError('Thiếu khoảng ngày trong token tiếp tục Historical.');
+    }
+    try {
+      parseAndValidateIsoDate(data.fromDate);
+      parseAndValidateIsoDate(data.toDate);
+    } catch {
+      throw new InvalidContinuationError('Khoảng ngày trong token tiếp tục Historical không hợp lệ.');
+    }
+    if (data.fromDate > data.toDate) {
+      throw new InvalidContinuationError('Khoảng ngày trong token tiếp tục Historical không hợp lệ (fromDate > toDate).');
+    }
   } else {
     throw new InvalidContinuationError('Chế độ quét trong token không hợp lệ.');
   }

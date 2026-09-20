@@ -324,30 +324,28 @@ export async function ingestFromGmail(
         let msgInternalDateMs: number | undefined;
         if (msgData.internalDate) {
           const parsedMs = Number(msgData.internalDate);
-          if (!isNaN(parsedMs) && parsedMs > 0) {
+          if (Number.isFinite(parsedMs) && parsedMs > 0) {
             msgInternalDateMs = parsedMs;
           }
         }
-        if (msgInternalDateMs === undefined && dateStr) {
-          const parsedHeader = new Date(dateStr).getTime();
-          if (!isNaN(parsedHeader) && parsedHeader > 0) {
-            msgInternalDateMs = parsedHeader;
-          }
+
+        if (msgInternalDateMs === undefined) {
+          // Fail closed in QUICK mode: missing, non-numeric, or <= 0 internalDate
+          failedCount++;
+          continue;
         }
 
-        if (msgInternalDateMs !== undefined) {
-          if (
-            options.lowerBoundEpoch !== undefined &&
-            msgInternalDateMs < options.lowerBoundEpoch * 1000
-          ) {
-            continue;
-          }
-          if (
-            options.upperBoundEpoch !== undefined &&
-            msgInternalDateMs >= options.upperBoundEpoch * 1000
-          ) {
-            continue;
-          }
+        if (
+          options.lowerBoundEpoch !== undefined &&
+          msgInternalDateMs < options.lowerBoundEpoch * 1000
+        ) {
+          continue;
+        }
+        if (
+          options.upperBoundEpoch !== undefined &&
+          msgInternalDateMs >= options.upperBoundEpoch * 1000
+        ) {
+          continue;
         }
       }
 

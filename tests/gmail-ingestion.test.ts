@@ -501,6 +501,109 @@ describe('Gmail Ingestion & Bank Parsing', () => {
           global.fetch = origFetch;
         }
       });
+
+      it('QUICK + missing internalDate → event excluded → failedCount increments', async () => {
+        const origFetch = global.fetch;
+        try {
+          global.fetch = vi.fn().mockImplementation(async (urlStr: string) => {
+            if (urlStr.includes('/messages?')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({ messages: [{ id: 'msg-no-internal-date' }] }),
+              };
+            }
+            if (urlStr.includes('/messages/msg-no-internal-date')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  id: 'msg-no-internal-date',
+                  snippet: 'VCB: TK 1234| GD: -10,000 VND | 05/09/2026',
+                  // internalDate missing completely!
+                  payload: {
+                    headers: [
+                      { name: 'From', value: 'vietcombank@vcb.com.vn' },
+                      { name: 'Subject', value: 'VCB: TK 1234| GD: -10,000 VND | 05/09/2026' },
+                      { name: 'Date', value: 'Sat, 05 Sep 2026 09:30:00 +0700' },
+                    ],
+                    body: {
+                      data: Buffer.from('VCB: TK 1234| GD: -10,000 VND | 05/09/2026').toString('base64'),
+                    },
+                  },
+                }),
+              };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+          });
+
+          const res = await ingestFromGmail('test-refresh-token', {
+            mode: 'QUICK',
+            lowerBoundEpoch,
+            upperBoundEpoch,
+          });
+
+          expect(res.events).toHaveLength(0);
+          expect(res.failedCount).toBe(1);
+        } finally {
+          global.fetch = origFetch;
+        }
+      });
+
+      it('QUICK + invalid internalDate (non-numeric or <= 0) → event excluded → failedCount increments', async () => {
+        const origFetch = global.fetch;
+        try {
+          global.fetch = vi.fn().mockImplementation(async (urlStr: string) => {
+            if (urlStr.includes('/messages?')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({ messages: [{ id: 'msg-invalid-internal-date' }] }),
+              };
+            }
+            if (urlStr.includes('/messages/msg-invalid-internal-date')) {
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  id: 'msg-invalid-internal-date',
+                  snippet: 'VCB: TK 1234| GD: -10,000 VND | 05/09/2026',
+                  internalDate: 'not-a-number', // non-numeric
+                  payload: {
+                    headers: [
+                      { name: 'From', value: 'vietcombank@vcb.com.vn' },
+                      { name: 'Subject', value: 'VCB: TK 1234| GD: -10,000 VND | 05/09/2026' },
+                      { name: 'Date', value: 'Sat, 05 Sep 2026 09:30:00 +0700' },
+                    ],
+                    body: {
+                      data: Buffer.from('VCB: TK 1234| GD: -10,000 VND | 05/09/2026').toString('base64'),
+                    },
+                  },
+                }),
+              };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+          });
+
+          const res = await ingestFromGmail('test-refresh-token', {
+            mode: 'QUICK',
+            lowerBoundEpoch,
+            upperBoundEpoch,
+          });
+
+          expect(res.events).toHaveLength(0);
+          expect(res.failedCount).toBe(1);
+        } finally {
+          global.fetch = origFetch;
+        }
+      });
+
+      it('QUICK + valid internalDate → normal half-open filter applies', async () => {
+        const res = await testMessageWithInternalDate(String(lowerBoundMs + 5000));
+        expect(res.events).toHaveLength(1);
+        expect(res.events[0].gmailMessageId).toBe('msg-boundary-test');
+        expect(res.failedCount).toBe(0);
+      });
     });
   });
 });

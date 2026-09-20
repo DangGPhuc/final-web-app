@@ -1167,5 +1167,259 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
       expect(dbRecords).toHaveLength(1);
       spy.mockRestore();
     });
+
+    it('historical continuation with no request fromDate/toDate uses signed token range', async () => {
+      const signedToken = signContinuationToken({
+        mode: 'HISTORICAL',
+        gmailConnectionId: connAId,
+        pageToken: 'page_token_hist_no_dates',
+        fromDate: '2026-01-01',
+        toDate: '2026-01-31',
+      });
+
+      let receivedOptions: any;
+      const spy = vi.spyOn(gmailClient, 'ingestFromGmail').mockImplementation(async (_, opts) => {
+        receivedOptions = opts;
+        return {
+          events: [
+            {
+              gmailMessageId: 'msg-jan-nodates-1',
+              bankCode: 'VCB',
+              bankName: 'Vietcombank',
+              direction: 'OUT' as const,
+              amount: 80000,
+              currency: 'VND',
+              occurredAt: new Date('2026-01-15T10:00:00.000Z'),
+              emailReceivedAt: new Date('2026-01-15T10:00:00.000Z'),
+              summary: 'Cafe thang 1',
+              fingerprint: 'fp-jan-nodates-1',
+            },
+          ],
+          totalFetched: 1,
+          failedCount: 0,
+          truncated: false,
+        };
+      });
+
+      // Request sent with NO fromDate and NO toDate
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'HISTORICAL',
+          accountId: connAId,
+          continuationTokens: { [connAId]: signedToken },
+        })
+      );
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.stats.totalNew).toBe(1);
+      expect(json.stats.dateRange).toBe('2026-01-01 → 2026-01-31');
+
+      // Gmail query used signed January dates
+      expect(receivedOptions.fromDate).toBe('2026-01-01');
+      expect(receivedOptions.toDate).toBe('2026-01-31');
+
+      // SyncRun recorded signed January dates
+      const run = await prisma.syncRun.findFirst({
+        where: { gmailConnectionId: connAId },
+        orderBy: { finishedAt: 'desc' },
+      });
+      expect(run?.fromDate?.toISOString()).toContain('2026-01-01');
+      expect(run?.toDate?.toISOString()).toContain('2026-01-31');
+      spy.mockRestore();
+    });
+
+    it('historical continuation with conflicting request dates cannot alter signed range (signed token wins)', async () => {
+      const signedToken = signContinuationToken({
+        mode: 'HISTORICAL',
+        gmailConnectionId: connAId,
+        pageToken: 'page_token_hist_conflict',
+        fromDate: '2026-01-01',
+        toDate: '2026-01-31',
+      });
+
+      let receivedOptions: any;
+      const spy = vi.spyOn(gmailClient, 'ingestFromGmail').mockImplementation(async (_, opts) => {
+        receivedOptions = opts;
+        return {
+          events: [
+            {
+              gmailMessageId: 'msg-jan-valid',
+              bankCode: 'VCB',
+              bankName: 'Vietcombank',
+              direction: 'OUT' as const,
+              amount: 100000,
+              currency: 'VND',
+              occurredAt: new Date('2026-01-20T10:00:00.000Z'), // in January signed range
+              emailReceivedAt: new Date('2026-01-20T10:00:00.000Z'),
+              summary: 'Giao dich hop le thang 1',
+              fingerprint: 'fp-jan-valid',
+            },
+            {
+              gmailMessageId: 'msg-sep-tamper',
+              bankCode: 'VCB',
+              bankName: 'Vietcombank',
+              direction: 'OUT' as const,
+              amount: 200000,
+              currency: 'VND',
+              occurredAt: new Date('2026-09-20T10:00:00.000Z'), // in September request range
+              emailReceivedAt: new Date('2026-09-20T10:00:00.000Z'),
+              summary: 'Giao dich bi loai vi ngoai pham vi ky',
+              fingerprint: 'fp-sep-tamper',
+            },
+          ],
+          totalFetched: 2,
+          failedCount: 0,
+          truncated: false,
+        };
+      });
+
+      // Client attempts to override range with September dates
+      const res = await syncRoute(
+        createSyncRequest({
+          mode: 'HISTORICAL',
+          accountId: connAId,
+          fromDate: '2026-09-01',
+          toDate: '2026-09-30',
+          continuationTokens: { [connAId]: signedToken },
+        })
+      );
+      expect(res.status).toBe(200);
+      const json = await res.json();
+
+      // Gmail query MUST use signed January dates
+      expect(receivedOptions.fromDate).toBe('2026-01-01');
+      expect(receivedOptions.toDate).toBe('2026-01-31');
+
+      // occurredAt filter used signed January dates -> only Jan event accepted, Sep event dropped!
+      expect(json.stats.totalNew).toBe(1);
+      const janTx = await prisma.bankTransaction.findFirst({ where: { gmailMessageId: 'msg-jan-valid' } });
+      const sepTx = await prisma.bankTransaction.findFirst({ where: { gmailMessageId: 'msg-sep-tamper' } });
+      expect(janTx).not.toBeNull();
+      expect(sepTx).toBeNull();
+
+      // SyncRun records signed January dates
+      const run = await prisma.syncRun.findFirst({
+        where: { gmailConnectionId: connAId },
+        orderBy: { finishedAt: 'desc' },
+      });
+      expect(run?.fromDate?.toISOString()).toContain('2026-01-01');
+      expect(run?.toDate?.toISOString()).toContain('2026-01-31');
+
+      // Response dateRange reflects signed token
+      expect(json.stats.dateRange).toBe('2026-01-01 → 2026-01-31');
+      spy.mockRestore();
+    });
+
+    it('rejects historical continuation token with invalid calendar date or fromDate > toDate', async () => {
+      // 1. Invalid calendar date in token
+      const invalidDatePayload = {
+        version: 1,
+        mode: 'HISTORICAL',
+        gmailConnectionId: connAId,
+        pageToken: 'tok_invalid_date',
+        fromDate: '2026-02-31',
+        toDate: '2026-03-15',
+        exp: Math.floor(Date.now() / 1000) + 1800,
+      };
+      const b64_1 = Buffer.from(JSON.stringify(invalidDatePayload)).toString('base64url');
+      const crypto = await import('crypto');
+      const key = crypto.createHmac('sha256', Buffer.alloc(32, 9).toString('hex')).update('gmail-continuation:v1').digest();
+      const sig_1 = crypto.createHmac('sha256', key).update(b64_1).digest('base64url');
+      const token1 = `${b64_1}.${sig_1}`;
+
+      const res1 = await syncRoute(
+        createSyncRequest({
+          mode: 'HISTORICAL',
+          accountId: connAId,
+          continuationTokens: { [connAId]: token1 },
+        })
+      );
+      expect(res1.status).toBe(400);
+      const json1 = await res1.json();
+      expect(json1.error).toBe('invalid_continuation_token');
+
+      // 2. fromDate > toDate in token
+      const invertedPayload = {
+        version: 1,
+        mode: 'HISTORICAL',
+        gmailConnectionId: connAId,
+        pageToken: 'tok_inverted_dates',
+        fromDate: '2026-03-31',
+        toDate: '2026-03-01',
+        exp: Math.floor(Date.now() / 1000) + 1800,
+      };
+      const b64_2 = Buffer.from(JSON.stringify(invertedPayload)).toString('base64url');
+      const sig_2 = crypto.createHmac('sha256', key).update(b64_2).digest('base64url');
+      const token2 = `${b64_2}.${sig_2}`;
+
+      const res2 = await syncRoute(
+        createSyncRequest({
+          mode: 'HISTORICAL',
+          accountId: connAId,
+          continuationTokens: { [connAId]: token2 },
+        })
+      );
+      expect(res2.status).toBe(400);
+      const json2 = await res2.json();
+      expect(json2.error).toBe('invalid_continuation_token');
+    });
+
+    it('returns mode-correct server message and no raw pageToken in response', async () => {
+      // 1. Truncated QUICK mode
+      const spy1 = vi.spyOn(gmailClient, 'ingestFromGmail').mockResolvedValueOnce({
+        events: [],
+        totalFetched: 50,
+        failedCount: 0,
+        truncated: true,
+        nextPageToken: 'raw_google_page_token_999',
+      });
+
+      const resQuick = await syncRoute(
+        createSyncRequest({
+          mode: 'QUICK',
+          accountId: connAId,
+        })
+      );
+      expect(resQuick.status).toBe(200);
+      const jsonQuick = await resQuick.json();
+      expect(jsonQuick.message).toBe('Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý.');
+      // Prove NO raw pageToken or deprecated aliases are in response
+      expect((jsonQuick.stats as any).nextPageToken).toBeUndefined();
+      expect((jsonQuick.stats as any).accountContinuationTokens).toBeUndefined();
+      expect((jsonQuick.stats as any).quickScanBounds).toBeUndefined();
+      expect(jsonQuick.stats.continuationTokens[connAId]).toBeDefined();
+      expect(jsonQuick.stats.continuationTokens[connAId]).not.toContain('raw_google_page_token_999');
+      expect((jsonQuick.stats.accountResults[0] as any).nextPageToken).toBeUndefined();
+      expect((jsonQuick.stats.accountResults[0] as any).quickScanBounds).toBeUndefined();
+      expect(jsonQuick.stats.accountResults[0].continuationToken).toBeDefined();
+      spy1.mockRestore();
+
+      // 2. Truncated HISTORICAL mode
+      const spy2 = vi.spyOn(gmailClient, 'ingestFromGmail').mockResolvedValueOnce({
+        events: [],
+        totalFetched: 50,
+        failedCount: 0,
+        truncated: true,
+        nextPageToken: 'raw_google_hist_token_888',
+      });
+
+      const resHist = await syncRoute(
+        createSyncRequest({
+          mode: 'HISTORICAL',
+          accountId: connAId,
+          fromDate: '2026-01-01',
+          toDate: '2026-01-31',
+        })
+      );
+      expect(resHist.status).toBe(200);
+      const jsonHist = await resHist.json();
+      expect(jsonHist.message).toBe('Đã nhập một phần lịch sử. Vẫn còn email cần quét.');
+      expect((jsonHist.stats as any).nextPageToken).toBeUndefined();
+      expect((jsonHist.stats as any).accountContinuationTokens).toBeUndefined();
+      expect((jsonHist.stats as any).quickScanBounds).toBeUndefined();
+      expect(jsonHist.stats.continuationTokens[connAId]).toBeDefined();
+      expect(jsonHist.stats.continuationTokens[connAId]).not.toContain('raw_google_hist_token_888');
+      spy2.mockRestore();
+    });
   });
 });

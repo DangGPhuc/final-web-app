@@ -70,7 +70,7 @@ Dự án phục vụ đồ án tốt nghiệp với cơ chế tự động đọ
   5. **Bộ lọc Gmail `internalDate` độc quyền & tối cao**: Sau khi nạp chi tiết message, hệ thống đối soát chính xác Gmail `internalDate`:
      $$\text{internalDate} \ge \text{lowerBoundEpoch} \times 1000 \quad \text{AND} \quad \text{internalDate} < \text{upperBoundEpoch} \times 1000$$
      Chỉ các email nằm chính xác trong nửa khoảng này mới trở thành giao dịch của đợt quét. Nhờ đó không có bất kỳ tích tắc nào bị bỏ sót (zero boundary-gap) giữa 2 lần quét liên tiếp, không phát sinh trùng lặp (kết hợp với DB deduplication độc quyền), và email sau mốc upper snapshot được để dành nguyên vẹn cho lần quét kế tiếp.
-  6. **Không dùng `occurredAt` cho Quick Scan**: Cửa sổ nhận thư Quick Scan căn cứ vào Gmail `internalDate`. Chế độ Historical Import tiếp tục sử dụng candidate cushion và lọc theo `occurredAt` trong khoảng ngày Việt Nam.
+  6. **Không dùng `occurredAt` cho Quick Scan & Fail-closed `internalDate`**: Cửa sổ nhận thư Quick Scan căn cứ duy nhất vào Gmail `internalDate`. Nếu `internalDate` bị thiếu, không phải số, hoặc $\le 0$, message lập tức bị loại bỏ và tăng `failedCount` (fail-closed, không dùng header Date RFC làm fallback). Chế độ Historical Import tiếp tục sử dụng candidate cushion và lọc theo `occurredAt` trong khoảng ngày Việt Nam.
   7. Nếu quét bị ngắt phân trang (truncated), `lastSyncAt` **giữ nguyên không đổi**.
   8. Chỉ khi trang cuối cùng hoàn tất thành công (`truncated === false`), `lastSyncAt` mới được cam kết tiến tới `quickScanUpperBound`.
 - **Watermark độc lập theo từng tài khoản**: Khi quét nhiều tài khoản (A xong, B dở dang, C lỗi), watermark của A tiến lên độc lập, B và C giữ nguyên watermark cũ.
@@ -94,14 +94,20 @@ Dự án phục vụ đồ án tốt nghiệp với cơ chế tự động đọ
     $$\text{Signing Key} = \text{HMAC}(\text{OWNER\_SECRET\_KEY}, \text{"gmail-continuation:v1"})$$
   - Payload bao gồm: `version`, `mode`, `gmailConnectionId`, `pageToken`, các mốc thời gian đã khóa (`lowerBoundEpoch`/`upperBoundEpoch` cho QUICK, hoặc `fromDate`/`toDate` cho HISTORICAL), và `expiresAt`.
   - Client chỉ nhận và gửi lại chuỗi token mờ (opaque string) qua trường `continuationTokens: Record<accountId, opaqueToken>`.
-- **Thẩm định Server-side nghiêm ngặt**:
+- **Thẩm định Server-side nghiêm ngặt & Quyền sở hữu khoảng ngày (Range Ownership)**:
   - Xác thực chữ ký cryptographic, từ chối mọi token bị giả mạo hoặc chỉnh sửa (`400 invalid_continuation_token`).
   - Đối chiếu đúng `gmailConnectionId` (token của Gmail A không thể đem sang dùng cho Gmail B).
   - Đối chiếu đúng `mode` (token QUICK không thể dùng cho HISTORICAL).
-  - Kiểm tra thời hạn hết hạn (TTL 15 phút): trả về lỗi an toàn `400 continuation_expired` nếu quá hạn, không tự ý khởi động lại quét với mốc mới.
+  - **Signed Historical Range Invariant**: Token Historical đã ký sở hữu toàn bộ khoảng ngày (`fromDate`, `toDate`). Tham số `fromDate`/`toDate` gửi từ client (nếu có) bị bỏ qua hoàn toàn; câu truy vấn Gmail, bộ lọc `occurredAt`, nhật ký kiểm toán `SyncRun` và phản hồi `dateRange` đều trích xuất đồng nhất từ token đã ký.
+  - Thẩm định nghiêm ngặt lịch ngày YYYY-MM-DD và điều kiện `fromDate <= toDate` ngay trong schema payload của token tiếp tục.
+  - Kiểm tra thời hạn hết hạn (TTL 30 phút, tức 1800 giây): trả về lỗi an toàn `400 continuation_expired` nếu quá hạn, không tự ý khởi động lại quét với mốc mới.
 - **Cách ly đa tài khoản trong ALL-account mode**:
   - Trả về bản đồ `continuationTokens` theo từng tài khoản.
   - Lần gửi tiếp theo chỉ xử lý các tài khoản còn dở dang (`pending`), các tài khoản đã hoàn tất (`completed`) không bao giờ bị chạy lại.
+- **Thông điệp máy chủ chuẩn hóa theo Sync Mode**:
+  - Khi ngắt trang QUICK: *"Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý."*
+  - Khi ngắt trang HISTORICAL: *"Đã nhập một phần lịch sử. Vẫn còn email cần quét."*
+  - Không để lộ bất kỳ raw Gmail `pageToken` hay `quickScanBounds` thô nào trong phản hồi API công khai.
 - **Tách bạch giao diện tiếp tục theo ngữ cảnh**:
   - **Quick Scan**: Hiển thị banner *"Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý."* cùng nút **[ Tiếp tục quét ]**.
   - **Historical Import**: Hiển thị banner *"Đã nhập một phần lịch sử. Vẫn còn email cần quét theo phân trang an toàn."* cùng nút **[ Tiếp tục nhập ]**.
