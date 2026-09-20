@@ -10,6 +10,7 @@ export async function GET() {
 
     const formatted = funds.map(f => ({
       ...f,
+      monthlyAllocation: Number(f.monthlyAllocation),
       createdAt: f.createdAt.toISOString(),
     }));
 
@@ -43,7 +44,7 @@ export async function POST(req: NextRequest) {
     const fund = await prisma.fund.create({
       data: {
         name: trimmedName,
-        monthlyAllocation: allocation,
+        monthlyAllocation: BigInt(Math.round(allocation)),
         active: true,
       },
     });
@@ -52,6 +53,7 @@ export async function POST(req: NextRequest) {
       success: true,
       fund: {
         ...fund,
+        monthlyAllocation: Number(fund.monthlyAllocation),
         createdAt: fund.createdAt.toISOString(),
       },
     });

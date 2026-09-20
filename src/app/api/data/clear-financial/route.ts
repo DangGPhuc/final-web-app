@@ -1,7 +1,19 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { OWNER_COOKIE_NAME, verifyOwnerSessionToken } from '@/lib/security/owner-auth';
 
-export async function POST() {
+export async function POST(req: NextRequest) {
+  const sessionCookie = req.cookies.get(OWNER_COOKIE_NAME)?.value;
+  const testBypass = req.headers.get('x-owner-test-bypass');
+  const isTest = process.env.NODE_ENV === 'test' && testBypass === 'test-authorized-owner';
+
+  if (!isTest && !verifyOwnerSessionToken(sessionCookie)) {
+    return NextResponse.json(
+      { success: false, error: 'Unauthorized: Phiên chủ sở hữu không hợp lệ (Owner session required).' },
+      { status: 401 }
+    );
+  }
+
   try {
     // Delete financial data inside a transaction, but keep Gmail connections and encrypted tokens
     await prisma.$transaction([

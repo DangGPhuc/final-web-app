@@ -35,12 +35,15 @@ export interface FetchEmailOptions {
   fromDate?: Date;
   toDate?: Date;
   maxMessages?: number;
+  pageToken?: string;
 }
 
 export interface IngestionResult {
   events: ParsedBankEvent[];
   totalFetched: number;
   failedCount: number;
+  truncated: boolean;
+  nextPageToken?: string;
 }
 
 /**
@@ -76,6 +79,33 @@ export function formatGmailDateQuery(d: Date): string {
 }
 
 /**
+ * Build privacy-preserving targeted Gmail search query for bank notification emails
+ */
+export function buildBankSearchQuery(options: { fromDate?: Date; toDate?: Date } = {}): string {
+  // Exact controlled bank sender domains
+  const senderFilter =
+    'from:(@vietcombank.com.vn OR @vcb.com.vn OR @techcombank.com.vn OR @tcb.com.vn OR @mbbank.com.vn OR @acb.com.vn OR @vpbank.com.vn OR @bidv.com.vn)';
+
+  // Controlled bank subject / notification signatures
+  const subjectFilter =
+    'subject:("biến động" OR "số dư" OR "ghi nợ" OR "ghi có" OR "giao dịch" OR "VCB:" OR "Techcombank")';
+
+  // Strict grouping ensures we never scan unrelated personal emails
+  const coreFilter = `(${senderFilter} OR ${subjectFilter})`;
+  const parts = [coreFilter];
+
+  if (options.fromDate) {
+    parts.push(`after:${formatGmailDateQuery(options.fromDate)}`);
+  }
+  if (options.toDate) {
+    const endPlusOne = new Date(options.toDate.getTime() + 24 * 60 * 60 * 1000);
+    parts.push(`before:${formatGmailDateQuery(endPlusOne)}`);
+  }
+
+  return parts.join(' ');
+}
+
+/**
  * Ingest bank notifications from Gmail account
  */
 export async function ingestFromGmail(
@@ -84,28 +114,15 @@ export async function ingestFromGmail(
 ): Promise<IngestionResult> {
   const accessToken = await refreshAccessToken(refreshToken);
 
-  // Build targeted bank query
-  const queryParts = [
-    'category:primary OR label:inbox',
-    '(VCB OR Vietcombank OR Techcombank OR "biến động" OR "số dư" OR "ghi nợ" OR "ghi có" OR "giao dịch" OR "GD: +" OR "GD: -")',
-  ];
+  const query = buildBankSearchQuery(options);
+  const maxMessages = options.maxMessages || 1000;
 
-  if (options.fromDate) {
-    queryParts.push(`after:${formatGmailDateQuery(options.fromDate)}`);
-  }
-  if (options.toDate) {
-    // Add 1 day to include end date in search
-    const endPlusOne = new Date(options.toDate.getTime() + 24 * 60 * 60 * 1000);
-    queryParts.push(`before:${formatGmailDateQuery(endPlusOne)}`);
-  }
-
-  const query = queryParts.join(' ');
-  const maxMessages = options.maxMessages || 200;
-
-  let pageToken: string | undefined;
+  let pageToken: string | undefined = options.pageToken;
+  let truncated = false;
+  let remainingToken: string | undefined;
   const messageIds: string[] = [];
 
-  // 1. Pagination loop with nextPageToken
+  // 1. Pagination loop with nextPageToken across multiple pages
   do {
     const listUrl = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
     listUrl.searchParams.set('q', query);
@@ -126,8 +143,18 @@ export async function ingestFromGmail(
     if (listData.messages) {
       for (const m of listData.messages) {
         messageIds.push(m.id);
-        if (messageIds.length >= maxMessages) break;
+        if (messageIds.length >= maxMessages) {
+          if (listData.nextPageToken) {
+            truncated = true;
+            remainingToken = listData.nextPageToken;
+          }
+          break;
+        }
       }
+    }
+
+    if (messageIds.length >= maxMessages) {
+      break;
     }
 
     pageToken = listData.nextPageToken;
@@ -191,6 +218,8 @@ export async function ingestFromGmail(
     events,
     totalFetched: messageIds.length,
     failedCount,
+    truncated,
+    nextPageToken: remainingToken,
   };
 }
 

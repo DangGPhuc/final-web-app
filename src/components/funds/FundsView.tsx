@@ -16,6 +16,7 @@ import {
   Calendar,
   Lock,
   PieChart,
+  AlertCircle,
 } from 'lucide-react';
 
 export function FundsView() {
@@ -40,6 +41,7 @@ export function FundsView() {
   const [name, setName] = useState('');
   const [monthlyAllocation, setMonthlyAllocation] = useState(3000000);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [fundError, setFundError] = useState<string | null>(null);
 
   // Available months
   const availableMonths = useMemo(() => {
@@ -69,6 +71,7 @@ export function FundsView() {
     setEditingFund(null);
     setName('');
     setMonthlyAllocation(3000000);
+    setFundError(null);
     setModalOpen(true);
   };
 
@@ -76,6 +79,7 @@ export function FundsView() {
     setEditingFund(fund);
     setName(fund.name);
     setMonthlyAllocation(fund.monthlyAllocation);
+    setFundError(null);
     setModalOpen(true);
   };
 
@@ -84,6 +88,7 @@ export function FundsView() {
     if (!name.trim()) return;
 
     setIsSubmitting(true);
+    setFundError(null);
     try {
       if (editingFund) {
         await editFund(editingFund.id, {
@@ -94,6 +99,8 @@ export function FundsView() {
         await createFund(name.trim(), monthlyAllocation);
       }
       setModalOpen(false);
+    } catch (err) {
+      setFundError(err instanceof Error ? err.message : 'Lỗi lưu quỹ');
     } finally {
       setIsSubmitting(false);
     }
@@ -323,6 +330,13 @@ export function FundsView() {
             <h3 className="text-base font-medium text-[#f5f5f7]">
               {editingFund ? 'Chỉnh sửa quỹ' : 'Tạo quỹ mới'}
             </h3>
+
+            {fundError && (
+              <div className="p-3 rounded-lg bg-[#f43f5e]/15 border border-[#f43f5e]/30 text-xs text-[#f43f5e] flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{fundError}</span>
+              </div>
+            )}
 
             {/* Fund Name */}
             <div>

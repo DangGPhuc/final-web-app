@@ -10,4 +10,11 @@ export const prisma =
     log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
   });
 
+// Ensure BigInt values serialize cleanly to JSON as integer numbers across all API routes
+if (typeof BigInt !== 'undefined' && !(BigInt.prototype as any).toJSON) {
+  (BigInt.prototype as any).toJSON = function () {
+    return Number(this);
+  };
+}
+
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;

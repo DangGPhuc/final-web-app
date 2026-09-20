@@ -13,12 +13,19 @@ export async function GET(req: NextRequest) {
 
     const formatted = transactions.map(t => ({
       ...t,
+      amount: Number(t.amount),
       occurredAt: t.occurredAt.toISOString(),
       importedAt: t.importedAt.toISOString(),
       direction: t.direction as 'IN' | 'OUT',
       classificationState: t.classificationState as 'UNCLASSIFIED' | 'CLASSIFIED',
       category: t.category ? { ...t.category, createdAt: t.category.createdAt.toISOString() } : null,
-      fund: t.fund ? { ...t.fund, createdAt: t.fund.createdAt.toISOString() } : null,
+      fund: t.fund
+        ? {
+            ...t.fund,
+            monthlyAllocation: Number(t.fund.monthlyAllocation),
+            createdAt: t.fund.createdAt.toISOString(),
+          }
+        : null,
     }));
 
     return NextResponse.json({ success: true, transactions: formatted });

@@ -27,10 +27,16 @@ export function SettingsView() {
     factoryReset,
   } = useApp();
 
+  // Dynamic default dates: 1st of current month to today
+  const now = new Date();
+  const defaultFromDate = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  const defaultToDate = now.toISOString().slice(0, 10);
+
   // Historical import state
   const [selectedAccountForSync, setSelectedAccountForSync] = useState<string>('ALL');
-  const [fromDate, setFromDate] = useState<string>('2026-09-01');
-  const [toDate, setToDate] = useState<string>('2026-09-20');
+  const [fromDate, setFromDate] = useState<string>(defaultFromDate);
+  const [toDate, setToDate] = useState<string>(defaultToDate);
+  const [dateError, setDateError] = useState<string | null>(null);
   const [lastSyncStats, setLastSyncStats] = useState<SyncResultStats | null>(null);
 
   // Modals & confirmation states
@@ -48,12 +54,33 @@ export function SettingsView() {
   // Handle Historical Import
   const handleHistoricalImport = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (fromDate > toDate) {
+      setDateError('Khoảng thời gian không hợp lệ: Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.');
+      return;
+    }
+    setDateError(null);
+
     const stats = await syncEmail({
       accountId: selectedAccountForSync,
       fromDate,
       toDate,
     });
     if (stats) setLastSyncStats(stats);
+  };
+
+  // Handle Explicit Demo Seed
+  const handleDemoSeed = async () => {
+    setIsOperating(true);
+    try {
+      const stats = await syncEmail({
+        isDemoMode: true,
+        fromDate,
+        toDate,
+      });
+      if (stats) setLastSyncStats(stats);
+    } finally {
+      setIsOperating(false);
+    }
   };
 
   // Confirm Disconnect Gmail
@@ -257,6 +284,13 @@ export function SettingsView() {
                 </div>
               </div>
 
+              {dateError && (
+                <div className="p-2.5 rounded-lg bg-[#f43f5e]/15 border border-[#f43f5e]/30 text-xs text-[#f43f5e] flex items-center gap-2 animate-in fade-in duration-150">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{dateError}</span>
+                </div>
+              )}
+
               <button
                 type="submit"
                 disabled={isSyncing}
@@ -274,13 +308,13 @@ export function SettingsView() {
           <div className="p-4 rounded-xl bg-[#090a0b] border border-[#00b3dd]/30 space-y-2 animate-in fade-in duration-200">
             <div className="flex items-center gap-2 text-xs font-medium text-[#00b3dd]">
               <CheckCircle2 className="w-4 h-4" />
-              <span>Quét hoàn tất</span>
+              <span>{lastSyncStats.truncated ? 'Quét một phần (Chưa hết trang)' : 'Quét hoàn tất'}</span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-[#232427] text-xs">
               <div>
                 <span className="text-[#9f9fa0] block text-[10px] font-mono-data">ĐÃ ĐỌC</span>
-                <span className="text-[#f5f5f7] font-mono font-medium">{lastSyncStats.totalFetched} email phù hợp</span>
+                <span className="text-[#f5f5f7] font-mono font-medium">{lastSyncStats.totalFetched} email</span>
               </div>
               <div>
                 <span className="text-[#9f9fa0] block text-[10px] font-mono-data">BIẾN ĐỘNG MỚI</span>
@@ -295,6 +329,15 @@ export function SettingsView() {
                 <span className="text-[#f59e0b] font-mono font-medium">{lastSyncStats.totalFailed}</span>
               </div>
             </div>
+
+            {lastSyncStats.truncated && (
+              <div className="p-2.5 rounded-lg bg-[#f59e0b]/15 border border-[#f59e0b]/30 text-xs text-[#f59e0b] flex items-center gap-2 mt-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>
+                  Quét một phần (giới hạn an toàn): Vẫn còn email tiếp theo trên Gmail. Bạn có thể chọn khoảng ngày hẹp hơn để quét toàn bộ.
+                </span>
+              </div>
+            )}
 
             {(lastSyncStats.accountEmail || lastSyncStats.dateRange) && (
               <div className="text-[11px] text-[#6b6b70] pt-1">
@@ -347,6 +390,29 @@ export function SettingsView() {
             >
               Khôi phục ban đầu (Reset toàn bộ)
             </button>
+          </div>
+
+          {/* Action 3: Nạp dữ liệu mẫu Demo */}
+          <div className="p-4 rounded-xl bg-[#090a0b] border border-[#232427] flex flex-col justify-between space-y-3 sm:col-span-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-medium text-[#00b3dd] flex items-center gap-1.5">
+                  <span>Nạp dữ liệu mẫu DEMO (Testing / Thuyết trình Offline)</span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#00b3dd]/15 text-[#00b3dd] font-mono">DEMO ONLY</span>
+                </div>
+                <p className="text-[11px] text-[#9f9fa0] mt-1">
+                  Chỉ sử dụng khi không kết nối tài khoản Google thật. Không tự động chạy ngầm.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleDemoSeed}
+                disabled={isOperating || isSyncing}
+                className="btn-secondary text-xs text-[#00b3dd] hover:bg-[#00b3dd]/10 hover:border-[#00b3dd]/40 py-1.5 px-3 shrink-0"
+              >
+                {isSyncing ? 'Đang nạp...' : 'Nạp dữ liệu mẫu Demo'}
+              </button>
+            </div>
           </div>
         </div>
       </div>

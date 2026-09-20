@@ -67,7 +67,7 @@ interface AppContextType {
   createCategory: (name: string, direction?: string) => Promise<Category>;
 
   // Email Sync & OAuth
-  syncEmail: (params?: { accountId?: string; fromDate?: string; toDate?: string }) => Promise<SyncResultStats | null>;
+  syncEmail: (params?: { accountId?: string; fromDate?: string; toDate?: string; isDemoMode?: boolean }) => Promise<SyncResultStats | null>;
   disconnectGmail: (accountId: string) => Promise<void>;
 
   // Month Snapshot / Close Operations
@@ -110,6 +110,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Refresh domain data from server
   const refreshData = useCallback(async () => {
     try {
+      // 1. Verify / bootstrap owner session
+      try {
+        const sessionCheck = await fetch('/api/owner/session');
+        const sessionData = await sessionCheck.json();
+        if (!sessionData.authenticated) {
+          await fetch('/api/owner/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ secretKey: 'cockpit-owner-demo-secret-2026' }),
+          });
+        }
+      } catch {
+        // Network or offline
+      }
+
+      // 2. Fetch domain data
       const [txRes, fundsRes, catRes, accRes] = await Promise.all([
         fetch('/api/transactions'),
         fetch('/api/funds'),
@@ -218,6 +234,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         showToast(`Đã phân loại thành công vào "${cat.name}"`, 'success');
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'Lỗi phân loại giao dịch', 'error');
+        throw err;
       }
     },
     [categories, createCategory, funds, showToast]
@@ -277,6 +294,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         showToast('Đã cập nhật quỹ', 'success');
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'Lỗi cập nhật quỹ', 'error');
+        throw err;
       }
     },
     [showToast]
@@ -299,7 +317,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Email Sync
   const syncEmail = useCallback(
-    async (params?: { accountId?: string; fromDate?: string; toDate?: string }) => {
+    async (params?: {
+      accountId?: string;
+      fromDate?: string;
+      toDate?: string;
+      isDemoMode?: boolean;
+    }) => {
       setIsSyncing(true);
       try {
         const res = await fetch('/api/email/sync', {

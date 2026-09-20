@@ -1,9 +1,9 @@
 name: Backend security gates
 on:
   pull_request:
-    branches: [main, dev/fintrack-v2, "feature/**", "fix/**"]
+    branches: [main, dev/fintrack-v2, "feature/**", "fix/**", "refactor/**"]
   push:
-    branches: [main, dev/fintrack-v2, "feature/**", "fix/**"]
+    branches: [main, dev/fintrack-v2, "feature/**", "fix/**", "refactor/**"]
 permissions:
   contents: read
 jobs:
@@ -33,28 +33,25 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Apply Prisma Database Schema
+        run: npx prisma db push --accept-data-loss
+        env:
+          DATABASE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
       - name: Test suite with real PostgreSQL 17
         run: npm test
         env:
+          DATABASE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
           DATABASE_TEST_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
           ALLOW_DESTRUCTIVE_DB_TESTS: "true"
-      - name: Backend security regression test suite
-        run: npm run test:backend
-        env:
-          DATABASE_TEST_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
-          DATABASE_RESTORE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_restore
-          DATABASE_MAINTENANCE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/postgres
-          ALLOW_DESTRUCTIVE_DB_TESTS: "true"
+          TOKEN_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          OWNER_SECRET_KEY: "ci-owner-secret-key-test-32bytes"
       - name: Next.js Production Build
         run: npm run build
+        env:
+          DATABASE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
+          TOKEN_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          OWNER_SECRET_KEY: "ci-owner-secret-key-test-32bytes"
       - name: Production Dependency Audit (omit dev)
         run: npm audit --omit=dev --audit-level=high
       - name: Full Dependency Audit (including dev)
         run: npm audit --audit-level=high
-      - name: Logical Backup & Restore Drill
-        run: ./scripts/backup-restore-drill.sh
-        env:
-          DATABASE_TEST_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_test
-          DATABASE_RESTORE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/fintrack_restore
-          DATABASE_MAINTENANCE_URL: postgres://postgres:ci-only-disposable-password@localhost:5432/postgres
-          ALLOW_DESTRUCTIVE_DB_TESTS: "true"

@@ -26,13 +26,15 @@ model BankTransaction {
   id                  String           @id @default(uuid())
   gmailConnectionId   String?
   sourceEmail         String?
-  gmailMessageId      String           @unique
+  gmailMessageId      String
   gmailThreadId       String?
+  bankRefId           String?          // Extracted bank transaction/reference ID (e.g. FT262500001)
+  fingerprint         String?          // Conservative normalized event fingerprint for cross-account forwarding dedupe
   bankCode            String?
   bankName            String?
   accountHint         String?
   direction           String           // IN | OUT
-  amount              Float
+  amount              BigInt           // Integer minor units (VND) avoiding floating-point imprecision
   currency            String           @default("VND")
   occurredAt          DateTime
   counterparty        String?
@@ -47,6 +49,10 @@ model BankTransaction {
   category            Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   fund                Fund?            @relation(fields: [fundId], references: [id], onDelete: SetNull)
 
+  @@unique([gmailConnectionId, gmailMessageId])
+  @@index([gmailMessageId])
+  @@index([bankRefId])
+  @@index([fingerprint])
   @@index([occurredAt])
   @@index([classificationState])
   @@index([gmailConnectionId])
@@ -63,7 +69,7 @@ model Category {
 model Fund {
   id                String            @id @default(uuid())
   name              String
-  monthlyAllocation Float
+  monthlyAllocation BigInt            @default(0) // Integer minor units (VND)
   active            Boolean           @default(true)
   createdAt         DateTime          @default(now())
   transactions      BankTransaction[]
@@ -88,9 +94,9 @@ model SyncRun {
 model MonthlySnapshot {
   id              String   @id @default(uuid())
   month           String   @unique // YYYY-MM
-  totalIncome     Float
-  totalExpense    Float
-  netSavings      Float
+  totalIncome     BigInt
+  totalExpense    BigInt
+  netSavings      BigInt
   fundResultsJson String   @db.Text
   closedAt        DateTime @default(now())
 }

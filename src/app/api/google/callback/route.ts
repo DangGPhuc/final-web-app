@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import {
   exchangeCodeForTokens,
   fetchGoogleUserProfile,
+  isMockOAuthAllowed,
 } from '@/lib/oauth/google-oauth';
 import { encryptToken } from '@/lib/security/crypto';
 
@@ -26,10 +27,20 @@ export async function GET(req: NextRequest) {
   const storedState = req.cookies.get('oauth_state')?.value;
   const storedVerifier = req.cookies.get('oauth_verifier')?.value;
 
-  // Validate CSRF state (allow mock flow in test/demo mode)
-  if (!code.startsWith('mock_') && (!storedState || storedState !== state)) {
+  // Validate CSRF state strictly
+  if (!storedState || storedState !== state) {
     const res = NextResponse.redirect(
       `${redirectBase}?tab=settings&oauth_error=state_mismatch`
+    );
+    res.cookies.delete('oauth_state');
+    res.cookies.delete('oauth_verifier');
+    return res;
+  }
+
+  // Reject mock codes if not permitted
+  if (code.startsWith('mock_') && !isMockOAuthAllowed()) {
+    const res = NextResponse.redirect(
+      `${redirectBase}?tab=settings&oauth_error=mock_oauth_prohibited`
     );
     res.cookies.delete('oauth_state');
     res.cookies.delete('oauth_verifier');

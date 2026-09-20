@@ -27,6 +27,7 @@ export async function PATCH(
       success: true,
       transaction: {
         ...updated,
+        amount: Number(updated.amount),
         occurredAt: updated.occurredAt.toISOString(),
         importedAt: updated.importedAt.toISOString(),
       },

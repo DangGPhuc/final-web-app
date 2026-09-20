@@ -56,4 +56,25 @@ describe('Google OAuth 2.0 Flow with PKCE & CSRF Protection', () => {
     expect(profile.sub).toContain('mock_sub_');
     expect(profile.email).toBe('finance@gmail.com');
   });
+
+  describe('Mock OAuth Security Regression Tests', () => {
+    it('strictly prohibits mock OAuth codes in production mode', async () => {
+      const origEnv = process.env.NODE_ENV;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.env as any).NODE_ENV = 'production';
+
+        await expect(
+          exchangeCodeForTokens('mock_code_attacker@gmail.com', 'verifier')
+        ).rejects.toThrow('Mock OAuth codes are strictly prohibited in this environment.');
+
+        await expect(
+          fetchGoogleUserProfile('mock_access_token_hacker')
+        ).rejects.toThrow('Mock access tokens are strictly prohibited in this environment.');
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.env as any).NODE_ENV = origEnv;
+      }
+    });
+  });
 });

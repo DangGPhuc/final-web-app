@@ -1,11 +1,15 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   decodeBase64Url,
   sanitizeHtmlToText,
   parseBankNotification,
   type RawEmailData,
 } from '../src/lib/email/bank-parsers';
-import { formatGmailDateQuery } from '../src/lib/email/gmail-client';
+import {
+  formatGmailDateQuery,
+  buildBankSearchQuery,
+  ingestFromGmail,
+} from '../src/lib/email/gmail-client';
 
 describe('Gmail Ingestion & Bank Parsing', () => {
   describe('Gmail Query Date Formatter', () => {
@@ -112,6 +116,164 @@ describe('Gmail Ingestion & Bank Parsing', () => {
 
       const event = parseBankNotification(spam);
       expect(event).toBeNull();
+    });
+
+    it('extracts bankRefId and generates deterministic financial fingerprint', () => {
+      const email: RawEmailData = {
+        id: 'msg-ref-1',
+        from: 'vietcombank@vcb.com.vn',
+        subject: 'VCB: TK ••••1234| GD: -120,000 VND | Ref: FT262500001 | Highlands Coffee',
+        snippet: 'VCB: TK ••••1234| GD: -120,000 VND | Ref: FT262500001 | Highlands Coffee',
+        bodyText: '',
+        date: '2026-09-06T14:15:00.000Z',
+      };
+
+      const event = parseBankNotification(email);
+      expect(event).not.toBeNull();
+      expect(event?.bankRefId).toBe('FT262500001');
+      expect(event?.fingerprint).toBeDefined();
+      expect(event?.fingerprint.length).toBe(64);
+    });
+  });
+
+  describe('Bank Search Query Generation', () => {
+    it('generates tightly grouped query with controlled sender domains and subject signatures', () => {
+      const query = buildBankSearchQuery({
+        fromDate: new Date('2026-09-01T00:00:00Z'),
+        toDate: new Date('2026-09-20T00:00:00Z'),
+      });
+
+      expect(query).toContain('@vietcombank.com.vn');
+      expect(query).toContain('@techcombank.com.vn');
+      expect(query).toContain('subject:(');
+      expect(query).toContain('after:2026/09/01');
+      expect(query).toContain('before:2026/09/21');
+      // Ensure outer grouping with parentheses
+      expect(query).toMatch(/^\([^(].*\)\s+after:/);
+    });
+  });
+
+  describe('Pagination Beyond 200 Messages & Truncation Handling', () => {
+    it('safely paginates across multiple pages without silent 200 truncation', async () => {
+      // Mock global fetch for Gmail API
+      const origFetch = global.fetch;
+      try {
+        let callCount = 0;
+        global.fetch = vi.fn().mockImplementation((url: string) => {
+          if (url.includes('users/me/messages?')) {
+            callCount++;
+            if (callCount === 1) {
+              return Promise.resolve({
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    messages: Array.from({ length: 100 }, (_, i) => ({
+                      id: `msg_page1_${i}`,
+                      threadId: `t1_${i}`,
+                    })),
+                    nextPageToken: 'token_page2',
+                  }),
+              });
+            } else if (callCount === 2) {
+              return Promise.resolve({
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    messages: Array.from({ length: 100 }, (_, i) => ({
+                      id: `msg_page2_${i}`,
+                      threadId: `t2_${i}`,
+                    })),
+                    nextPageToken: 'token_page3',
+                  }),
+              });
+            } else {
+              return Promise.resolve({
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    messages: Array.from({ length: 50 }, (_, i) => ({
+                      id: `msg_page3_${i}`,
+                      threadId: `t3_${i}`,
+                    })),
+                    // No nextPageToken on last page
+                  }),
+              });
+            }
+          }
+
+          // Detail calls return a valid VCB email
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                id: 'mock_detail_id',
+                snippet: 'VCB: TK 1234| GD: -50,000 VND | 10/09/2026 | Cafe',
+                internalDate: '1788950000000',
+                payload: {
+                  headers: [
+                    { name: 'From', value: 'vietcombank@vcb.com.vn' },
+                    { name: 'Subject', value: 'VCB: TK 1234| GD: -50,000 VND | Cafe' },
+                    { name: 'Date', value: '2026-09-10T10:00:00Z' },
+                  ],
+                  body: { data: Buffer.from('VCB: TK 1234| GD: -50,000 VND | Cafe').toString('base64') },
+                },
+              }),
+          });
+        });
+
+        // Set mock OAuth allowed for test
+        process.env.ALLOW_MOCK_OAUTH = 'true';
+        const result = await ingestFromGmail('mock_refresh_token_test', {
+          maxMessages: 500,
+        });
+
+        expect(result.totalFetched).toBe(250);
+        expect(result.truncated).toBe(false);
+        expect(callCount).toBe(3);
+      } finally {
+        global.fetch = origFetch;
+      }
+    });
+
+    it('exposes truncated: true and nextPageToken when safety limit is reached', async () => {
+      const origFetch = global.fetch;
+      try {
+        global.fetch = vi.fn().mockImplementation((url: string) => {
+          if (url.includes('users/me/messages?')) {
+            return Promise.resolve({
+              ok: true,
+              json: () =>
+                Promise.resolve({
+                  messages: Array.from({ length: 100 }, (_, i) => ({
+                    id: `msg_p1_${i}`,
+                    threadId: `t_${i}`,
+                  })),
+                  nextPageToken: 'token_next_page_overflow',
+                }),
+            });
+          }
+          return Promise.resolve({
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                id: 'mock_detail',
+                snippet: 'VCB: TK 1234| GD: -50,000 VND | Test',
+                internalDate: '1788950000000',
+                payload: { headers: [], body: {} },
+              }),
+          });
+        });
+
+        const result = await ingestFromGmail('mock_refresh_token_test', {
+          maxMessages: 50, // lower cap to test truncation
+        });
+
+        expect(result.totalFetched).toBe(50);
+        expect(result.truncated).toBe(true);
+        expect(result.nextPageToken).toBe('token_next_page_overflow');
+      } finally {
+        global.fetch = origFetch;
+      }
     });
   });
 });

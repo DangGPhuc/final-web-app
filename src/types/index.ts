@@ -11,6 +11,8 @@ export interface BankTransaction {
   sourceEmail?: string | null;
   gmailMessageId: string;
   gmailThreadId?: string | null;
+  bankRefId?: string | null;
+  fingerprint?: string | null;
   bankCode?: string | null;
   bankName?: string | null;
   accountHint?: string | null;
@@ -102,6 +104,8 @@ export interface SyncResultStats {
   totalFailed: number;
   accountEmail?: string;
   dateRange?: string;
+  truncated?: boolean;
+  nextPageToken?: string;
 }
 
 // ─── Savings Forecast ───────────────────────────────────────────────────────

@@ -1,7 +1,16 @@
-import { describe, it, expect } from 'vitest';
-import { encryptToken, decryptToken } from '../src/lib/security/crypto';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { encryptToken, decryptToken, setTestEncryptionKey } from '../src/lib/security/crypto';
+
+const VALID_TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 describe('Token Security — AES-256-GCM Authenticated Encryption', () => {
+  beforeEach(() => {
+    setTestEncryptionKey(VALID_TEST_KEY);
+  });
+
+  afterEach(() => {
+    setTestEncryptionKey(null);
+  });
   it('encrypts and decrypts a Google refresh token cleanly', () => {
     const rawToken = '1//04mock_google_refresh_token_very_long_secret_xyz123';
     const encrypted = encryptToken(rawToken);
@@ -52,5 +61,47 @@ describe('Token Security — AES-256-GCM Authenticated Encryption', () => {
   it('returns empty string for empty inputs', () => {
     expect(encryptToken('')).toBe('');
     expect(decryptToken('')).toBe('');
+  });
+
+  describe('Fail-Closed Key Validation Regression Tests', () => {
+    it('refuses to encrypt when TOKEN_ENCRYPTION_KEY is absent outside controlled tests', () => {
+      const origKey = process.env.TOKEN_ENCRYPTION_KEY;
+      try {
+        delete process.env.TOKEN_ENCRYPTION_KEY;
+        setTestEncryptionKey(null);
+
+        expect(() => encryptToken('some_secret_refresh_token')).toThrow(
+          'TOKEN_ENCRYPTION_KEY is required and must be configured.'
+        );
+      } finally {
+        process.env.TOKEN_ENCRYPTION_KEY = origKey;
+      }
+    });
+
+    it('refuses to encrypt when key is invalid length (not 32 bytes)', () => {
+      try {
+        setTestEncryptionKey('too_short_key_123');
+        expect(() => encryptToken('some_secret_refresh_token')).toThrow(
+          'TOKEN_ENCRYPTION_KEY must provide exactly 32 bytes'
+        );
+      } finally {
+        setTestEncryptionKey(null);
+      }
+    });
+
+    it('never leaks key material in thrown errors', () => {
+      const sensitiveKey = 'bad_length_key_secret_that_must_not_appear';
+      try {
+        setTestEncryptionKey(sensitiveKey);
+        try {
+          encryptToken('some_secret');
+          expect.fail('Should have thrown');
+        } catch (err: unknown) {
+          expect((err as Error).message).not.toContain(sensitiveKey);
+        }
+      } finally {
+        setTestEncryptionKey(null);
+      }
+    });
   });
 });

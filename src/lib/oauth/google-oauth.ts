@@ -27,6 +27,13 @@ export interface GoogleUserProfile {
   picture?: string;
 }
 
+export function isMockOAuthAllowed(): boolean {
+  if (process.env.NODE_ENV === 'production') {
+    return false;
+  }
+  return process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_OAUTH === 'true';
+}
+
 export function generateOAuthState(): string {
   return crypto.randomBytes(32).toString('hex');
 }
@@ -67,8 +74,11 @@ export async function exchangeCodeForTokens(
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
   const redirectUri = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/api/google/callback';
 
-  // Support test / mock flow when mock credentials or testing
-  if (code.startsWith('mock_code_') || clientId === 'mock-google-client-id.apps.googleusercontent.com') {
+  // Support test / mock flow ONLY when explicitly allowed (test or safe non-prod flag)
+  if (code.startsWith('mock_')) {
+    if (!isMockOAuthAllowed()) {
+      throw new Error('Mock OAuth codes are strictly prohibited in this environment.');
+    }
     const mockEmail = code.includes('@') ? code.replace('mock_code_', '') : 'user@gmail.com';
     return {
       access_token: `mock_access_token_${Date.now()}`,
@@ -104,7 +114,10 @@ export async function fetchGoogleUserProfile(
   accessToken: string,
   fallbackEmail?: string
 ): Promise<GoogleUserProfile> {
-  if (accessToken.startsWith('mock_access_token_')) {
+  if (accessToken.startsWith('mock_')) {
+    if (!isMockOAuthAllowed()) {
+      throw new Error('Mock access tokens are strictly prohibited in this environment.');
+    }
     const email = fallbackEmail || 'demouser@gmail.com';
     return {
       sub: `mock_sub_${Buffer.from(email).toString('hex').slice(0, 16)}`,
@@ -133,7 +146,10 @@ export async function fetchGoogleUserProfile(
 }
 
 export async function refreshAccessToken(refreshToken: string): Promise<string> {
-  if (refreshToken.startsWith('mock_refresh_token_')) {
+  if (refreshToken.startsWith('mock_')) {
+    if (!isMockOAuthAllowed()) {
+      throw new Error('Mock refresh tokens are strictly prohibited in this environment.');
+    }
     return `mock_access_token_${Date.now()}`;
   }
 
@@ -160,7 +176,12 @@ export async function refreshAccessToken(refreshToken: string): Promise<string> 
 }
 
 export async function revokeGoogleToken(token: string): Promise<boolean> {
-  if (token.startsWith('mock_')) return true;
+  if (token.startsWith('mock_')) {
+    if (!isMockOAuthAllowed()) {
+      return false;
+    }
+    return true;
+  }
 
   try {
     const response = await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(token)}`, {

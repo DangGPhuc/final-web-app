@@ -8,6 +8,7 @@
  * - If amount or direction cannot be determined reliably, returns null (do NOT create transaction).
  */
 
+import crypto from 'crypto';
 import { detectMerchantContext } from '@/lib/finance/calculations';
 
 export interface RawEmailData {
@@ -22,6 +23,8 @@ export interface RawEmailData {
 export interface ParsedBankEvent {
   gmailMessageId: string;
   gmailThreadId?: string;
+  bankRefId?: string;
+  fingerprint: string;
   bankCode: string;
   bankName: string;
   accountHint?: string;
@@ -32,6 +35,36 @@ export interface ParsedBankEvent {
   counterparty?: string;
   merchantLabel?: string;
   summary: string;
+}
+
+/**
+ * Extract bank transaction or reference code from text
+ */
+export function extractBankRefId(text: string): string | undefined {
+  const refMatch =
+    text.match(/(?:mã\s*gd|số\s*gd|so\s*gd|ma\s*gd|ref(?:erence)?|ft\s*no\.?)[:\s#]*([a-zA-Z0-9.\-_]{5,30})/i) ||
+    text.match(/\b(FT[0-9]{8,22})\b/i);
+  return refMatch ? refMatch[1].trim() : undefined;
+}
+
+/**
+ * Generate conservative normalized event fingerprint for cross-account forwarding deduplication
+ */
+export function generateFinancialFingerprint(params: {
+  bankCode: string;
+  accountHint?: string;
+  direction: 'IN' | 'OUT';
+  amount: number;
+  occurredAt: Date;
+  summary: string;
+}): string {
+  const timeKey = params.occurredAt.toISOString().slice(0, 16); // YYYY-MM-DDTHH:mm
+  const normalizedSummary = params.summary
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .slice(0, 40);
+  const raw = `${params.bankCode}|${params.accountHint || ''}|${params.direction}|${params.amount}|${timeKey}|${normalizedSummary}`;
+  return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
 /**
@@ -113,8 +146,20 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
         let date = new Date(email.date);
         if (isNaN(date.getTime())) date = new Date();
 
+        const bankRefId = extractBankRefId(combined);
+        const fingerprint = generateFinancialFingerprint({
+          bankCode: 'VCB',
+          accountHint,
+          direction,
+          amount: cleanAmount,
+          occurredAt: date,
+          summary: detailPart,
+        });
+
         return {
           gmailMessageId: email.id,
+          bankRefId,
+          fingerprint,
           bankCode: 'VCB',
           bankName: 'Vietcombank',
           accountHint: accountHint ? `••••${accountHint}` : undefined,
@@ -156,8 +201,20 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
         let date = new Date(email.date);
         if (isNaN(date.getTime())) date = new Date();
 
+        const bankRefId = extractBankRefId(combined);
+        const fingerprint = generateFinancialFingerprint({
+          bankCode: 'TCB',
+          accountHint,
+          direction,
+          amount: cleanAmount,
+          occurredAt: date,
+          summary,
+        });
+
         return {
           gmailMessageId: email.id,
+          bankRefId,
+          fingerprint,
           bankCode: 'TCB',
           bankName: 'Techcombank',
           accountHint: accountHint ? `••••${accountHint}` : undefined,
@@ -224,8 +281,21 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
       let date = new Date(email.date);
       if (isNaN(date.getTime())) date = new Date();
 
+      const bankRefId = extractBankRefId(combined);
+      const summaryText = email.subject || email.snippet.slice(0, 100);
+      const fingerprint = generateFinancialFingerprint({
+        bankCode,
+        accountHint,
+        direction,
+        amount: cleanAmount,
+        occurredAt: date,
+        summary: summaryText,
+      });
+
       return {
         gmailMessageId: email.id,
+        bankRefId,
+        fingerprint,
         bankCode,
         bankName,
         accountHint: accountHint ? `••••${accountHint}` : undefined,
@@ -235,7 +305,7 @@ export function parseBankNotification(email: RawEmailData): ParsedBankEvent | nu
         occurredAt: date,
         counterparty: merchantHint || email.from.split('@')[0],
         merchantLabel: merchantHint || undefined,
-        summary: email.subject || email.snippet.slice(0, 100),
+        summary: summaryText,
       };
     }
   }

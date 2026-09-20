@@ -14,6 +14,7 @@ import {
   CreditCard,
   Clock,
   Sparkles,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface ClassificationModalProps {
@@ -43,6 +44,7 @@ export function ClassificationModal({
     transaction?.fundId || ''
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   if (!transaction) return null;
 
@@ -58,6 +60,7 @@ export function ClassificationModal({
     if (!finalCategoryName) return;
 
     setIsSubmitting(true);
+    setError(null);
     try {
       await onClassify(
         transaction.id,
@@ -65,6 +68,8 @@ export function ClassificationModal({
         !isIn && selectedFundId ? selectedFundId : undefined
       );
       onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Lỗi phân loại giao dịch');
     } finally {
       setIsSubmitting(false);
     }
@@ -151,6 +156,14 @@ export function ClassificationModal({
             )}
           </div>
         </div>
+
+        {/* Error Alert */}
+        {error && (
+          <div className="p-3 rounded-lg bg-[#f43f5e]/15 border border-[#f43f5e]/30 text-xs text-[#f43f5e] flex items-center gap-2 animate-in fade-in duration-150">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
 
         {/* Classification Form */}
         <form onSubmit={handleSubmit} className="space-y-4">

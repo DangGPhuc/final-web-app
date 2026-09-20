@@ -14,7 +14,9 @@ export async function PATCH(
       where: { id },
       data: {
         ...(name !== undefined ? { name: name.trim() } : {}),
-        ...(monthlyAllocation !== undefined ? { monthlyAllocation: Number(monthlyAllocation) } : {}),
+        ...(monthlyAllocation !== undefined
+          ? { monthlyAllocation: BigInt(Math.round(Number(monthlyAllocation))) }
+          : {}),
         ...(active !== undefined ? { active: Boolean(active) } : {}),
       },
     });
@@ -23,6 +25,7 @@ export async function PATCH(
       success: true,
       fund: {
         ...updated,
+        monthlyAllocation: Number(updated.monthlyAllocation),
         createdAt: updated.createdAt.toISOString(),
       },
     });

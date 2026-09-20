@@ -13,18 +13,45 @@ const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12; // Standard 96 bits for GCM
 const AUTH_TAG_LENGTH = 16; // 128 bits auth tag
 
+let testEncryptionKey: string | null = null;
+
+/**
+ * For unit testing only: inject an ephemeral encryption key
+ */
+export function setTestEncryptionKey(key: string | null): void {
+  testEncryptionKey = key;
+}
+
 function getMasterKey(): Buffer {
-  const rawKey = process.env.TOKEN_ENCRYPTION_KEY;
-  if (!rawKey) {
-    // In dev / test fallback to ensure application boots, but generate deterministic 32-byte key
-    return crypto.createHash('sha256').update('cockpit_default_dev_key_do_not_use_in_prod').digest();
+  const rawKey = testEncryptionKey || process.env.TOKEN_ENCRYPTION_KEY;
+  if (!rawKey || typeof rawKey !== 'string' || rawKey.trim() === '') {
+    throw new Error('TOKEN_ENCRYPTION_KEY is required and must be configured.');
   }
 
-  // Support 64-char hex string, base64, or raw string hashed to 32 bytes
-  if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
-    return Buffer.from(rawKey, 'hex');
+  const trimmed = rawKey.trim();
+
+  // Exactly 64 hex characters -> 32 bytes
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+    return Buffer.from(trimmed, 'hex');
   }
-  return crypto.createHash('sha256').update(rawKey).digest();
+
+  // Exactly 32 bytes UTF-8 string
+  const utf8Buf = Buffer.from(trimmed, 'utf8');
+  if (utf8Buf.length === 32) {
+    return utf8Buf;
+  }
+
+  // Exactly 32 bytes base64 decoded
+  if (/^[A-Za-z0-9+/=]{43,44}$/.test(trimmed)) {
+    const base64Buf = Buffer.from(trimmed, 'base64');
+    if (base64Buf.length === 32) {
+      return base64Buf;
+    }
+  }
+
+  throw new Error(
+    'TOKEN_ENCRYPTION_KEY must provide exactly 32 bytes of key material (e.g. 64 hexadecimal characters).'
+  );
 }
 
 /**

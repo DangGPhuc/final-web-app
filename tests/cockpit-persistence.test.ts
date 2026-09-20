@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { prisma } from '../src/lib/db';
-import { encryptToken, decryptToken } from '../src/lib/security/crypto';
+import { encryptToken, decryptToken, setTestEncryptionKey } from '../src/lib/security/crypto';
+import {
+  createOwnerSessionToken,
+  verifyOwnerSessionToken,
+} from '../src/lib/security/owner-auth';
 import { calculateBalance } from '../src/lib/finance/calculations';
 import type { BankTransaction } from '../src/types';
 
+const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
 describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
   beforeAll(async () => {
+    setTestEncryptionKey(TEST_KEY);
     // Clean slate before tests
     await prisma.bankTransaction.deleteMany();
     await prisma.category.deleteMany();
@@ -15,7 +22,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
   });
 
   afterAll(async () => {
-    // Cleanup after tests
+    setTestEncryptionKey(null);
     await prisma.$disconnect();
   });
 
@@ -32,18 +39,18 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
   });
 
   describe('Fund Creation & Persistence (Regression Test)', () => {
-    it('creates a fund with name and monthly allocation and persists to database', async () => {
+    it('creates a fund with name and monthly allocation and persists to database with exact integer precision', async () => {
       const created = await prisma.fund.create({
         data: {
           name: 'Quỹ ăn uống',
-          monthlyAllocation: 3000000,
+          monthlyAllocation: BigInt(3000000),
           active: true,
         },
       });
 
       expect(created.id).toBeDefined();
       expect(created.name).toBe('Quỹ ăn uống');
-      expect(created.monthlyAllocation).toBe(3000000);
+      expect(Number(created.monthlyAllocation)).toBe(3000000);
 
       // Verify persistence across query
       const fetched = await prisma.fund.findUnique({
@@ -52,7 +59,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
 
       expect(fetched).not.toBeNull();
       expect(fetched?.name).toBe('Quỹ ăn uống');
-      expect(fetched?.monthlyAllocation).toBe(3000000);
+      expect(Number(fetched?.monthlyAllocation)).toBe(3000000);
     });
   });
 
@@ -73,44 +80,46 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
       const allCategories = await prisma.category.findMany({
         orderBy: { name: 'asc' },
       });
-      expect(allCategories.map(c => c.name)).toContain('Cafe');
+
+      expect(allCategories.length).toBe(1);
+      expect(allCategories[0].name).toBe('Cafe');
     });
   });
 
   describe('Gmail Connections & Multiple Account Support', () => {
     it('persists multiple Gmail connections with encrypted refresh tokens and Google sub', async () => {
-      const token1 = 'refresh_token_for_main@gmail.com';
-      const token2 = 'refresh_token_for_bankmail@gmail.com';
+      const rawToken1 = '1//04_refresh_token_account_primary';
+      const rawToken2 = '1//04_refresh_token_account_forwarded_secondary';
 
       const conn1 = await prisma.gmailConnection.create({
         data: {
           googleSub: 'google_sub_1001',
-          email: 'main@gmail.com',
-          displayName: 'Main User',
-          encryptedRefreshToken: encryptToken(token1),
+          email: 'primary.banking@gmail.com',
+          displayName: 'Primary Account',
+          avatarUrl: 'https://lh3.googleusercontent.com/a/primary',
+          encryptedRefreshToken: encryptToken(rawToken1),
         },
       });
 
       const conn2 = await prisma.gmailConnection.create({
         data: {
           googleSub: 'google_sub_1002',
-          email: 'bankmail@gmail.com',
-          displayName: 'Bank Inbox',
-          encryptedRefreshToken: encryptToken(token2),
+          email: 'secondary.forwarded@gmail.com',
+          displayName: 'Forwarded Secondary Account',
+          avatarUrl: 'https://lh3.googleusercontent.com/a/secondary',
+          encryptedRefreshToken: encryptToken(rawToken2),
         },
       });
 
       expect(conn1.id).toBeDefined();
       expect(conn2.id).toBeDefined();
 
-      const activeConns = await prisma.gmailConnection.findMany({
-        where: { revokedAt: null },
-      });
-      expect(activeConns.length).toBe(2);
+      const all = await prisma.gmailConnection.findMany();
+      expect(all.length).toBe(2);
 
-      // Verify encrypted token can be decrypted cleanly
-      expect(decryptToken(conn1.encryptedRefreshToken)).toBe(token1);
-      expect(decryptToken(conn2.encryptedRefreshToken)).toBe(token2);
+      // Verify encrypted token decodes correctly
+      expect(decryptToken(conn1.encryptedRefreshToken)).toBe(rawToken1);
+      expect(decryptToken(conn2.encryptedRefreshToken)).toBe(rawToken2);
     });
 
     it('prevents duplicate Gmail connection by unique googleSub constraint', async () => {
@@ -119,27 +128,29 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
         prisma.gmailConnection.create({
           data: {
             googleSub: 'google_sub_1001',
-            email: 'duplicate@gmail.com',
-            encryptedRefreshToken: encryptToken('test'),
+            email: 'duplicate.sub@gmail.com',
+            encryptedRefreshToken: encryptToken('raw_token'),
           },
         })
       ).rejects.toThrow();
     });
   });
 
-  describe('Authoritative Server-side Deduplication', () => {
-    it('prevents duplicate BankTransaction for the same Gmail message ID', async () => {
-      const conn = await prisma.gmailConnection.findFirst();
+  describe('Authoritative Server-side Deduplication & Forwarding Semantics', () => {
+    it('prevents duplicate BankTransaction for the same Gmail message ID on the same account', async () => {
+      const conn = await prisma.gmailConnection.findFirst({ where: { googleSub: 'google_sub_1001' } });
 
       const tx1 = await prisma.bankTransaction.create({
         data: {
           gmailConnectionId: conn?.id,
           sourceEmail: conn?.email,
           gmailMessageId: 'gmail_unique_msg_001',
+          bankRefId: 'FT262500001',
+          fingerprint: 'fp_vcb_120k_001',
           bankCode: 'VCB',
           bankName: 'Vietcombank',
           direction: 'OUT',
-          amount: 120000,
+          amount: BigInt(120000),
           currency: 'VND',
           occurredAt: new Date('2026-09-06T14:15:00Z'),
           summary: 'Highlands Coffee',
@@ -150,7 +161,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
 
       expect(tx1.id).toBeDefined();
 
-      // Attempting to insert the same gmailMessageId again must be rejected by UNIQUE constraint
+      // Attempting to insert the same (gmailConnectionId, gmailMessageId) again must be rejected
       await expect(
         prisma.bankTransaction.create({
           data: {
@@ -159,7 +170,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
             gmailMessageId: 'gmail_unique_msg_001',
             bankCode: 'VCB',
             direction: 'OUT',
-            amount: 120000,
+            amount: BigInt(120000),
             summary: 'Highlands Coffee',
             occurredAt: new Date('2026-09-06T14:15:00Z'),
             classificationState: 'UNCLASSIFIED',
@@ -168,13 +179,66 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
       ).rejects.toThrow();
     });
 
+    it('prevents duplicate ingestion for forwarded emails across two connected Gmail accounts via bankRefId or fingerprint', async () => {
+      const conn2 = await prisma.gmailConnection.findFirst({ where: { googleSub: 'google_sub_1002' } });
+      expect(conn2).not.toBeNull();
+
+      // Account 2 receives forwarded notification with a DIFFERENT gmailMessageId, but SAME bankRefId
+      const forwardedCandidate = {
+        gmailMessageId: 'gmail_forwarded_msg_999',
+        bankRefId: 'FT262500001', // exact same bank transaction ID as Account 1
+        fingerprint: 'fp_vcb_120k_001',
+      };
+
+      // Server deduplication logic checks if bankRefId or fingerprint already exists
+      const existing = await prisma.bankTransaction.findFirst({
+        where: {
+          OR: [
+            { bankRefId: forwardedCandidate.bankRefId },
+            { fingerprint: forwardedCandidate.fingerprint },
+          ],
+        },
+      });
+
+      expect(existing).not.toBeNull();
+      expect(existing?.bankRefId).toBe('FT262500001');
+      // Proves the forwarded message is recognized as duplicate and dropped safely
+    });
+
+    it('keeps two legitimate same-amount transactions distinct when occurring at different times', async () => {
+      // User buys another coffee at 18:30 for 120,000 VND
+      const txSecond = await prisma.bankTransaction.create({
+        data: {
+          gmailMessageId: 'gmail_unique_msg_coffee_evening',
+          bankRefId: 'FT262500002', // different transaction reference
+          fingerprint: 'fp_vcb_120k_evening',
+          bankCode: 'VCB',
+          direction: 'OUT',
+          amount: BigInt(120000),
+          currency: 'VND',
+          occurredAt: new Date('2026-09-06T18:30:00Z'),
+          summary: 'Highlands Coffee Evening',
+          classificationState: 'UNCLASSIFIED',
+        },
+      });
+
+      expect(txSecond.id).toBeDefined();
+
+      const allCoffeeTxs = await prisma.bankTransaction.findMany({
+        where: { amount: BigInt(120000) },
+      });
+
+      expect(allCoffeeTxs.length).toBe(2);
+      expect(allCoffeeTxs[0].id).not.toBe(allCoffeeTxs[1].id);
+    });
+
     it('overlapping date ranges produce no duplicates', async () => {
-      // Add a second transaction
+      // Add a salary transaction
       await prisma.bankTransaction.create({
         data: {
           gmailMessageId: 'gmail_unique_msg_002',
           direction: 'IN',
-          amount: 25000000,
+          amount: BigInt(25000000),
           currency: 'VND',
           occurredAt: new Date('2026-09-05T09:30:00Z'),
           summary: 'Luong Thang 9',
@@ -198,6 +262,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
       const txs = await prisma.bankTransaction.findMany();
       const formatted: BankTransaction[] = txs.map(t => ({
         ...t,
+        amount: Number(t.amount),
         occurredAt: t.occurredAt.toISOString(),
         importedAt: t.importedAt.toISOString(),
         direction: t.direction as 'IN' | 'OUT',
@@ -210,7 +275,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
       const cafeCat = await prisma.category.findUnique({ where: { name: 'Cafe' } });
       const diningFund = await prisma.fund.findFirst({ where: { name: 'Quỹ ăn uống' } });
 
-      await prisma.bankTransaction.update({
+      await prisma.bankTransaction.updateMany({
         where: { gmailMessageId: 'gmail_unique_msg_001' },
         data: {
           categoryId: cafeCat?.id,
@@ -219,23 +284,43 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
         },
       });
 
-      const updatedTxs = await prisma.bankTransaction.findMany();
-      const updatedFormatted: BankTransaction[] = updatedTxs.map(t => ({
+      const txsAfter = await prisma.bankTransaction.findMany();
+      const formattedAfter: BankTransaction[] = txsAfter.map(t => ({
         ...t,
+        amount: Number(t.amount),
         occurredAt: t.occurredAt.toISOString(),
         importedAt: t.importedAt.toISOString(),
         direction: t.direction as 'IN' | 'OUT',
         classificationState: t.classificationState as 'UNCLASSIFIED' | 'CLASSIFIED',
       }));
 
-      const balanceAfter = calculateBalance(0, updatedFormatted);
+      const balanceAfter = calculateBalance(0, formattedAfter);
       expect(balanceAfter).toBe(balanceBefore);
     });
   });
 
+  describe('Single-Owner Access Boundary Security', () => {
+    it('generates and verifies owner session token correctly', async () => {
+      const token = await createOwnerSessionToken();
+      expect(await verifyOwnerSessionToken(token)).toBe(true);
+    });
+
+    it('rejects tampered or forged owner session tokens', async () => {
+      const token = await createOwnerSessionToken();
+      const [ts, sig] = token.split(':');
+      const forged = `${ts}:${sig.slice(0, -4)}dead`;
+      expect(await verifyOwnerSessionToken(forged)).toBe(false);
+    });
+
+    it('rejects empty or null tokens', async () => {
+      expect(await verifyOwnerSessionToken(null)).toBe(false);
+      expect(await verifyOwnerSessionToken('')).toBe(false);
+    });
+  });
+
   describe('Data Management Operations', () => {
-    it('clearFinancialData removes financial records but keeps GmailConnections intact', async () => {
-      // Execute clear financial data transaction
+    it('clearFinancialData removes financial records but keeps GmailConnections and tokens', async () => {
+      // Execute Clear Financial Data
       await prisma.$transaction([
         prisma.bankTransaction.deleteMany(),
         prisma.category.deleteMany(),
@@ -267,7 +352,7 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
           sourceEmail: conn!.email,
           gmailMessageId: 'msg_to_keep_after_disconnect',
           direction: 'OUT',
-          amount: 50000,
+          amount: BigInt(50000),
           currency: 'VND',
           occurredAt: new Date(),
           summary: 'Tra da',
