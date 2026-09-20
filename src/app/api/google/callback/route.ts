@@ -16,8 +16,9 @@ export async function GET(req: NextRequest) {
   const redirectBase = `${url.protocol}//${url.host}`;
 
   if (error || !code) {
+    const safeError = error === 'access_denied' ? 'oauth_access_denied' : 'oauth_missing_code';
     const res = NextResponse.redirect(
-      `${redirectBase}?tab=settings&oauth_error=${encodeURIComponent(error || 'missing_code')}`
+      `${redirectBase}?tab=settings&oauth_error=${safeError}`
     );
     res.cookies.delete('oauth_state');
     res.cookies.delete('oauth_verifier');
@@ -30,7 +31,7 @@ export async function GET(req: NextRequest) {
   // Validate CSRF state strictly
   if (!storedState || storedState !== state) {
     const res = NextResponse.redirect(
-      `${redirectBase}?tab=settings&oauth_error=state_mismatch`
+      `${redirectBase}?tab=settings&oauth_error=oauth_state_mismatch`
     );
     res.cookies.delete('oauth_state');
     res.cookies.delete('oauth_verifier');
@@ -40,7 +41,7 @@ export async function GET(req: NextRequest) {
   // Reject mock codes if not permitted
   if (code.startsWith('mock_') && !isMockOAuthAllowed()) {
     const res = NextResponse.redirect(
-      `${redirectBase}?tab=settings&oauth_error=mock_oauth_prohibited`
+      `${redirectBase}?tab=settings&oauth_error=oauth_config_error`
     );
     res.cookies.delete('oauth_state');
     res.cookies.delete('oauth_verifier');
@@ -91,9 +92,17 @@ export async function GET(req: NextRequest) {
     res.cookies.delete('oauth_verifier');
     return res;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'oauth_exchange_failed';
+    let safeCode = 'oauth_exchange_failed';
+    if (err instanceof Error) {
+      const lower = err.message.toLowerCase();
+      if (lower.includes('config') || lower.includes('client_id') || lower.includes('encryption')) {
+        safeCode = 'oauth_config_error';
+      } else if (lower.includes('invalid_grant') || lower.includes('revoked')) {
+        safeCode = 'oauth_refresh_revoked';
+      }
+    }
     const res = NextResponse.redirect(
-      `${redirectBase}?tab=settings&oauth_error=${encodeURIComponent(msg)}`
+      `${redirectBase}?tab=settings&oauth_error=${safeCode}`
     );
     res.cookies.delete('oauth_state');
     res.cookies.delete('oauth_verifier');

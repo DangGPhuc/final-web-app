@@ -98,6 +98,13 @@ export interface GmailAccountInfo {
   connectionStatus: 'connected' | 'error' | 'syncing' | 'reconnect_required';
 }
 
+export type SyncMode = 'QUICK' | 'HISTORICAL';
+
+export interface QuickScanBounds {
+  lowerBoundEpoch: number;
+  quickScanUpperBoundEpoch: number;
+}
+
 export interface AccountSyncResult {
   accountId: string;
   email: string;
@@ -109,9 +116,11 @@ export interface AccountSyncResult {
   errorMessage?: string;
   truncated?: boolean;
   nextPageToken?: string;
+  quickScanBounds?: QuickScanBounds;
 }
 
 export interface SyncResultStats {
+  mode?: SyncMode;
   totalFetched: number;
   totalNew: number;
   totalDuplicates: number;
@@ -122,6 +131,7 @@ export interface SyncResultStats {
   nextPageToken?: string;
   accountResults?: AccountSyncResult[];
   accountContinuationTokens?: Record<string, string>;
+  quickScanBounds?: Record<string, QuickScanBounds>;
 }
 
 // ─── Savings Forecast ───────────────────────────────────────────────────────

@@ -249,45 +249,114 @@ describe('Gmail Ingestion & Bank Parsing', () => {
       }
     });
 
-    it('exposes truncated: true and nextPageToken when safety limit is reached', async () => {
+    it('proves pagination cap with maxMessages = 50 does not skip remainder of 100 messages across continuation', async () => {
       const origFetch = global.fetch;
       try {
-        global.fetch = vi.fn().mockImplementation((url: string) => {
-          if (url.includes('users/me/messages?')) {
-            return Promise.resolve({
-              ok: true,
-              json: () =>
-                Promise.resolve({
-                  messages: Array.from({ length: 100 }, (_, i) => ({
-                    id: `msg_p1_${i}`,
-                    threadId: `t_${i}`,
-                  })),
-                  nextPageToken: 'token_next_page_overflow',
-                }),
-            });
+        const totalMessages = Array.from({ length: 100 }, (_, i) => ({
+          id: `msg_candidate_${i}`,
+          threadId: `t_${i}`,
+        }));
+
+        global.fetch = vi.fn().mockImplementation((urlStr: string) => {
+          const parsedUrl = new URL(urlStr);
+          if (urlStr.includes('users/me/messages?')) {
+            const pageToken = parsedUrl.searchParams.get('pageToken');
+            const maxResults = parseInt(parsedUrl.searchParams.get('maxResults') || '100', 10);
+
+            if (!pageToken) {
+              // First batch: return first maxResults messages (e.g. 50) and token pointing to 50
+              const batch = totalMessages.slice(0, maxResults);
+              return Promise.resolve({
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    messages: batch,
+                    nextPageToken: 'token_batch_2',
+                  }),
+              });
+            } else if (pageToken === 'token_batch_2') {
+              // Second batch: return remainder (50 to 100)
+              const batch = totalMessages.slice(50, 50 + maxResults);
+              return Promise.resolve({
+                ok: true,
+                json: () =>
+                  Promise.resolve({
+                    messages: batch,
+                    nextPageToken: undefined,
+                  }),
+              });
+            }
           }
+
+          // Message detail mock
+          const msgId = parsedUrl.pathname.split('/').pop() || 'unknown';
           return Promise.resolve({
             ok: true,
             json: () =>
               Promise.resolve({
-                id: 'mock_detail',
-                snippet: 'VCB: TK 1234| GD: -50,000 VND | Test',
+                id: msgId,
+                snippet: 'VCB: TK ••••1234| GD: -10,000 VND | Test',
                 internalDate: '1788950000000',
-                payload: { headers: [], body: {} },
+                payload: {
+                  headers: [
+                    { name: 'From', value: 'vietcombank@vcb.com.vn' },
+                    { name: 'Subject', value: 'VCB: TK ••••1234| GD: -10,000 VND | Test' },
+                    { name: 'Date', value: '2026-09-10T10:00:00Z' },
+                  ],
+                  body: { data: Buffer.from('VCB: TK ••••1234| GD: -10,000 VND | Test').toString('base64') },
+                },
               }),
           });
         });
 
-        const result = await ingestFromGmail('mock_refresh_token_test', {
+        // Run 1: maxMessages = 50
+        const batch1 = await ingestFromGmail('mock_refresh_token_test', {
           maxMessages: 50,
         });
 
-        expect(result.totalFetched).toBe(50);
-        expect(result.truncated).toBe(true);
-        expect(result.nextPageToken).toBe('token_next_page_overflow');
+        expect(batch1.totalFetched).toBe(50);
+        expect(batch1.truncated).toBe(true);
+        expect(batch1.nextPageToken).toBe('token_batch_2');
+        expect(batch1.events.map(e => e.gmailMessageId)).toEqual(
+          totalMessages.slice(0, 50).map(m => m.id)
+        );
+
+        // Run 2: continuation with pageToken = batch1.nextPageToken
+        const batch2 = await ingestFromGmail('mock_refresh_token_test', {
+          maxMessages: 50,
+          pageToken: batch1.nextPageToken,
+        });
+
+        expect(batch2.totalFetched).toBe(50);
+        expect(batch2.truncated).toBe(false);
+        expect(batch2.nextPageToken).toBeUndefined();
+        expect(batch2.events.map(e => e.gmailMessageId)).toEqual(
+          totalMessages.slice(50, 100).map(m => m.id)
+        );
+
+        // All 100 messages processed without skipping any messages
+        const allFetchedIds = [
+          ...batch1.events.map(e => e.gmailMessageId),
+          ...batch2.events.map(e => e.gmailMessageId),
+        ];
+        expect(allFetchedIds).toHaveLength(100);
+        expect(allFetchedIds).toEqual(totalMessages.map(m => m.id));
       } finally {
         global.fetch = origFetch;
       }
+    });
+
+    it('generates exact instant bounds for Quick Scan snapshot mode without calendar rounding', () => {
+      const query = buildBankSearchQuery({
+        mode: 'QUICK',
+        lowerBoundEpoch: 1788195600,
+        upperBoundEpoch: 1788199200,
+      });
+
+      expect(query).toContain('after:1788195600');
+      expect(query).toContain('before:1788199200');
+      // Messages arriving after upperBoundEpoch are excluded from the candidate search query
+      expect(query).not.toContain('after:1788199200');
     });
   });
 });

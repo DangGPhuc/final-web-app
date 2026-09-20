@@ -1,8 +1,2 @@
 [extend]
 useDefault = true
-
-[allowlist]
-description = "Allowlist template configuration file"
-paths = [
-  '''.env.example$'''
-]

@@ -50,8 +50,11 @@ interface GmailMessageDetailResponse {
 }
 
 export interface FetchEmailOptions {
+  mode?: 'QUICK' | 'HISTORICAL';
   fromDate?: Date | string;
   toDate?: Date | string;
+  lowerBoundEpoch?: number;
+  upperBoundEpoch?: number;
   maxMessages?: number;
   pageToken?: string;
   candidateCushionSeconds?: number;
@@ -139,12 +142,17 @@ function extractBodyText(part: GmailPart): string {
 
 /**
  * Build privacy-preserving targeted Gmail search query strictly from BANK_NOTIFICATION_REGISTRY.
- * Uses exact Asia/Ho_Chi_Minh (+07:00) midnight boundaries converted to Unix epoch seconds.
+ * Supports:
+ * - Quick Scan snapshot mode: exact lowerBoundEpoch and upperBoundEpoch instants.
+ * - Historical mode: Asia/Ho_Chi_Minh (+07:00) midnight boundaries with candidate boundary cushion.
  * Form: ( (Bank A sender AND signature) OR (Bank B sender AND signature) ... OR (Forwarded Bank Notification) ) after:... before:...
  */
 export function buildBankSearchQuery(options: {
+  mode?: 'QUICK' | 'HISTORICAL';
   fromDate?: Date | string;
   toDate?: Date | string;
+  lowerBoundEpoch?: number;
+  upperBoundEpoch?: number;
   candidateCushionSeconds?: number;
 } = {}): string {
   const bankClauses = BANK_NOTIFICATION_REGISTRY.map(
@@ -157,9 +165,11 @@ export function buildBankSearchQuery(options: {
   const combinedClauses = `(${bankClauses.join(' OR ')} OR ${forwardedClause})`;
   const parts = [combinedClauses];
 
-  const cushion = options.candidateCushionSeconds ?? 0;
-
-  if (options.fromDate) {
+  // Exact epoch boundaries take precedence (used by Quick Scan snapshot)
+  if (options.lowerBoundEpoch !== undefined) {
+    parts.push(`after:${options.lowerBoundEpoch}`);
+  } else if (options.fromDate) {
+    const cushion = options.candidateCushionSeconds ?? 0;
     let startSec: number;
     if (typeof options.fromDate === 'string') {
       startSec = vietnamMidnightToEpochSeconds(options.fromDate);
@@ -170,7 +180,10 @@ export function buildBankSearchQuery(options: {
     parts.push(`after:${queryAfter}`);
   }
 
-  if (options.toDate) {
+  if (options.upperBoundEpoch !== undefined) {
+    parts.push(`before:${options.upperBoundEpoch}`);
+  } else if (options.toDate) {
+    const cushion = options.candidateCushionSeconds ?? 0;
     let endSec: number;
     if (typeof options.toDate === 'string') {
       endSec = getNextDayVietnamMidnightToEpochSeconds(options.toDate);
@@ -195,7 +208,8 @@ export async function ingestFromGmail(
 
   const query = buildBankSearchQuery({
     ...options,
-    candidateCushionSeconds: options.candidateCushionSeconds ?? 86400,
+    candidateCushionSeconds:
+      options.mode === 'QUICK' ? 0 : (options.candidateCushionSeconds ?? 86400),
   });
   const maxMessages = options.maxMessages || 1000;
 
@@ -206,9 +220,12 @@ export async function ingestFromGmail(
 
   // 1. Pagination loop with nextPageToken across multiple pages
   do {
+    const remainingCapacity = maxMessages - messageIds.length;
+    const batchLimit = Math.max(1, Math.min(remainingCapacity, 100));
+
     const listUrl = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
     listUrl.searchParams.set('q', query);
-    listUrl.searchParams.set('maxResults', '100');
+    listUrl.searchParams.set('maxResults', String(batchLimit));
     if (pageToken) {
       listUrl.searchParams.set('pageToken', pageToken);
     }
@@ -233,18 +250,17 @@ export async function ingestFromGmail(
     const listData: GmailMessageListResponse = await listRes.json();
     if (listData.messages) {
       for (const m of listData.messages) {
-        messageIds.push(m.id);
-        if (messageIds.length >= maxMessages) {
-          if (listData.nextPageToken) {
-            truncated = true;
-            remainingToken = listData.nextPageToken;
-          }
-          break;
+        if (messageIds.length < maxMessages) {
+          messageIds.push(m.id);
         }
       }
     }
 
     if (messageIds.length >= maxMessages) {
+      if (listData.nextPageToken) {
+        truncated = true;
+        remainingToken = listData.nextPageToken;
+      }
       break;
     }
 

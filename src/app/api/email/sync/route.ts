@@ -11,7 +11,7 @@ import {
   type IngestionResult,
 } from '@/lib/email/gmail-client';
 import { parseBankNotification } from '@/lib/email/bank-parsers';
-import { getVietnamDateRangeBoundaries } from '@/lib/date';
+import { getVietnamDateRangeBoundaries, parseAndValidateIsoDate } from '@/lib/date';
 import type { SyncResultStats, AccountSyncResult } from '@/types';
 
 const NO_CACHE_HEADERS = {
@@ -35,56 +35,73 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const {
+      mode, // optional: 'QUICK' | 'HISTORICAL'
       accountId, // optional: specific GmailConnection ID or 'ALL'
-      fromDate, // optional ISO string
-      toDate, // optional ISO string
+      fromDate, // optional ISO string (YYYY-MM-DD)
+      toDate, // optional ISO string (YYYY-MM-DD)
       isDemoMode = false,
       pageToken,
       accountContinuationTokens,
+      quickScanBounds,
     } = body as {
+      mode?: 'QUICK' | 'HISTORICAL';
       accountId?: string;
       fromDate?: string;
       toDate?: string;
       isDemoMode?: boolean;
       pageToken?: string;
       accountContinuationTokens?: Record<string, string>;
+      quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
     };
 
-    // 2. Validate date range parameters
+    const effectiveMode: 'QUICK' | 'HISTORICAL' =
+      mode || (fromDate || toDate ? 'HISTORICAL' : 'QUICK');
+
+    // 2. Validate date range parameters for Historical Mode
     let fromDateObj: Date | undefined;
     let toDateObj: Date | undefined;
+    let rangeStartMs: number | undefined;
+    let rangeEndMs: number | undefined;
 
-    if (fromDate) {
-      fromDateObj = new Date(fromDate);
-      if (isNaN(fromDateObj.getTime())) {
+    if (effectiveMode === 'HISTORICAL') {
+      if (fromDate) {
+        try {
+          parseAndValidateIsoDate(fromDate);
+          fromDateObj = new Date(fromDate);
+        } catch (err) {
+          return NextResponse.json(
+            { success: false, error: err instanceof Error ? err.message : 'Tham số ngày bắt đầu (fromDate) không hợp lệ.' },
+            { status: 400, headers: NO_CACHE_HEADERS }
+          );
+        }
+      }
+
+      if (toDate) {
+        try {
+          parseAndValidateIsoDate(toDate);
+          toDateObj = new Date(toDate);
+        } catch (err) {
+          return NextResponse.json(
+            { success: false, error: err instanceof Error ? err.message : 'Tham số ngày kết thúc (toDate) không hợp lệ.' },
+            { status: 400, headers: NO_CACHE_HEADERS }
+          );
+        }
+      }
+
+      if (fromDateObj && toDateObj && fromDateObj.getTime() > toDateObj.getTime()) {
         return NextResponse.json(
-          { success: false, error: 'Tham số ngày bắt đầu (fromDate) không hợp lệ.' },
+          {
+            success: false,
+            error: 'Khoảng thời gian không hợp lệ: Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.',
+          },
           { status: 400, headers: NO_CACHE_HEADERS }
         );
       }
-    }
 
-    if (toDate) {
-      toDateObj = new Date(toDate);
-      if (isNaN(toDateObj.getTime())) {
-        return NextResponse.json(
-          { success: false, error: 'Tham số ngày kết thúc (toDate) không hợp lệ.' },
-          { status: 400, headers: NO_CACHE_HEADERS }
-        );
-      }
+      const boundaries = getVietnamDateRangeBoundaries(fromDate, toDate);
+      rangeStartMs = boundaries.rangeStartMs;
+      rangeEndMs = boundaries.rangeEndMs;
     }
-
-    if (fromDateObj && toDateObj && fromDateObj.getTime() > toDateObj.getTime()) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Khoảng thời gian không hợp lệ: Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.',
-        },
-        { status: 400, headers: NO_CACHE_HEADERS }
-      );
-    }
-
-    const { rangeStartMs, rangeEndMs } = getVietnamDateRangeBoundaries(fromDate, toDate);
 
     // 3. Fetch target Gmail connections
     const connections = await prisma.gmailConnection.findMany({
@@ -112,14 +129,16 @@ export async function POST(req: NextRequest) {
     }
 
     const aggregateStats: SyncResultStats = {
+      mode: effectiveMode,
       totalFetched: 0,
       totalNew: 0,
       totalDuplicates: 0,
       totalFailed: 0,
-      dateRange: fromDate && toDate ? `${fromDate} → ${toDate}` : undefined,
+      dateRange: effectiveMode === 'HISTORICAL' && fromDate && toDate ? `${fromDate} → ${toDate}` : undefined,
       truncated: false,
       accountResults: [],
       accountContinuationTokens: {},
+      quickScanBounds: {},
     };
 
     // 4. Handle Demo Mode (Explicit action only — Never automatic surprise)
@@ -135,9 +154,11 @@ export async function POST(req: NextRequest) {
       const filteredEmails = demoEmails.filter(e => {
         const parsed = parseBankNotification(e);
         if (!parsed) return false;
-        const d = parsed.occurredAt.getTime();
-        if (rangeStartMs !== undefined && d < rangeStartMs) return false;
-        if (rangeEndMs !== undefined && d >= rangeEndMs) return false;
+        if (effectiveMode === 'HISTORICAL') {
+          const d = parsed.occurredAt.getTime();
+          if (rangeStartMs !== undefined && d < rangeStartMs) return false;
+          if (rangeEndMs !== undefined && d >= rangeEndMs) return false;
+        }
         return true;
       });
 
@@ -244,7 +265,6 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      const effectiveFromDate = fromDate || (conn.lastSyncAt ? new Date(conn.lastSyncAt) : undefined);
       let specificPageToken: string | undefined = undefined;
       if (isAllAccounts) {
         // In ALL-accounts mode, use ONLY accountContinuationTokens[conn.id]!
@@ -255,13 +275,46 @@ export async function POST(req: NextRequest) {
         specificPageToken = accountContinuationTokens?.[conn.id] || pageToken;
       }
 
+      // Quick Scan bounded snapshot calculations
+      let connLowerBoundEpoch: number | undefined;
+      let connQuickScanUpperBoundEpoch: number | undefined;
+
+      if (effectiveMode === 'QUICK') {
+        if (
+          quickScanBounds?.[conn.id] &&
+          Number.isFinite(quickScanBounds[conn.id].lowerBoundEpoch) &&
+          Number.isFinite(quickScanBounds[conn.id].quickScanUpperBoundEpoch)
+        ) {
+          // Carry existing stable bounds across continuation pages
+          connLowerBoundEpoch = quickScanBounds[conn.id].lowerBoundEpoch;
+          connQuickScanUpperBoundEpoch = quickScanBounds[conn.id].quickScanUpperBoundEpoch;
+        } else {
+          // Initial Quick Scan: capture current server instant as fixed upper watermark
+          const serverInstant = new Date();
+          connQuickScanUpperBoundEpoch = Math.floor(serverInstant.getTime() / 1000);
+          // Lower bound: last completed Quick Scan watermark, or connectedAt fallback
+          const lowerBoundDate = conn.lastSyncAt || conn.connectedAt;
+          connLowerBoundEpoch = Math.floor(lowerBoundDate.getTime() / 1000);
+        }
+      }
+
       let ingestionResult: IngestionResult;
       try {
-        ingestionResult = await ingestFromGmail(refreshToken, {
-          fromDate: effectiveFromDate,
-          toDate: toDate,
-          pageToken: specificPageToken,
-        });
+        if (effectiveMode === 'QUICK') {
+          ingestionResult = await ingestFromGmail(refreshToken, {
+            mode: 'QUICK',
+            lowerBoundEpoch: connLowerBoundEpoch,
+            upperBoundEpoch: connQuickScanUpperBoundEpoch,
+            pageToken: specificPageToken,
+          });
+        } else {
+          ingestionResult = await ingestFromGmail(refreshToken, {
+            mode: 'HISTORICAL',
+            fromDate,
+            toDate,
+            pageToken: specificPageToken,
+          });
+        }
       } catch (err) {
         if (err instanceof GmailTokenRevokedError) {
           // Mark connection as revoked / reconnect required in DB
@@ -321,16 +374,19 @@ export async function POST(req: NextRequest) {
       let dupCount = 0;
 
       for (const event of ingestionResult.events) {
-        // Enforce transaction-date range on actual bank financial event time (occurredAt)
-        const eventTimeMs = event.occurredAt.getTime();
-        if (rangeStartMs !== undefined && eventTimeMs < rangeStartMs) {
-          // Financial transaction happened before requested start date -> Skip
-          continue;
+        // In HISTORICAL mode: strictly enforce transaction-date range on actual occurredAt
+        if (effectiveMode === 'HISTORICAL') {
+          const eventTimeMs = event.occurredAt.getTime();
+          if (rangeStartMs !== undefined && eventTimeMs < rangeStartMs) {
+            continue;
+          }
+          if (rangeEndMs !== undefined && eventTimeMs >= rangeEndMs) {
+            continue;
+          }
         }
-        if (rangeEndMs !== undefined && eventTimeMs >= rangeEndMs) {
-          // Financial transaction happened after requested end date -> Skip
-          continue;
-        }
+        // In QUICK mode: newly arrived candidates are NOT excluded merely because occurredAt is older
+        // (e.g. a forwarded notification received today for yesterday's transaction is admitted).
+
         // Multi-account authoritative deduplication priority rules:
         // Rule A: Same Gmail account + same Gmail message ID -> Authoritative duplicate
         const sameAccountMsg = await prisma.bankTransaction.findFirst({
@@ -361,9 +417,6 @@ export async function POST(req: NextRequest) {
         }
 
         // Rule C: Conservative cross-account forwarding deduplication:
-        // Check ONLY across DIFFERENT Gmail connections when all objective facts align
-        // (bankCode, accountHint, direction, amount, exact minute timestamp, normalized description)
-        // AND neither transaction has contradictory bankRefIds.
         const crossAccountForwarded = await prisma.bankTransaction.findFirst({
           where: {
             gmailConnectionId: { not: conn.id },
@@ -420,8 +473,14 @@ export async function POST(req: NextRequest) {
         data: {
           gmailConnectionId: conn.id,
           accountEmail: conn.email,
-          fromDate: effectiveFromDate,
-          toDate: toDateObj,
+          fromDate:
+            effectiveMode === 'QUICK'
+              ? new Date(connLowerBoundEpoch! * 1000)
+              : fromDateObj,
+          toDate:
+            effectiveMode === 'QUICK'
+              ? new Date(connQuickScanUpperBoundEpoch! * 1000)
+              : toDateObj,
           startedAt,
           finishedAt: new Date(),
           fetchedCount: ingestionResult.totalFetched,
@@ -431,17 +490,35 @@ export async function POST(req: NextRequest) {
         },
       });
 
-      // Update last sync time
-      await prisma.gmailConnection.update({
-        where: { id: conn.id },
-        data: { lastSyncAt: new Date() },
-      });
+      // WATERMARK COMMIT INVARIANT:
+      // lastSyncAt represents ONLY the upper watermark of the last FULLY COMPLETED Quick Scan.
+      // 1. Historical imports MUST NOT advance lastSyncAt.
+      // 2. Truncated Quick Scans MUST NOT advance lastSyncAt.
+      // 3. Only when mode is QUICK and truncated is false (all pages completed), advance lastSyncAt to quickScanUpperBound.
+      if (effectiveMode === 'QUICK' && !ingestionResult.truncated && connQuickScanUpperBoundEpoch) {
+        await prisma.gmailConnection.update({
+          where: { id: conn.id },
+          data: { lastSyncAt: new Date(connQuickScanUpperBoundEpoch * 1000) },
+        });
+      }
 
       accountsProcessed.push(conn.email);
       aggregateStats.totalFetched += ingestionResult.totalFetched;
       aggregateStats.totalNew += newCount;
       aggregateStats.totalDuplicates += dupCount;
       aggregateStats.totalFailed += ingestionResult.failedCount;
+
+      const accountBounds =
+        effectiveMode === 'QUICK' && connLowerBoundEpoch && connQuickScanUpperBoundEpoch
+          ? {
+              lowerBoundEpoch: connLowerBoundEpoch,
+              quickScanUpperBoundEpoch: connQuickScanUpperBoundEpoch,
+            }
+          : undefined;
+
+      if (accountBounds && aggregateStats.quickScanBounds) {
+        aggregateStats.quickScanBounds[conn.id] = accountBounds;
+      }
 
       if (ingestionResult.truncated && ingestionResult.nextPageToken) {
         aggregateStats.truncated = true;
@@ -463,6 +540,7 @@ export async function POST(req: NextRequest) {
         status: 'ok',
         truncated: ingestionResult.truncated,
         nextPageToken: ingestionResult.nextPageToken,
+        quickScanBounds: accountBounds,
       });
     }
 

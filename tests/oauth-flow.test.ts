@@ -109,4 +109,48 @@ describe('Google OAuth 2.0 Flow with PKCE & CSRF Protection', () => {
       }
     });
   });
+
+  describe('OAuth Error Sanitization', () => {
+    it('sanitizes access_denied into oauth_access_denied code without raw error exposure', async () => {
+      const { GET } = await import('../src/app/api/google/callback/route');
+      const { NextRequest } = await import('next/server');
+
+      const req = new NextRequest('http://localhost:3000/api/google/callback?error=access_denied&error_description=RawInternalGoogleError');
+      const res = await GET(req);
+
+      expect(res.status).toBe(307);
+      const loc = res.headers.get('location') || '';
+      expect(loc).toContain('oauth_error=oauth_access_denied');
+      expect(loc).not.toContain('RawInternalGoogleError');
+    });
+
+    it('sanitizes missing code into oauth_missing_code', async () => {
+      const { GET } = await import('../src/app/api/google/callback/route');
+      const { NextRequest } = await import('next/server');
+
+      const req = new NextRequest('http://localhost:3000/api/google/callback');
+      const res = await GET(req);
+
+      expect(res.status).toBe(307);
+      const loc = res.headers.get('location') || '';
+      expect(loc).toContain('oauth_error=oauth_missing_code');
+    });
+
+    it('sanitizes CSRF state mismatch into oauth_state_mismatch', async () => {
+      const { GET } = await import('../src/app/api/google/callback/route');
+      const { NextRequest } = await import('next/server');
+
+      const req = new NextRequest('http://localhost:3000/api/google/callback?code=mock_code&state=forged_state', {
+        headers: {
+          cookie: 'oauth_state=real_state; oauth_verifier=verifier',
+        },
+      });
+      const res = await GET(req);
+
+      expect(res.status).toBe(307);
+      const loc = res.headers.get('location') || '';
+      expect(loc).toContain('oauth_error=oauth_state_mismatch');
+      expect(loc).not.toContain('forged_state');
+    });
+  });
 });

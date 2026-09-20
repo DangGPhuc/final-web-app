@@ -41,34 +41,50 @@ export function SettingsView() {
   const [lastSyncStats, setLastSyncStats] = useState<SyncResultStats | null>(null);
 
   // Bind continuation state to original parameters (accountId, fromDate, toDate)
-  const [continuationBinding, setContinuationBinding] = useState<{
-    accountId: string;
+  // Continuation binding to lock query params
+  const [quickScanContinuationBinding, setQuickScanContinuationBinding] = useState<{
+    accountId?: string;
+    quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
+  } | null>(null);
+
+  const [historicalContinuationBinding, setHistoricalContinuationBinding] = useState<{
+    accountId?: string;
     fromDate: string;
     toDate: string;
   } | null>(null);
 
-  const isContinuationActive =
+  const isQuickContinuationActive =
     Boolean(lastSyncStats?.truncated) &&
+    lastSyncStats?.mode === 'QUICK' &&
     Boolean(
-      continuationBinding &&
-      continuationBinding.accountId === selectedAccountForSync &&
-      continuationBinding.fromDate === fromDate &&
-      continuationBinding.toDate === toDate
+      quickScanContinuationBinding &&
+      quickScanContinuationBinding.accountId === selectedAccountForSync
+    );
+
+  const isHistoricalContinuationActive =
+    Boolean(lastSyncStats?.truncated) &&
+    lastSyncStats?.mode === 'HISTORICAL' &&
+    Boolean(
+      historicalContinuationBinding &&
+      historicalContinuationBinding.accountId === selectedAccountForSync &&
+      historicalContinuationBinding.fromDate === fromDate &&
+      historicalContinuationBinding.toDate === toDate
     );
 
   const handleAccountChange = (val: string) => {
     setSelectedAccountForSync(val);
-    setContinuationBinding(null);
+    setQuickScanContinuationBinding(null);
+    setHistoricalContinuationBinding(null);
   };
 
   const handleFromDateChange = (val: string) => {
     setFromDate(val);
-    setContinuationBinding(null);
+    setHistoricalContinuationBinding(null);
   };
 
   const handleToDateChange = (val: string) => {
     setToDate(val);
-    setContinuationBinding(null);
+    setHistoricalContinuationBinding(null);
   };
 
   // Modals & confirmation states
@@ -79,8 +95,45 @@ export function SettingsView() {
 
   // Handle Quick Scan
   const handleQuickScan = async () => {
-    const stats = await syncEmail({ accountId: selectedAccountForSync });
-    if (stats) setLastSyncStats(stats);
+    setHistoricalContinuationBinding(null);
+    const stats = await syncEmail({
+      mode: 'QUICK',
+      accountId: selectedAccountForSync,
+    });
+    if (stats) {
+      setLastSyncStats(stats);
+      if (stats.truncated) {
+        setQuickScanContinuationBinding({
+          accountId: selectedAccountForSync,
+          quickScanBounds: stats.quickScanBounds,
+        });
+      } else {
+        setQuickScanContinuationBinding(null);
+      }
+    }
+  };
+
+  // Handle Quick Scan Continuation
+  const handleContinueQuickScan = async () => {
+    if (!isQuickContinuationActive || !lastSyncStats || !quickScanContinuationBinding) return;
+    const stats = await syncEmail({
+      mode: 'QUICK',
+      accountId: quickScanContinuationBinding.accountId,
+      pageToken: lastSyncStats.nextPageToken,
+      accountContinuationTokens: lastSyncStats.accountContinuationTokens,
+      quickScanBounds: quickScanContinuationBinding.quickScanBounds,
+    });
+    if (stats) {
+      setLastSyncStats(stats);
+      if (stats.truncated) {
+        setQuickScanContinuationBinding({
+          accountId: quickScanContinuationBinding.accountId,
+          quickScanBounds: stats.quickScanBounds || quickScanContinuationBinding.quickScanBounds,
+        });
+      } else {
+        setQuickScanContinuationBinding(null);
+      }
+    }
   };
 
   // Handle Historical Import
@@ -91,8 +144,10 @@ export function SettingsView() {
       return;
     }
     setDateError(null);
+    setQuickScanContinuationBinding(null);
 
     const stats = await syncEmail({
+      mode: 'HISTORICAL',
       accountId: selectedAccountForSync,
       fromDate,
       toDate,
@@ -100,31 +155,32 @@ export function SettingsView() {
     if (stats) {
       setLastSyncStats(stats);
       if (stats.truncated) {
-        setContinuationBinding({
+        setHistoricalContinuationBinding({
           accountId: selectedAccountForSync,
           fromDate,
           toDate,
         });
       } else {
-        setContinuationBinding(null);
+        setHistoricalContinuationBinding(null);
       }
     }
   };
 
-  // Handle Continuation Import for truncated scans
-  const handleContinueImport = async () => {
-    if (!isContinuationActive || !lastSyncStats || !continuationBinding) return;
+  // Handle Continuation Import for truncated historical scans
+  const handleContinueHistoricalImport = async () => {
+    if (!isHistoricalContinuationActive || !lastSyncStats || !historicalContinuationBinding) return;
     const stats = await syncEmail({
-      accountId: continuationBinding.accountId,
-      fromDate: continuationBinding.fromDate,
-      toDate: continuationBinding.toDate,
+      mode: 'HISTORICAL',
+      accountId: historicalContinuationBinding.accountId,
+      fromDate: historicalContinuationBinding.fromDate,
+      toDate: historicalContinuationBinding.toDate,
       pageToken: lastSyncStats.nextPageToken,
       accountContinuationTokens: lastSyncStats.accountContinuationTokens,
     });
     if (stats) {
       setLastSyncStats(stats);
       if (!stats.truncated) {
-        setContinuationBinding(null);
+        setHistoricalContinuationBinding(null);
       }
     }
   };
@@ -406,8 +462,30 @@ export function SettingsView() {
               </div>
             </div>
 
-            {/* Continuation Banner */}
-            {isContinuationActive && (
+            {/* Quick Scan Continuation Banner */}
+            {isQuickContinuationActive && (
+              <div className="p-3 rounded-lg bg-cyan-500/10 border border-cyan-500/25 text-xs text-cyan-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-2">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-[#00b3dd]" />
+                  <div>
+                    <div className="font-medium text-white">Quét email mới chưa hoàn tất.</div>
+                    <div className="text-[11px] text-cyan-200/80">Vẫn còn email cần xử lý.</div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleContinueQuickScan}
+                  disabled={isSyncing}
+                  className="btn-primary text-xs py-1.5 px-3 bg-[#00b3dd] hover:bg-[#0099bd] text-white shrink-0 flex items-center gap-1.5"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>{isSyncing ? 'Đang quét...' : 'Tiếp tục quét'}</span>
+                </button>
+              </div>
+            )}
+
+            {/* Historical Import Continuation Banner */}
+            {isHistoricalContinuationActive && (
               <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/25 text-xs text-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-2">
                 <div className="flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
@@ -418,7 +496,7 @@ export function SettingsView() {
                 </div>
                 <button
                   type="button"
-                  onClick={handleContinueImport}
+                  onClick={handleContinueHistoricalImport}
                   disabled={isSyncing}
                   className="btn-primary text-xs py-1.5 px-3 bg-amber-600 hover:bg-amber-500 text-white shrink-0 flex items-center gap-1.5"
                 >

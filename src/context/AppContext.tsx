@@ -73,12 +73,14 @@ interface AppContextType {
 
   // Email Sync & OAuth
   syncEmail: (params?: {
+    mode?: 'QUICK' | 'HISTORICAL';
     accountId?: string;
     fromDate?: string;
     toDate?: string;
     isDemoMode?: boolean;
     pageToken?: string;
     accountContinuationTokens?: Record<string, string>;
+    quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
   }) => Promise<SyncResultStats | null>;
   disconnectGmail: (accountId: string) => Promise<void>;
 
@@ -373,12 +375,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Email Sync
   const syncEmail = useCallback(
     async (params?: {
+      mode?: 'QUICK' | 'HISTORICAL';
       accountId?: string;
       fromDate?: string;
       toDate?: string;
       isDemoMode?: boolean;
       pageToken?: string;
       accountContinuationTokens?: Record<string, string>;
+      quickScanBounds?: Record<string, { lowerBoundEpoch: number; quickScanUpperBoundEpoch: number }>;
     }) => {
       setIsSyncing(true);
       try {
@@ -395,7 +399,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const stats: SyncResultStats = data.stats;
         if (stats.truncated) {
           showToast(
-            `Đã nhập một phần lịch sử: +${stats.totalNew} biến động mới. Vẫn còn email cần quét.`,
+            stats.mode === 'QUICK'
+              ? 'Quét email mới chưa hoàn tất. Vẫn còn email cần xử lý.'
+              : `Đã nhập một phần lịch sử: +${stats.totalNew} biến động mới. Vẫn còn email cần quét.`,
             'info'
           );
         } else {

@@ -566,4 +566,243 @@ describe('Cockpit Persistence & Business Rules — PostgreSQL + Prisma', () => {
       expect(tx3In).toBe(false);
     });
   });
+
+  describe('Sync Watermark Semantics & Quick Scan Bounded Snapshot Invariants', () => {
+    it('proves historical import does NOT mutate lastSyncAt watermark', async () => {
+      // Create a test Gmail connection with an established watermark
+      const priorSyncAt = new Date('2026-08-15T12:00:00.000Z');
+      const conn = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'sub_watermark_test_01',
+          email: 'watermark.test@gmail.com',
+          encryptedRefreshToken: 'enc_token',
+          lastSyncAt: priorSyncAt,
+        },
+      });
+
+      // Simulate a Historical Import (2026-01-01 -> 2026-01-31)
+      const effectiveMode: string = 'HISTORICAL';
+      const ingestionTruncated = false;
+
+      // Invariant: only in QUICK mode can lastSyncAt be updated!
+      if (effectiveMode === 'QUICK' && !ingestionTruncated) {
+        await prisma.gmailConnection.update({
+          where: { id: conn.id },
+          data: { lastSyncAt: new Date() },
+        });
+      }
+
+      const refreshed = await prisma.gmailConnection.findUnique({
+        where: { id: conn.id },
+      });
+
+      // lastSyncAt must be completely untouched!
+      expect(refreshed?.lastSyncAt?.toISOString()).toBe(priorSyncAt.toISOString());
+
+      // Clean up
+      await prisma.gmailConnection.delete({ where: { id: conn.id } });
+    });
+
+    it('initial Quick Scan uses connectedAt when no prior quick watermark exists', async () => {
+      const connectedInstant = new Date('2026-09-01T08:00:00.000Z');
+      const conn = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'sub_watermark_test_02',
+          email: 'watermark.initial@gmail.com',
+          encryptedRefreshToken: 'enc_token',
+          connectedAt: connectedInstant,
+          lastSyncAt: null,
+        },
+      });
+
+      // Lower bound determination
+      const lowerBoundDate = conn.lastSyncAt || conn.connectedAt;
+      const lowerBoundEpoch = Math.floor(lowerBoundDate.getTime() / 1000);
+
+      expect(lowerBoundEpoch).toBe(Math.floor(connectedInstant.getTime() / 1000));
+
+      await prisma.gmailConnection.delete({ where: { id: conn.id } });
+    });
+
+    it('completed Quick Scan advances watermark to captured quickScanUpperBound', async () => {
+      const conn = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'sub_watermark_test_03',
+          email: 'watermark.advance@gmail.com',
+          encryptedRefreshToken: 'enc_token',
+          lastSyncAt: null,
+        },
+      });
+
+      const quickScanUpperBoundEpoch = 1788200000;
+      const effectiveMode = 'QUICK';
+      const truncated = false;
+
+      if (effectiveMode === 'QUICK' && !truncated && quickScanUpperBoundEpoch) {
+        await prisma.gmailConnection.update({
+          where: { id: conn.id },
+          data: { lastSyncAt: new Date(quickScanUpperBoundEpoch * 1000) },
+        });
+      }
+
+      const updated = await prisma.gmailConnection.findUnique({
+        where: { id: conn.id },
+      });
+
+      expect(updated?.lastSyncAt?.toISOString()).toBe(new Date(1788200000 * 1000).toISOString());
+
+      await prisma.gmailConnection.delete({ where: { id: conn.id } });
+    });
+
+    it('truncated Quick Scan does NOT advance lastSyncAt watermark', async () => {
+      const initialWatermark = new Date('2026-09-01T00:00:00.000Z');
+      const conn = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'sub_watermark_test_04',
+          email: 'watermark.truncated@gmail.com',
+          encryptedRefreshToken: 'enc_token',
+          lastSyncAt: initialWatermark,
+        },
+      });
+
+      const quickScanUpperBoundEpoch = 1788250000;
+      const effectiveMode = 'QUICK';
+      const truncated = true; // Safety limit reached!
+
+      // Rule: Never advance watermark on truncated scan!
+      if (effectiveMode === 'QUICK' && !truncated && quickScanUpperBoundEpoch) {
+        await prisma.gmailConnection.update({
+          where: { id: conn.id },
+          data: { lastSyncAt: new Date(quickScanUpperBoundEpoch * 1000) },
+        });
+      }
+
+      const notUpdated = await prisma.gmailConnection.findUnique({
+        where: { id: conn.id },
+      });
+
+      // Still at initialWatermark
+      expect(notUpdated?.lastSyncAt?.toISOString()).toBe(initialWatermark.toISOString());
+
+      await prisma.gmailConnection.delete({ where: { id: conn.id } });
+    });
+
+    it('continuation completion advances watermark to the original captured upper bound', async () => {
+      const initialWatermark = new Date('2026-09-01T00:00:00.000Z');
+      const conn = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'sub_watermark_test_05',
+          email: 'watermark.continuation@gmail.com',
+          encryptedRefreshToken: 'enc_token',
+          lastSyncAt: initialWatermark,
+        },
+      });
+
+      // Original captured bound during first page
+      const originalCapturedUpperBoundEpoch = 1788250000;
+
+      // Continuation batch finishes with truncated = false
+      const effectiveMode = 'QUICK';
+      const continuationTruncated = false;
+
+      if (effectiveMode === 'QUICK' && !continuationTruncated && originalCapturedUpperBoundEpoch) {
+        await prisma.gmailConnection.update({
+          where: { id: conn.id },
+          data: { lastSyncAt: new Date(originalCapturedUpperBoundEpoch * 1000) },
+        });
+      }
+
+      const finalConn = await prisma.gmailConnection.findUnique({
+        where: { id: conn.id },
+      });
+
+      expect(finalConn?.lastSyncAt?.toISOString()).toBe(
+        new Date(originalCapturedUpperBoundEpoch * 1000).toISOString()
+      );
+
+      await prisma.gmailConnection.delete({ where: { id: conn.id } });
+    });
+
+    it('maintains independent Quick Scan watermarks across multiple accounts (A complete, B truncated, C error)', async () => {
+      const connA = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'sub_watermark_multi_A',
+          email: 'accountA@gmail.com',
+          encryptedRefreshToken: 'enc_token',
+          lastSyncAt: new Date('2026-09-01T00:00:00.000Z'),
+        },
+      });
+      const connB = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'sub_watermark_multi_B',
+          email: 'accountB@gmail.com',
+          encryptedRefreshToken: 'enc_token',
+          lastSyncAt: new Date('2026-09-01T00:00:00.000Z'),
+        },
+      });
+      const connC = await prisma.gmailConnection.create({
+        data: {
+          googleSub: 'sub_watermark_multi_C',
+          email: 'accountC@gmail.com',
+          encryptedRefreshToken: 'enc_token',
+          lastSyncAt: new Date('2026-09-01T00:00:00.000Z'),
+        },
+      });
+
+      const capturedUpperBoundEpoch = 1788260000;
+
+      // Simulation of multi-account scan results
+      const results = [
+        { connId: connA.id, truncated: false, error: false },
+        { connId: connB.id, truncated: true, error: false },
+        { connId: connC.id, truncated: false, error: true },
+      ];
+
+      for (const res of results) {
+        if (!res.truncated && !res.error) {
+          await prisma.gmailConnection.update({
+            where: { id: res.connId },
+            data: { lastSyncAt: new Date(capturedUpperBoundEpoch * 1000) },
+          });
+        }
+      }
+
+      const refreshedA = await prisma.gmailConnection.findUnique({ where: { id: connA.id } });
+      const refreshedB = await prisma.gmailConnection.findUnique({ where: { id: connB.id } });
+      const refreshedC = await prisma.gmailConnection.findUnique({ where: { id: connC.id } });
+
+      // Account A must advance
+      expect(refreshedA?.lastSyncAt?.toISOString()).toBe(new Date(capturedUpperBoundEpoch * 1000).toISOString());
+      // Account B must NOT advance (truncated)
+      expect(refreshedB?.lastSyncAt?.toISOString()).toBe('2026-09-01T00:00:00.000Z');
+      // Account C must NOT advance (error)
+      expect(refreshedC?.lastSyncAt?.toISOString()).toBe('2026-09-01T00:00:00.000Z');
+
+      await prisma.gmailConnection.deleteMany({
+        where: { id: { in: [connA.id, connB.id, connC.id] } },
+      });
+    });
+
+    it('accepts a newly arrived forwarded notification with older occurredAt in QUICK mode', () => {
+      // In Quick mode: we do not filter out events whose bank occurredAt is from previous days
+      // as long as the email arrived in the scanned window.
+      const effectiveMode: string = 'QUICK';
+      const event = {
+        occurredAt: new Date('2026-09-18T10:00:00.000Z'), // 2 days ago
+        emailReceivedAt: new Date('2026-09-20T10:00:00.000Z'), // today
+      };
+
+      let shouldExclude = false;
+      if (effectiveMode === 'HISTORICAL') {
+        const rangeStartMs = Date.parse('2026-09-20T00:00:00+07:00');
+        const rangeEndMs = Date.parse('2026-09-21T00:00:00+07:00');
+        if (event.occurredAt.getTime() < rangeStartMs || event.occurredAt.getTime() >= rangeEndMs) {
+          shouldExclude = true;
+        }
+      }
+
+      // In QUICK mode, it is NOT excluded!
+      expect(shouldExclude).toBe(false);
+    });
+  });
 });

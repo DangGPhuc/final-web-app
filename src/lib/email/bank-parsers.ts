@@ -13,6 +13,7 @@
 
 import crypto from 'crypto';
 import { detectMerchantContext } from '@/lib/finance/calculations';
+import { isValidCalendarDate } from '@/lib/date';
 
 export interface RawEmailData {
   id: string;
@@ -63,6 +64,7 @@ export function extractBankRefId(text: string): string | undefined {
  * Parse actual transaction timestamp from bank notification text.
  * Vietnamese bank notifications are formatted in local time (Asia/Ho_Chi_Minh, UTC+7).
  * Returns Date object in UTC, or null if no valid bank timestamp was found.
+ * Strictly validates calendar dates (e.g. 31/02/2026 returns null instead of normalizing to March).
  */
 export function parseVietnameseBankTimestamp(text: string): Date | null {
   // Pattern 1: DD/MM/YYYY [at|lúc|,| ] HH:mm(:ss)?
@@ -75,6 +77,14 @@ export function parseVietnameseBankTimestamp(text: string): Date | null {
     const hour = m1[4] ? m1[4].padStart(2, '0') : '12';
     const min = m1[5] ? m1[5].padStart(2, '0') : '00';
     const sec = m1[6] ? m1[6].padStart(2, '0') : '00';
+
+    const dNum = parseInt(day, 10);
+    const mNum = parseInt(month, 10);
+    const yNum = parseInt(year, 10);
+
+    if (!isValidCalendarDate(yNum, mNum, dNum)) {
+      return null;
+    }
 
     const isoString = `${year}-${month}-${day}T${hour}:${min}:${sec}+07:00`;
     const d = new Date(isoString);
@@ -93,6 +103,14 @@ export function parseVietnameseBankTimestamp(text: string): Date | null {
     const day = m2[4].padStart(2, '0');
     const month = m2[5].padStart(2, '0');
     const year = m2[6];
+
+    const dNum = parseInt(day, 10);
+    const mNum = parseInt(month, 10);
+    const yNum = parseInt(year, 10);
+
+    if (!isValidCalendarDate(yNum, mNum, dNum)) {
+      return null;
+    }
 
     const isoString = `${year}-${month}-${day}T${hour}:${min}:${sec}+07:00`;
     const d = new Date(isoString);

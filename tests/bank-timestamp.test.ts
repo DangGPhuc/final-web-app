@@ -49,6 +49,49 @@ describe('Bank Transaction Timestamp & Notification Parsing', () => {
     });
   });
 
+  describe('Strict Calendar Date Validation (Leap Years & Impossible Days)', () => {
+    it('accepts 2026-02-28 as valid standard year February end', () => {
+      expect(() => vietnamMidnightToEpochSeconds('2026-02-28')).not.toThrow();
+    });
+
+    it('accepts 2028-02-29 as valid leap year February leap day', () => {
+      expect(() => vietnamMidnightToEpochSeconds('2028-02-29')).not.toThrow();
+    });
+
+    it('rejects 2026-02-29 as invalid non-leap year date', () => {
+      expect(() => vietnamMidnightToEpochSeconds('2026-02-29')).toThrow(/không tồn tại trong lịch/);
+    });
+
+    it('rejects 2026-02-31 as impossible calendar date', () => {
+      expect(() => vietnamMidnightToEpochSeconds('2026-02-31')).toThrow(/không tồn tại trong lịch/);
+    });
+
+    it('rejects 2026-13-01 as impossible month', () => {
+      expect(() => vietnamMidnightToEpochSeconds('2026-13-01')).toThrow(/không tồn tại trong lịch/);
+    });
+
+    it('does NOT normalize invalid bank calendar dates like 31/02/2026 into March', () => {
+      const parsed = parseVietnameseBankTimestamp('Giao dich thuc hien luc 31/02/2026 09:30');
+      // Must return null, NOT March 3rd!
+      expect(parsed).toBeNull();
+    });
+
+    it('falls back to emailReceivedAt when notification contains an invalid bank calendar date', () => {
+      const email: RawEmailData = {
+        id: 'msg_invalid_date_001',
+        from: 'vietcombank@vcb.com.vn',
+        subject: 'VCB: TK ••••1234| GD: -100,000 VND | 31/02/2026 09:30 | Cafe',
+        snippet: 'VCB: TK ••••1234| GD: -100,000 VND | 31/02/2026 09:30',
+        bodyText: 'VCB: TK ••••1234| GD: -100,000 VND | 31/02/2026 09:30',
+        date: '2026-09-05T09:35:00.000Z',
+      };
+      const result = parseBankNotification(email);
+      expect(result).not.toBeNull();
+      // Should fall back to emailReceivedAt, not silently normalize to March 3rd
+      expect(result!.occurredAt.toISOString()).toBe('2026-09-05T09:35:00.000Z');
+    });
+  });
+
   describe('Vietnam Calendar Date Boundaries to Unix Epoch Seconds', () => {
     it('proves 2026-09-01 Vietnam local midnight produces the correct UTC/epoch instant', () => {
       const epochSeconds = vietnamMidnightToEpochSeconds('2026-09-01');
